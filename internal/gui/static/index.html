@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chemweb Launcher</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="mark">CW</span>
+        <div>
+          <h1>Chemweb Launcher</h1>
+          <p>Remote Chemweb launcher · <span id="appVersion">v...</span></p>
+        </div>
+      </div>
+      <div class="profile-actions">
+        <button id="newProfile" class="primary">New Profile</button>
+        <button id="refreshProfiles">Refresh</button>
+      </div>
+      <nav id="profiles" class="profiles"></nav>
+    </aside>
+
+    <main class="workspace">
+      <section class="toolbar">
+        <div>
+          <h2 id="heading">Profile</h2>
+          <p id="summary">Create or select a remote server profile.</p>
+        </div>
+        <div class="runbar">
+          <span id="notice" class="notice"></span>
+          <span id="status" class="status">Idle</span>
+          <button id="testProfile">Test SSH</button>
+          <button id="startSession" class="primary">Start</button>
+          <button id="stopSession" class="danger">Stop</button>
+        </div>
+      </section>
+
+      <section class="content">
+        <form id="profileForm" class="editor">
+          <input type="hidden" id="profileId" />
+
+          <fieldset>
+            <legend>Server</legend>
+            <label>Name<input id="name" required /></label>
+            <label>SSH Host<input id="sshHost" required /></label>
+            <label>SSH Port<input id="sshPort" type="number" min="1" max="65535" /></label>
+            <label>SSH User<input id="sshUser" required /></label>
+            <label>Auth Method<select id="authMethod"><option value="password">Password</option><option value="private_key">Private Key</option></select></label>
+            <label class="key-field">Private Key Path<input id="privateKeyPath" /></label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Secrets</legend>
+            <div class="secret-line password-field">
+              <label>Password<input id="passwordDisplay" type="password" readonly title="Saved secrets are never displayed. Click Edit to replace or clear this value." /></label>
+              <button id="editPassword" type="button">Edit</button>
+            </div>
+            <div class="secret-line key-field">
+              <label>Key Passphrase<input id="passphraseDisplay" type="password" readonly title="Saved secrets are never displayed. Click Edit to replace or clear this value." /></label>
+              <button id="editPassphrase" type="button">Edit</button>
+            </div>
+            <input id="password" type="password" autocomplete="new-password" hidden />
+            <input id="passphrase" type="password" autocomplete="new-password" hidden />
+          </fieldset>
+
+          <fieldset>
+            <legend>Tunnel</legend>
+            <label>Remote Host<input id="remoteHost" /></label>
+            <label>Remote Port<input id="remotePort" type="number" min="1" max="65535" /></label>
+            <label>Local Host<input id="localHost" /></label>
+            <label>Local Port<input id="localPort" type="number" min="1" max="65535" /></label>
+            <label>Local URL Path<input id="localUrlPath" /></label>
+            <label>Health Check URL<input id="healthCheckUrl" /></label>
+            <label class="check"><input id="openBrowser" type="checkbox" /> Open browser after startup</label>
+          </fieldset>
+
+          <fieldset class="commands">
+            <legend>Remote Commands</legend>
+            <label>Pre-start Commands<textarea id="preStartCommands" rows="6"></textarea></label>
+            <label>Start Command<textarea id="startCommand" rows="4"></textarea><span class="hint">Remote Host and Remote Port are appended automatically when this command does not already include --host or --port.</span></label>
+          </fieldset>
+
+          <div class="form-actions">
+            <button type="submit" class="primary">Save Profile</button>
+            <button type="button" id="deleteProfile" class="danger">Delete</button>
+          </div>
+        </form>
+
+        <section class="logs">
+          <div class="logs-title">
+            <h2>Session Logs</h2>
+            <button id="refreshLogs">Refresh</button>
+          </div>
+          <pre id="logs"></pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
