@@ -19,9 +19,17 @@
         <form id="addressForm" class="address-form">
           <input id="address" autocomplete="off" spellcheck="false" />
         </form>
+        <button id="downloads" class="downloads-button" title="下载" aria-label="下载">
+          <svg aria-hidden="true" viewBox="0 0 20 20">
+            <path d="M10 3v9m0 0 4-4m-4 4L6 8" />
+            <path d="M4 15.5h12" />
+          </svg>
+        </button>
       </div>
     </header>
-    <main id="pages" class="pages"></main>
+    <main id="pages" class="pages">
+      <div id="downloadsBackdrop" class="downloads-backdrop" hidden></div>
+    </main>
     <nav id="tabMenu" class="context-menu" hidden>
       <button type="button" data-action="newRight">右侧新建标签页</button>
       <button type="button" data-action="reload">重新加载</button>

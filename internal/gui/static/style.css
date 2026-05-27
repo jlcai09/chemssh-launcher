@@ -34,9 +34,13 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
-  align-items: start;
+  align-items: stretch;
+  gap: 12px;
+  padding: 12px;
+  overflow: hidden;
   background: linear-gradient(180deg, #f4f7fa 0%, var(--bg) 42%, #e3e9ef 100%);
   color: var(--text);
   font-family: inherit;
@@ -105,12 +109,15 @@ button.danger:hover {
 }
 
 .sidebar {
-  min-height: 100vh;
-  border-right: 1px solid rgba(148, 163, 184, 0.34);
+  min-height: 0;
+  height: calc(100vh - 24px);
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.94);
   box-shadow: var(--shadow-md);
   backdrop-filter: blur(14px);
   padding: 20px;
+  overflow: auto;
 }
 
 .brand {
@@ -243,7 +250,10 @@ p {
 
 .workspace {
   min-width: 0;
-  min-height: 100vh;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
 }
 
 .toolbar {
@@ -253,9 +263,10 @@ p {
   justify-content: space-between;
   gap: 16px;
   padding: 18px 22px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.34);
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.82), 0 10px 26px rgba(31, 41, 55, 0.06);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.82), var(--shadow-md);
   backdrop-filter: blur(14px);
 }
 
@@ -345,8 +356,9 @@ p {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(520px, 1fr) 420px;
-  gap: 10px;
-  padding: 10px;
+  gap: 12px;
+  padding: 0;
+  overflow: hidden;
 }
 
 .editor,
@@ -360,6 +372,8 @@ p {
 
 .editor {
   padding: 18px;
+  min-height: 0;
+  overflow: auto;
 }
 
 fieldset {
@@ -461,8 +475,10 @@ textarea {
 
 .logs {
   min-width: 0;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto 1fr;
+  align-self: stretch;
 }
 
 .logs-title {
@@ -476,8 +492,9 @@ textarea {
 }
 
 .logs pre {
-  min-height: 480px;
-  max-height: calc(100vh - 150px);
+  height: 100%;
+  min-height: 0;
+  max-height: none;
   margin: 0;
   padding: 14px 16px;
   overflow: auto;
@@ -502,28 +519,40 @@ textarea {
 }
 
 .full-log pre {
+  height: auto;
   min-height: 0;
   max-height: none;
 }
 
 @media (max-width: 1080px) {
   body {
+    min-height: 100vh;
+    overflow: auto;
     height: auto;
     grid-template-columns: 1fr;
   }
 
   .sidebar {
     min-height: auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
+    height: auto;
   }
 
   .content {
     grid-template-columns: 1fr;
+    overflow: visible;
   }
 
   .workspace {
-    min-height: 760px;
+    min-height: 0;
+  }
+
+  .editor {
+    overflow: visible;
+  }
+
+  .logs pre {
+    height: auto;
+    min-height: 280px;
   }
 }
 

@@ -12,7 +12,7 @@ function absoluteURL(value) {
   if (text === "about:blank") return text;
   if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(text)) return text;
   if (text.startsWith("/")) return new URL(text, window.location.origin).href;
-  if (text.includes(".") || text.includes(":")) return `http://${text}`;
+  if (looksLikeNetworkAddress(text)) return `${defaultSchemeForAddress(text)}://${text}`;
   return new URL(text, window.location.origin).href;
 }
 
@@ -20,6 +20,20 @@ function normalizeAddressInput(value) {
   return String(value || "")
     .trim()
     .replace(/[\u3002\uff0e\uff61]/g, ".");
+}
+
+function looksLikeNetworkAddress(text) {
+  return text.includes(".") || text.includes(":");
+}
+
+function defaultSchemeForAddress(text) {
+  const host = text
+    .split(/[/?#]/, 1)[0]
+    .replace(/^\[/, "")
+    .replace(/\]$/, "")
+    .split(":", 1)[0]
+    .toLowerCase();
+  return host.startsWith("127.") ? "http" : "https";
 }
 
 function shortTitle(url) {
@@ -34,6 +48,10 @@ function shortTitle(url) {
   } catch (_) {
     return url;
   }
+}
+
+function displayURL(url) {
+  return url === "about:blank" ? "" : url;
 }
 
 function tabList() {
@@ -115,7 +133,7 @@ function activateTab(id) {
     tab.tab.setAttribute("aria-selected", active ? "true" : "false");
     tab.page.classList.toggle("active", active);
   }
-  $("address").value = item.url;
+  $("address").value = displayURL(item.url);
   updateNavButtons();
 }
 
@@ -148,13 +166,50 @@ function navigateTab(id, url, addHistory = true) {
     item.historyIndex = item.history.length - 1;
   }
   if (id === activeID) {
-    $("address").value = item.url;
+    $("address").value = displayURL(item.url);
     updateNavButtons();
   }
 }
 
 function navigateActive(url) {
   navigateTab(activeID, url, true);
+}
+
+async function openDownloadsPanel() {
+  const button = $("downloads");
+  if (button) button.disabled = true;
+  try {
+    if (typeof window.chemwebOpenDownloads !== "function") {
+      throw new Error("当前浏览器不支持内置下载面板入口");
+    }
+    await window.chemwebOpenDownloads();
+    showDownloadsBackdrop();
+  } catch (err) {
+    console.error("open downloads panel failed", err);
+    alert(`无法打开下载历史：${err.message || err}`);
+    hideDownloadsBackdrop();
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function closeDownloadsPanel() {
+  hideDownloadsBackdrop();
+  if (typeof window.chemwebCloseDownloads !== "function") return;
+  try {
+    await window.chemwebCloseDownloads();
+  } catch (_) {
+  }
+}
+
+function showDownloadsBackdrop() {
+  const backdrop = $("downloadsBackdrop");
+  if (backdrop) backdrop.hidden = false;
+}
+
+function hideDownloadsBackdrop() {
+  const backdrop = $("downloadsBackdrop");
+  if (backdrop) backdrop.hidden = true;
 }
 
 function reloadTab(id) {
@@ -193,7 +248,7 @@ function syncLoadedURL(id) {
       item.history = item.history.slice(0, item.historyIndex + 1);
       item.history.push(loaded);
       item.historyIndex = item.history.length - 1;
-      if (id === activeID) $("address").value = loaded;
+      if (id === activeID) $("address").value = displayURL(loaded);
     }
   } catch (_) {
   }
@@ -357,6 +412,16 @@ $("addressForm").addEventListener("submit", (event) => {
   navigateActive($("address").value);
 });
 $("reload").addEventListener("click", () => reloadTab(activeID));
+$("downloads").addEventListener("click", openDownloadsPanel);
+$("downloadsBackdrop").addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeDownloadsPanel();
+});
+$("downloadsBackdrop").addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  closeDownloadsPanel();
+});
 $("newTab").addEventListener("click", () => createTab("新标签页", "about:blank", false, true));
 $("back").addEventListener("click", goBack);
 $("forward").addEventListener("click", goForward);
@@ -377,6 +442,10 @@ document.addEventListener("click", () => {
   hideTabMenu();
   hideEditMenu();
 });
+document.addEventListener("pointerdown", (event) => {
+  if (event.target.closest("#downloads")) return;
+  closeDownloadsPanel();
+});
 window.addEventListener("blur", () => {
   hideTabMenu();
   hideEditMenu();
@@ -391,6 +460,9 @@ window.addEventListener("message", (event) => {
   const data = event.data || {};
   if (data.type === "chemweb-launcher:new-tab" && data.url) {
     openOrFocus(shortTitle(data.url), data.url);
+  }
+  if (data.type === "chemweb-launcher:close-downloads") {
+    closeDownloadsPanel();
   }
 });
 

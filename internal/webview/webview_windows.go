@@ -43,6 +43,9 @@ func Open(ctx context.Context, opts Options) error {
 	}
 	defer w.Destroy()
 	configureChromium(w, opts)
+	if err := bindDownloadDialog(w); err != nil {
+		log.Printf("warning: could not bind WebView2 downloads dialog: %v", err)
+	}
 
 	title := opts.Title
 	if title == "" {
@@ -61,6 +64,7 @@ func Open(ctx context.Context, opts Options) error {
 	w.SetSize(width, height, webview2.HintNone)
 	setWindowIcon(w.Window())
 	if opts.Fullscreen {
+		setLargeRestoreBounds(w.Window())
 		maximizeWindow(w.Window())
 	}
 	if opts.CopyOnCtrlShiftC || opts.DisableDevTools {
@@ -89,11 +93,11 @@ type webViewSettingsProvider interface {
 }
 
 func configureChromium(w webview2.WebView, opts Options) {
-	provider, ok := chromiumSettingsProvider(w)
+	chromium, ok := chromiumFromWebView(w)
 	if !ok {
 		return
 	}
-	settings, err := provider.GetSettings()
+	settings, err := chromium.GetSettings()
 	if err != nil {
 		log.Printf("warning: could not get WebView2 settings: %v", err)
 		return
@@ -113,7 +117,7 @@ func configureChromium(w webview2.WebView, opts Options) {
 	}
 }
 
-func chromiumSettingsProvider(w webview2.WebView) (webViewSettingsProvider, bool) {
+func chromiumFromWebView(w webview2.WebView) (*edge.Chromium, bool) {
 	value := reflect.ValueOf(w)
 	if value.Kind() != reflect.Pointer || value.IsNil() {
 		return nil, false
@@ -127,8 +131,76 @@ func chromiumSettingsProvider(w webview2.WebView) (webViewSettingsProvider, bool
 		return nil, false
 	}
 	browser := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Interface()
-	provider, ok := browser.(webViewSettingsProvider)
-	return provider, ok
+	chromium, ok := browser.(*edge.Chromium)
+	return chromium, ok
+}
+
+func bindDownloadDialog(w webview2.WebView) error {
+	if err := w.Bind("chemwebOpenDownloads", func() error {
+		return openDefaultDownloadDialog(w)
+	}); err != nil {
+		return err
+	}
+	return w.Bind("chemwebCloseDownloads", func() error {
+		return closeDefaultDownloadDialog(w)
+	})
+}
+
+type rawIUnknownVtbl struct {
+	QueryInterface edge.ComProc
+	AddRef         edge.ComProc
+	Release        edge.ComProc
+}
+
+type rawCoreWebView2 struct {
+	vtbl *rawIUnknownVtbl
+}
+
+type rawCoreWebView2_9 struct {
+	vtbl *[97]edge.ComProc
+}
+
+func openDefaultDownloadDialog(w webview2.WebView) error {
+	return callDefaultDownloadDialog(w, 91, "open WebView2 downloads dialog")
+}
+
+func closeDefaultDownloadDialog(w webview2.WebView) error {
+	return callDefaultDownloadDialog(w, 92, "close WebView2 downloads dialog")
+}
+
+func callDefaultDownloadDialog(w webview2.WebView, methodIndex int, action string) error {
+	chromium, ok := chromiumFromWebView(w)
+	if !ok {
+		return errors.New("WebView2 browser is not available")
+	}
+	value := reflect.ValueOf(chromium)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return errors.New("WebView2 browser is not initialized")
+	}
+	field := value.Elem().FieldByName("webview")
+	if !field.IsValid() || field.IsNil() {
+		return errors.New("WebView2 core is not available")
+	}
+	core := (*rawCoreWebView2)(unsafe.Pointer(field.Pointer()))
+	iid := edge.NewGUID("{4D7B2EAB-9FDC-468D-B998-A9260B5ED651}")
+	if iid == nil {
+		return errors.New("invalid ICoreWebView2_9 GUID")
+	}
+	var dialog *rawCoreWebView2_9
+	hr, _, _ := core.vtbl.QueryInterface.Call(
+		uintptr(unsafe.Pointer(core)),
+		uintptr(unsafe.Pointer(iid)),
+		uintptr(unsafe.Pointer(&dialog)),
+	)
+	if int32(hr) < 0 || dialog == nil {
+		return fmt.Errorf("WebView2 downloads dialog is not available: HRESULT 0x%08X", uint32(hr))
+	}
+	defer dialog.vtbl[2].Call(uintptr(unsafe.Pointer(dialog)))
+	hr, _, _ = dialog.vtbl[methodIndex].Call(uintptr(unsafe.Pointer(dialog)))
+	if int32(hr) < 0 {
+		return fmt.Errorf("%s: HRESULT 0x%08X", action, uint32(hr))
+	}
+	return nil
 }
 
 func acceleratorScript(opts Options) string {
@@ -197,6 +269,17 @@ func acceleratorScript(opts Options) string {
       event.stopImmediatePropagation();
     }
   }, true);
+  window.addEventListener("pointerdown", (event) => {
+    const target = event.target;
+    if (target && target.closest && target.closest("#downloads")) return;
+    if (typeof window.chemwebCloseDownloads === "function") {
+      window.chemwebCloseDownloads().catch(() => {});
+      return;
+    }
+    try {
+      window.top.postMessage({ type: "chemweb-launcher:close-downloads" }, "*");
+    } catch (_) {}
+  }, true);
 })();`, disableDevTools, copyOnCtrlShiftC)
 }
 
@@ -237,6 +320,49 @@ func maximizeWindow(hwndPointer unsafe.Pointer) {
 	}
 	const swMaximize = uintptr(3)
 	showWindow.Call(uintptr(hwndPointer), swMaximize)
+}
+
+func setLargeRestoreBounds(hwndPointer unsafe.Pointer) {
+	if hwndPointer == nil {
+		return
+	}
+	user32 := syscall.NewLazyDLL("user32.dll")
+	getSystemMetrics := user32.NewProc("GetSystemMetrics")
+	setWindowPos := user32.NewProc("SetWindowPos")
+	if err := getSystemMetrics.Find(); err != nil {
+		return
+	}
+	if err := setWindowPos.Find(); err != nil {
+		return
+	}
+	const (
+		smCXScreen    = uintptr(0)
+		smCYScreen    = uintptr(1)
+		swpNoZOrder   = uintptr(0x0004)
+		swpNoActivate = uintptr(0x0010)
+	)
+	screenW, _, _ := getSystemMetrics.Call(smCXScreen)
+	screenH, _, _ := getSystemMetrics.Call(smCYScreen)
+	if screenW == 0 || screenH == 0 {
+		return
+	}
+	width := int(screenW * 86 / 100)
+	height := int(screenH * 86 / 100)
+	if width < 1280 {
+		width = 1280
+	}
+	if height < 820 {
+		height = 820
+	}
+	if width > int(screenW) {
+		width = int(screenW)
+	}
+	if height > int(screenH) {
+		height = int(screenH)
+	}
+	x := (int(screenW) - width) / 2
+	y := (int(screenH) - height) / 2
+	setWindowPos.Call(uintptr(hwndPointer), 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height), swpNoZOrder|swpNoActivate)
 }
 
 func setWindowIcon(hwndPointer unsafe.Pointer) {

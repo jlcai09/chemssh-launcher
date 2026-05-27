@@ -137,23 +137,31 @@ chemweb-launcher profile test <name-or-id>
 chemweb-launcher start <name-or-id>
 ```
 
+## 开发依赖
+
+开发和构建只需要安装 Go 1.22 或更新版本。
+
+本项目不需要 Python、Node、Electron，也不需要系统 `ssh` 命令。Go 会在首次构建或测试时自动下载 `go.mod` 里的模块依赖。
+
+Windows 图标和版本资源由构建工具自动生成，不需要手动安装 `go-winres`；首次运行 `go run ./tools/build` 时，Go 会自动下载 `github.com/tc-hib/go-winres`。如果构建 WebView2 版本，运行机器还需要 Microsoft Edge WebView2 Runtime；Windows 10/11 通常已经预装。
+
 ## 构建
 
 ```bash
-go build ./cmd/chemweb-launcher
+go run ./tools/build
 ```
 
-Windows 下会生成 `chemweb-launcher.exe`。
+Windows 下会生成 `chemweb-launcher.exe`。构建工具会先读取 `internal/version/VERSION`，同步 `winres/winres.json`，并重新生成 Windows 资源文件。
 
 默认构建不包含 WebView2。Windows 下可以单独构建 WebView2 版本：
 
 ```bash
-go build -tags webview2 -o chemweb-launcher-webview2.exe ./cmd/chemweb-launcher
+go run ./tools/build --webview2
 ```
 
 如果希望双击 WebView2 版本时不显示 PowerShell/控制台窗口，使用 Windows GUI 子系统构建：
 ```bash
-go build -tags webview2 -ldflags "-H=windowsgui" -o chemweb-launcher-webview2.exe ./cmd/chemweb-launcher
+go run ./tools/build --webview2 --windowsgui
 ```
 
 不带 `-H=windowsgui` 的控制台版本仍然适合调试，因为启动错误会打印到终端。
@@ -162,19 +170,13 @@ go build -tags webview2 -ldflags "-H=windowsgui" -o chemweb-launcher-webview2.ex
 
 ## 版本管理
 
-根目录快捷入口：
-
-```text
-VERSION
-```
-
-编译时嵌入的版本号同步保存在：
+版本号只需要修改：
 
 ```text
 internal/version/VERSION
 ```
 
-发布新版本前保持两个文件一致；如果不一致，测试会失败。版本号会显示在 GUI 左侧栏，也可以用命令查看：
+使用 `go run ./tools/build` 构建时，会自动把这个版本同步到 Windows 资源信息。版本号会显示在 GUI 左侧栏，也可以用命令查看：
 
 ```bash
 chemweb-launcher --version

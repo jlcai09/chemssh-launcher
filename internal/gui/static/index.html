@@ -51,7 +51,7 @@
             <legend data-i18n="server">服务器</legend>
             <label><span data-i18n="name">名称</span><input id="name" required /></label>
             <label><span data-i18n="sshHost">SSH 主机</span><input id="sshHost" required /></label>
-            <label><span data-i18n="sshPort">SSH 端口</span><input id="sshPort" type="number" min="1" max="65535" /></label>
+            <label><span data-i18n="sshPort">SSH 端口</span><input id="sshPort" inputmode="numeric" /></label>
             <label><span data-i18n="sshUser">SSH 用户</span><input id="sshUser" required /></label>
             <label><span data-i18n="authMethod">认证方式</span><select id="authMethod"><option value="password" data-i18n="passwordAuth">密码</option><option value="private_key" data-i18n="privateKeyAuth">私钥</option></select></label>
             <label class="key-field"><span data-i18n="privateKeyPath">私钥路径</span><input id="privateKeyPath" /></label>
@@ -74,9 +74,9 @@
           <fieldset>
             <legend data-i18n="tunnel">隧道</legend>
             <label><span data-i18n="remoteHost">远端主机</span><input id="remoteHost" /></label>
-            <label><span data-i18n="remotePort">远端端口</span><input id="remotePort" type="number" min="1" max="65535" /></label>
+            <label><span data-i18n="remotePort">远端端口</span><input id="remotePort" inputmode="numeric" /></label>
             <label><span data-i18n="localHost">本地主机</span><input id="localHost" /></label>
-            <label><span data-i18n="localPort">本地端口</span><input id="localPort" type="number" min="1" max="65535" /></label>
+            <label><span data-i18n="localPort">本地端口</span><input id="localPort" inputmode="numeric" /></label>
             <label><span data-i18n="localUrlPath">本地 URL 路径</span><input id="localUrlPath" /></label>
             <label><span data-i18n="healthCheckUrl">健康检查 URL</span><input id="healthCheckUrl" /></label>
             <label class="check"><input id="openBrowser" type="checkbox" /> <span data-i18n="openBrowser">启动后打开 Chemweb 标签页</span></label>

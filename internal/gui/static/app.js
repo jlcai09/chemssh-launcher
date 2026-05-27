@@ -327,10 +327,6 @@ function numberValue(id, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function preventNumberWheel(event) {
-  event.preventDefault();
-}
-
 async function saveProfile(event) {
   event.preventDefault();
   const rollback = maskEditedSecretsForSave();
@@ -612,9 +608,6 @@ $("editPassword").addEventListener("click", editPassword);
 $("editPassphrase").addEventListener("click", editPassphrase);
 $("passwordDisplay").addEventListener("input", syncPasswordEdit);
 $("passphraseDisplay").addEventListener("input", syncPassphraseEdit);
-document.querySelectorAll("input[type=number]").forEach((input) => {
-  input.addEventListener("wheel", preventNumberWheel, { passive: false });
-});
 $("language").addEventListener("change", () => {
   lang = $("language").value;
   localStorage.setItem("chemweb-launcher-language", lang);
