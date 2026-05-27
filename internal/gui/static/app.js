@@ -59,7 +59,7 @@ const messages = {
     localPort: "本地端口",
     localUrlPath: "本地 URL 路径",
     healthCheckUrl: "健康检查 URL",
-    openBrowser: "启动后打开浏览器",
+    openBrowser: "启动后打开 Chemweb 标签页",
     remoteCommands: "远端命令",
     preStartCommands: "预启动命令",
     startCommand: "启动命令",
@@ -135,7 +135,7 @@ const messages = {
     localPort: "Local Port",
     localUrlPath: "Local URL Path",
     healthCheckUrl: "Health Check URL",
-    openBrowser: "Open browser after startup",
+    openBrowser: "Open Chemweb tab after startup",
     remoteCommands: "Remote Commands",
     preStartCommands: "Pre-start Commands",
     startCommand: "Start Command",
@@ -450,8 +450,12 @@ async function refreshStatus() {
 async function refreshLogs() {
   const data = await api("/api/logs");
   const lines = Array.isArray(data.lines) ? data.lines : [];
-  $("logs").textContent = lines.join("\n");
-  $("logs").scrollTop = $("logs").scrollHeight;
+  const text = lines.join("\n");
+  const logs = $("logs");
+  if (logs) {
+    logs.textContent = text;
+    logs.scrollTop = logs.scrollHeight;
+  }
 }
 
 async function loadVersion() {
@@ -602,7 +606,7 @@ $("startSession").addEventListener("click", startSession);
 $("testProfile").addEventListener("click", testProfile);
 $("stopForwarding").addEventListener("click", stopForwarding);
 $("stopService").addEventListener("click", stopService);
-$("refreshLogs").addEventListener("click", refreshLogs);
+if ($("refreshLogs")) $("refreshLogs").addEventListener("click", refreshLogs);
 $("authMethod").addEventListener("change", toggleAuthFields);
 $("editPassword").addEventListener("click", editPassword);
 $("editPassphrase").addEventListener("click", editPassphrase);

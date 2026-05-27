@@ -16,12 +16,14 @@ import (
 	"time"
 
 	"chemweb-launcher/internal/browser"
+	"chemweb-launcher/internal/chemweb"
 	"chemweb-launcher/internal/config"
 	"chemweb-launcher/internal/netcheck"
 	"chemweb-launcher/internal/runtime"
 	"chemweb-launcher/internal/secret"
 	"chemweb-launcher/internal/sshclient"
 	"chemweb-launcher/internal/version"
+	"chemweb-launcher/internal/webview"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -33,9 +35,17 @@ type Server struct {
 	rt       *runtime.Runtime
 	mux      *http.ServeMux
 	logs     *safeLog
+	localLog *safeLog
+	options  Options
 	mu       sync.Mutex
 	session  *activeSession
 	shutdown context.CancelFunc
+}
+
+type Options struct {
+	UseWebView   bool
+	ForceBrowser bool
+	DevTools     bool
 }
 
 type activeSession struct {
@@ -48,6 +58,7 @@ type activeSession struct {
 	healthStop context.CancelFunc
 	forwarding bool
 	stopping   bool
+	remotePID  int
 }
 
 type safeLog struct {
@@ -56,18 +67,25 @@ type safeLog struct {
 }
 
 func Run(stdout, stderr io.Writer) error {
+	return RunWithOptions(stdout, stderr, Options{})
+}
+
+func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	rt, err := runtime.New()
 	if err != nil {
 		return err
 	}
 	server := NewServer(rt)
+	server.options = options
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
 	addr := "http://" + ln.Addr().String()
-	fmt.Fprintln(stdout, "Chemweb Launcher", version.String(), "GUI:", addr)
+	startLine := "Chemweb Launcher " + version.String() + " GUI: " + addr
+	server.localLog.add(startLine)
+	fmt.Fprintln(stdout, startLine)
 
 	httpServer := &http.Server{Handler: server.mux}
 	errCh := make(chan error, 1)
@@ -75,7 +93,40 @@ func Run(stdout, stderr io.Writer) error {
 		errCh <- httpServer.Serve(ln)
 	}()
 
+	if options.UseWebView && !options.ForceBrowser {
+		shellAddr := addr + "/shell"
+		if err := webview.Open(context.Background(), webview.Options{
+			Title:            "Chemweb Launcher",
+			URL:              shellAddr,
+			Width:            1240,
+			Height:           820,
+			Debug:            options.DevTools,
+			CopyOnCtrlShiftC: true,
+			DisableDevTools:  !options.DevTools,
+			Fullscreen:       true,
+		}); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = httpServer.Shutdown(ctx)
+			err = <-errCh
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = httpServer.Shutdown(ctx)
+			serveErr := <-errCh
+			if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				return fmt.Errorf("open WebView2: %w; stop GUI server: %v", err, serveErr)
+			}
+			return fmt.Errorf("open WebView2: %w", err)
+		}
+	}
+
 	if err := browser.Open(addr); err != nil {
+		server.localLog.add("warning: could not open browser: " + err.Error())
 		fmt.Fprintln(stderr, "warning: could not open browser:", err)
 	}
 
@@ -88,9 +139,10 @@ func Run(stdout, stderr io.Writer) error {
 
 func NewServer(rt *runtime.Runtime) *Server {
 	s := &Server{
-		rt:   rt,
-		mux:  http.NewServeMux(),
-		logs: &safeLog{},
+		rt:       rt,
+		mux:      http.NewServeMux(),
+		logs:     &safeLog{},
+		localLog: &safeLog{},
 	}
 	s.routes()
 	return s
@@ -98,6 +150,8 @@ func NewServer(rt *runtime.Runtime) *Server {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleIndex)
+	s.mux.HandleFunc("/shell", s.handleShell)
+	s.mux.HandleFunc("/launcher-logs", s.handleLauncherLogsPage)
 	s.mux.Handle("/static/", http.FileServer(http.FS(assets)))
 	s.mux.HandleFunc("/api/profiles", s.handleProfiles)
 	s.mux.HandleFunc("/api/profiles/", s.handleProfileByID)
@@ -107,6 +161,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/stop-service", s.handleStopService)
 	s.mux.HandleFunc("/api/session/status", s.handleStatus)
 	s.mux.HandleFunc("/api/logs", s.handleLogs)
+	s.mux.HandleFunc("/api/launcher-logs", s.handleLauncherLogs)
 	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/defaults", s.handleDefaults)
 }
@@ -117,6 +172,22 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFileFS(w, r, assets, "static/index.html")
+}
+
+func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/shell" {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFileFS(w, r, assets, "static/shell.html")
+}
+
+func (s *Server) handleLauncherLogsPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/launcher-logs" {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFileFS(w, r, assets, "static/logs.html")
 }
 
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
@@ -309,10 +380,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logs.add("health check OK: " + p.HealthURL())
+		s.refreshRemoteIdentity(session, p)
 		if p.OpenBrowser {
-			if err := browser.Open(p.BrowserURL()); err != nil {
-				s.logs.add("warning: could not open browser: " + err.Error())
-			}
+			s.openSessionURL(p)
 		}
 	}()
 	writeJSON(w, map[string]bool{"ok": true}, nil)
@@ -384,10 +454,45 @@ func (s *Server) waitForRestartedForwardingHealth(session *activeSession, p conf
 		return
 	}
 	s.logs.add("health check OK: " + p.HealthURL())
+	s.refreshRemoteIdentity(session, p)
 	if p.OpenBrowser {
-		if err := browser.Open(p.BrowserURL()); err != nil {
-			s.logs.add("warning: could not open browser: " + err.Error())
-		}
+		s.openSessionURL(p)
+	}
+}
+
+func (s *Server) refreshRemoteIdentity(session *activeSession, p config.Profile) {
+	s.mu.Lock()
+	if s.session != session {
+		s.mu.Unlock()
+		return
+	}
+	client := session.client
+	s.mu.Unlock()
+	if client == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	identity, err := chemweb.FetchIdentity(ctx, client, p)
+	if err != nil {
+		s.logs.add("warning: could not read Chemweb identity: " + err.Error())
+		return
+	}
+	s.mu.Lock()
+	if s.session == session {
+		session.remotePID = identity.PID
+	}
+	s.mu.Unlock()
+	s.logs.add("Chemweb identity OK: pid " + strconv.Itoa(identity.PID) + ", version " + identity.ProjectVersion)
+}
+
+func (s *Server) openSessionURL(p config.Profile) {
+	if s.options.UseWebView && !s.options.ForceBrowser {
+		return
+	}
+	url := p.BrowserURL()
+	if err := browser.Open(url); err != nil {
+		s.logs.add("warning: could not open browser: " + err.Error())
 	}
 }
 
@@ -497,11 +602,11 @@ func (s *Server) stopForwarding() {
 	}
 	tunnel := session.tunnel
 	healthStop := session.healthStop
+	client := session.client
 	session.healthStop = nil
 	session.tunnel = nil
 	session.forwarding = false
-	clearSession := session.process == nil
-	client := session.client
+	clearSession := session.process == nil && session.remotePID <= 0 && client == nil
 	if clearSession {
 		s.session = nil
 		session.client = nil
@@ -514,6 +619,21 @@ func (s *Server) stopForwarding() {
 	}
 	if tunnel != nil {
 		_ = tunnel.Close()
+	}
+	if session.process == nil && session.remotePID <= 0 && client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		identity, err := chemweb.FetchIdentity(ctx, client, session.profile)
+		cancel()
+		if err == nil {
+			s.mu.Lock()
+			if s.session == session {
+				session.remotePID = identity.PID
+			}
+			s.mu.Unlock()
+			s.logs.add("Chemweb identity OK: pid " + strconv.Itoa(identity.PID) + ", version " + identity.ProjectVersion)
+		} else {
+			s.logs.add("warning: could not read Chemweb identity after stopping forwarding: " + err.Error())
+		}
 	}
 	if clearSession && client != nil {
 		_ = client.Close()
@@ -552,10 +672,27 @@ func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
 		_ = tunnel.Close()
 	}
 	if stopRemote {
-		if process != nil {
+		pid := session.remotePID
+		if pid <= 0 && client != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			identity, err := chemweb.FetchIdentity(ctx, client, profile)
+			cancel()
+			if err != nil {
+				s.logs.add("warning: could not read Chemweb identity before stopping: " + err.Error())
+			} else {
+				pid = identity.PID
+			}
+		}
+		if pid > 0 && client != nil {
+			if err := sshclient.StopRemotePID(client, pid); err != nil {
+				s.logs.add("warning: could not kill remote Chemweb pid " + strconv.Itoa(pid) + ": " + err.Error())
+			} else {
+				s.logs.add("remote Chemweb pid stopped: " + strconv.Itoa(pid))
+			}
+		} else if process != nil {
 			_ = process.Stop()
-		} else if client != nil {
-			_ = sshclient.StopRemoteCommand(client, profile)
+		} else {
+			s.logs.add("warning: remote Chemweb pid is unknown; remote service may still be running")
 		}
 	}
 	if client != nil {
@@ -609,11 +746,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		id = session.id
 		forwarding = session.forwarding
 	}
-	writeJSON(w, map[string]any{"running": running, "forwarding": forwarding, "id": id, "name": name}, nil)
+	url := ""
+	if running && forwarding {
+		url = session.profile.BrowserURL()
+	}
+	openBrowser := false
+	if running {
+		openBrowser = session.profile.OpenBrowser
+	}
+	writeJSON(w, map[string]any{"running": running, "forwarding": forwarding, "id": id, "name": name, "url": url, "open_browser": openBrowser}, nil)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string][]string{"lines": s.logs.snapshot()}, nil)
+}
+
+func (s *Server) handleLauncherLogs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string][]string{"lines": s.localLog.snapshot()}, nil)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {

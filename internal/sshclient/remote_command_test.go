@@ -18,7 +18,6 @@ func TestAssembleRemoteCommandPreservesMultilinePreStart(t *testing.T) {
 		"trap '__chemweb_launcher_cleanup; exit 143' INT TERM HUP",
 		"chemweb --config config.yaml --host 127.0.0.1 --port 8888 &",
 		"__chemweb_launcher_pid=$!",
-		"printf '%s\\n' \"$__chemweb_launcher_pid\" > \"$__chemweb_launcher_pidfile\"",
 		"kill -TERM \"$__chemweb_launcher_pid\"",
 	}
 	for _, want := range mustContain {
@@ -26,21 +25,24 @@ func TestAssembleRemoteCommandPreservesMultilinePreStart(t *testing.T) {
 			t.Fatalf("assembled command missing %q\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "pidfile") {
+		t.Fatalf("assembled command should not write launcher pidfiles anymore\n%s", got)
+	}
 }
 
-func TestAssembleStopCommandUsesPIDFile(t *testing.T) {
-	profile := config.NewProfileDefaults()
-	profile.ID = "profile-1"
-	got := AssembleStopCommand(profile)
+func TestAssembleKillPIDCommandUsesExplicitPID(t *testing.T) {
+	got := AssembleKillPIDCommand(12345)
 	for _, want := range []string{
-		"__chemweb_launcher_pidfile=/tmp/chemweb-launcher-profile-1.pid",
+		"__chemweb_launcher_pid=12345",
 		"kill -TERM \"$__chemweb_launcher_pid\"",
 		"kill -KILL \"$__chemweb_launcher_pid\"",
-		"rm -f \"$__chemweb_launcher_pidfile\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stop command missing %q\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "pidfile") {
+		t.Fatalf("kill command should not use launcher pidfiles\n%s", got)
 	}
 }
 

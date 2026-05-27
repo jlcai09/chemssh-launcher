@@ -36,9 +36,18 @@ body {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
+  align-items: start;
   background: linear-gradient(180deg, #f4f7fa 0%, var(--bg) 42%, #e3e9ef 100%);
   color: var(--text);
   font-family: inherit;
+}
+
+body.logs-page {
+  height: 100vh;
+  display: block;
+  min-height: 0;
+  padding: 10px;
+  background: #101820;
 }
 
 button,
@@ -234,6 +243,7 @@ p {
 
 .workspace {
   min-width: 0;
+  min-height: 100vh;
 }
 
 .toolbar {
@@ -332,6 +342,7 @@ p {
 }
 
 .content {
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(520px, 1fr) 420px;
   gap: 10px;
@@ -478,8 +489,26 @@ textarea {
   line-height: 1.5;
 }
 
+.mini-log pre {
+  min-height: 220px;
+}
+
+.logs-pane {
+  padding: 10px;
+}
+
+.full-log {
+  height: 100%;
+}
+
+.full-log pre {
+  min-height: 0;
+  max-height: none;
+}
+
 @media (max-width: 1080px) {
   body {
+    height: auto;
     grid-template-columns: 1fr;
   }
 
@@ -491,6 +520,10 @@ textarea {
 
   .content {
     grid-template-columns: 1fr;
+  }
+
+  .workspace {
+    min-height: 760px;
   }
 }
 

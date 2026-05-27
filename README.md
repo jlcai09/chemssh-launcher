@@ -16,6 +16,14 @@ chemweb-launcher
 
 This starts the local GUI server and opens the browser automatically. Use the page to create profiles, store secrets, test SSH, start Chemweb, stop the tunnel, and inspect session logs.
 
+On Windows, a WebView2-enabled build opens the launcher and Chemweb pages in embedded windows instead of the system browser by default:
+
+```bash
+chemweb-launcher-webview2.exe
+```
+
+Use `--browser` to force the system browser. Use `--webview` to request embedded mode explicitly in builds that support it. Use `--devtools` only when debugging the embedded page. In normal WebView2 mode, DevTools shortcuts are disabled and `Ctrl+Shift+C` is intercepted so it does not open DevTools.
+
 ## CLI Commands
 
 ```bash
@@ -35,9 +43,21 @@ go build ./cmd/chemweb-launcher
 
 The intended output is a single executable per platform. On Windows, use the generated `chemweb-launcher.exe` as the GUI launcher.
 
-## Version
+The default build does not include WebView2 support. To build the optional Windows WebView2 variant:
 
-Current version: `0.1.0`
+```bash
+go build -tags webview2 -o chemweb-launcher-webview2.exe ./cmd/chemweb-launcher
+```
+
+For a double-clickable Windows WebView2 build without a visible PowerShell/console window, build with the Windows GUI subsystem:
+
+```bash
+go build -tags webview2 -ldflags "-H=windowsgui" -o chemweb-launcher-webview2.exe ./cmd/chemweb-launcher
+```
+
+The console build is still useful for debugging because startup errors are printed to the terminal.
+
+## Version
 
 The root shortcut is:
 

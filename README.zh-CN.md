@@ -16,6 +16,14 @@ chemweb-launcher
 
 页面里可以新建/编辑/删除服务器 profile，保存 SSH 密码或私钥 passphrase，测试 SSH，启动远程 Chemweb，建立本地 SSH tunnel，查看日志，并停止当前 session。
 
+Windows 下如果使用带 WebView2 的构建，默认不依赖系统浏览器，而是用内嵌窗口打开启动器和 Chemweb 页面：
+
+```bash
+chemweb-launcher-webview2.exe
+```
+
+`--browser` 可以强制使用系统浏览器。`--webview` 可以在支持 WebView2 的构建中显式请求内嵌模式。`--devtools` 仅用于调试 WebView2 内嵌页面。普通 WebView2 模式会关闭 DevTools 快捷键，并拦截 `Ctrl+Shift+C`，避免它打开 DevTools。
+
 ## 常用字段
 
 `SSH Host`、`SSH Port`、`SSH User` 用于连接远程服务器。
@@ -137,9 +145,22 @@ go build ./cmd/chemweb-launcher
 
 Windows 下会生成 `chemweb-launcher.exe`。
 
-## 版本管理
+默认构建不包含 WebView2。Windows 下可以单独构建 WebView2 版本：
 
-当前版本：`0.1.0`
+```bash
+go build -tags webview2 -o chemweb-launcher-webview2.exe ./cmd/chemweb-launcher
+```
+
+如果希望双击 WebView2 版本时不显示 PowerShell/控制台窗口，使用 Windows GUI 子系统构建：
+```bash
+go build -tags webview2 -ldflags "-H=windowsgui" -o chemweb-launcher-webview2.exe ./cmd/chemweb-launcher
+```
+
+不带 `-H=windowsgui` 的控制台版本仍然适合调试，因为启动错误会打印到终端。
+
+这样可以同时发布普通版本和 WebView2 版本。
+
+## 版本管理
 
 根目录快捷入口：
 

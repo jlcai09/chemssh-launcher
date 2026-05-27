@@ -120,7 +120,6 @@ func (p *RemoteProcess) Stop() error {
 	if p == nil || p.Session == nil {
 		return nil
 	}
-	_ = StopRemoteCommand(p.Client, p.Profile)
 	_ = p.Session.Signal(ssh.SIGTERM)
 	select {
 	case <-p.closed:
@@ -130,14 +129,17 @@ func (p *RemoteProcess) Stop() error {
 	return p.Session.Close()
 }
 
-func StopRemoteCommand(client *ssh.Client, profile config.Profile) error {
+func StopRemotePID(client *ssh.Client, pid int) error {
 	if client == nil {
 		return nil
+	}
+	if pid <= 0 {
+		return fmt.Errorf("invalid remote pid %d", pid)
 	}
 	session, err := client.NewSession()
 	if err != nil {
 		return err
 	}
 	defer session.Close()
-	return session.Run(AssembleStopCommand(profile))
+	return session.Run(AssembleKillPIDCommand(pid))
 }

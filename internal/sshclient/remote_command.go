@@ -15,9 +15,6 @@ func AssembleRemoteCommand(profile config.Profile) string {
 		b.WriteString(strings.TrimRight(profile.PreStartCommands, "\r\n"))
 		b.WriteByte('\n')
 	}
-	b.WriteString("__chemweb_launcher_pidfile=")
-	b.WriteString(shellQuote(RemotePIDFile(profile)))
-	b.WriteByte('\n')
 	b.WriteString("__chemweb_launcher_pid=\n")
 	b.WriteString("__chemweb_launcher_cleanup() {\n")
 	b.WriteString("  if [ -n \"$__chemweb_launcher_pid\" ]; then\n")
@@ -30,12 +27,10 @@ func AssembleRemoteCommand(profile config.Profile) string {
 	b.WriteString("    kill -KILL \"$__chemweb_launcher_pid\" 2>/dev/null || true\n")
 	b.WriteString("    wait \"$__chemweb_launcher_pid\" 2>/dev/null || true\n")
 	b.WriteString("  fi\n")
-	b.WriteString("  rm -f \"$__chemweb_launcher_pidfile\" 2>/dev/null || true\n")
 	b.WriteString("}\n")
 	b.WriteString("trap '__chemweb_launcher_cleanup; exit 143' INT TERM HUP\n")
 	b.WriteString(backgroundLastCommand(EffectiveStartCommand(profile)))
 	b.WriteString("__chemweb_launcher_pid=$!\n")
-	b.WriteString("printf '%s\\n' \"$__chemweb_launcher_pid\" > \"$__chemweb_launcher_pidfile\"\n")
 	b.WriteString("set +e\n")
 	b.WriteString("wait \"$__chemweb_launcher_pid\"\n")
 	b.WriteString("__chemweb_launcher_status=$?\n")
@@ -46,24 +41,18 @@ func AssembleRemoteCommand(profile config.Profile) string {
 	return b.String()
 }
 
-func AssembleStopCommand(profile config.Profile) string {
-	pidfile := shellQuote(RemotePIDFile(profile))
+func AssembleKillPIDCommand(pid int) string {
+	pidValue := shellQuote(strconv.Itoa(pid))
 	return strings.Join([]string{
 		"set +e",
-		"__chemweb_launcher_pidfile=" + pidfile,
-		"if [ -f \"$__chemweb_launcher_pidfile\" ]; then",
-		"  __chemweb_launcher_pid=$(cat \"$__chemweb_launcher_pidfile\" 2>/dev/null)",
-		"  if [ -n \"$__chemweb_launcher_pid\" ]; then",
-		"    kill -TERM \"$__chemweb_launcher_pid\" 2>/dev/null || true",
-		"    i=0",
-		"    while kill -0 \"$__chemweb_launcher_pid\" 2>/dev/null && [ \"$i\" -lt 5 ]; do",
-		"      i=$((i + 1))",
-		"      sleep 1",
-		"    done",
-		"    kill -KILL \"$__chemweb_launcher_pid\" 2>/dev/null || true",
-		"  fi",
-		"  rm -f \"$__chemweb_launcher_pidfile\" 2>/dev/null || true",
-		"fi",
+		"__chemweb_launcher_pid=" + pidValue,
+		"kill -TERM \"$__chemweb_launcher_pid\" 2>/dev/null || true",
+		"i=0",
+		"while kill -0 \"$__chemweb_launcher_pid\" 2>/dev/null && [ \"$i\" -lt 5 ]; do",
+		"  i=$((i + 1))",
+		"  sleep 1",
+		"done",
+		"kill -KILL \"$__chemweb_launcher_pid\" 2>/dev/null || true",
 		"exit 0",
 		"",
 	}, "\n")
@@ -79,14 +68,6 @@ func AssembleCheckPortCommand(profile config.Profile) string {
 	b.WriteString(EffectiveCheckPortCommand(profile))
 	b.WriteByte('\n')
 	return b.String()
-}
-
-func RemotePIDFile(profile config.Profile) string {
-	id := profile.ID
-	if id == "" {
-		id = "unknown"
-	}
-	return "/tmp/chemweb-launcher-" + sanitizePIDFilePart(id) + ".pid"
 }
 
 func EffectiveCheckPortCommand(profile config.Profile) string {
@@ -176,19 +157,4 @@ func backgroundLastCommand(command string) string {
 		}
 	}
 	return "true &\n"
-}
-
-func sanitizePIDFilePart(value string) string {
-	var b strings.Builder
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('_')
-		}
-	}
-	if b.Len() == 0 {
-		return "unknown"
-	}
-	return b.String()
 }
