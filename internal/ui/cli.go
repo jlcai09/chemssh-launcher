@@ -160,19 +160,16 @@ func testProfile(idOrName string, in io.Reader, out io.Writer, profiles config.P
 	if err != nil {
 		return err
 	}
-	if err := reportPort(out, p); err != nil {
-		return err
-	}
 	client, err := dialWithHostKeyPrompt(p, in, out, secrets)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 	fmt.Fprintln(out, "SSH connection OK")
-	if err := sshclient.CheckRemotePortAvailable(client, p); err != nil {
+	if _, err := sshclient.RunCheckPortCommand(client, p, out, out); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Remote port OK: %s\n", p.RemoteAddress())
+	fmt.Fprintf(out, "Chemweb port check OK: %s\n", p.RemoteAddress())
 	return nil
 }
 

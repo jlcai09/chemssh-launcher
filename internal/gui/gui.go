@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"chemweb-launcher/internal/app"
 	"chemweb-launcher/internal/browser"
 	"chemweb-launcher/internal/config"
 	"chemweb-launcher/internal/netcheck"
@@ -23,6 +22,8 @@ import (
 	"chemweb-launcher/internal/secret"
 	"chemweb-launcher/internal/sshclient"
 	"chemweb-launcher/internal/version"
+
+	"golang.org/x/crypto/ssh"
 )
 
 //go:embed static/*
@@ -38,9 +39,15 @@ type Server struct {
 }
 
 type activeSession struct {
-	cancel context.CancelFunc
-	id     string
-	name   string
+	id         string
+	name       string
+	profile    config.Profile
+	client     *ssh.Client
+	process    *sshclient.RemoteProcess
+	tunnel     *sshclient.Tunnel
+	healthStop context.CancelFunc
+	forwarding bool
+	stopping   bool
 }
 
 type safeLog struct {
@@ -97,6 +104,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/profile-test", s.handleProfileTest)
 	s.mux.HandleFunc("/api/session/start", s.handleStart)
 	s.mux.HandleFunc("/api/session/stop", s.handleStop)
+	s.mux.HandleFunc("/api/session/stop-service", s.handleStopService)
 	s.mux.HandleFunc("/api/session/status", s.handleStatus)
 	s.mux.HandleFunc("/api/logs", s.handleLogs)
 	s.mux.HandleFunc("/api/version", s.handleVersion)
@@ -203,9 +211,21 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if p.UsesNonLoopbackLocalHost() {
 		s.logs.add("warning: local bind host " + p.LocalHost + " may expose the tunnel")
 	}
+	if err := s.blockActiveForwardingConflict(p); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 	if err := s.checkLocalPort(p); err != nil {
 		s.logs.add(err.Error())
 		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if handled, err := s.restartForwardingIfPaused(p); handled {
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true}, nil)
 		return
 	}
 	policy := sshclient.HostKeyStrict
@@ -219,44 +239,156 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logs.add("SSH connection OK for " + p.Name)
-	if err := sshclient.CheckRemotePortAvailable(client, p); err != nil {
-		s.logs.add(err.Error())
-		s.logs.add("attempting pidfile cleanup before start")
-		_ = sshclient.StopRemoteCommand(client, p)
-		time.Sleep(500 * time.Millisecond)
-		if retryErr := sshclient.CheckRemotePortAvailable(client, p); retryErr != nil {
-			_ = client.Close()
-			writeError(w, http.StatusConflict, err)
-			return
-		}
-		s.logs.add("remote port freed after pidfile cleanup")
+	check, err := sshclient.RunCheckPortCommand(client, p, s.logs, s.logs)
+	if err != nil {
+		_ = client.Close()
+		s.logs.add("Chemweb port check failed for " + p.Name + ": " + err.Error())
+		writeError(w, http.StatusConflict, err)
+		return
 	}
-	_ = client.Close()
-	s.logs.add("remote port OK: " + p.RemoteAddress())
+	if check.Reusable {
+		s.logs.add("remote Chemweb is reusable; starting tunnel without launching another server")
+	} else {
+		s.logs.add("remote Chemweb port is available; starting configured command")
+	}
 
 	s.mu.Lock()
 	if s.session != nil {
 		s.mu.Unlock()
+		_ = client.Close()
 		writeError(w, http.StatusConflict, errors.New("a session is already running"))
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	s.session = &activeSession{cancel: cancel, id: p.ID, name: p.Name}
+
+	var process *sshclient.RemoteProcess
+	if !check.Reusable {
+		process, err = sshclient.StartRemoteCommand(client, p, s.logs, s.logs)
+		if err != nil {
+			s.mu.Unlock()
+			_ = client.Close()
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+	}
+	tunnel, err := sshclient.StartTunnel(context.Background(), client, p)
+	if err != nil {
+		if process != nil {
+			_ = process.Stop()
+		}
+		s.mu.Unlock()
+		_ = client.Close()
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+
+	healthCtx, healthStop := context.WithCancel(context.Background())
+	session := &activeSession{
+		id:         p.ID,
+		name:       p.Name,
+		profile:    p,
+		client:     client,
+		process:    process,
+		tunnel:     tunnel,
+		healthStop: healthStop,
+		forwarding: true,
+	}
+	s.session = session
 	s.mu.Unlock()
 
 	s.logs.add("starting " + p.Name + " at " + p.BrowserURL())
+	if process != nil {
+		go s.watchRemoteProcess(session)
+	}
 	go func() {
-		err := app.New(s.rt.Profiles, s.rt.Secrets, s.logs, s.logs).Start(ctx, p)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			s.logs.add("session stopped with error: " + err.Error())
-		} else {
-			s.logs.add("session stopped")
+		if err := netcheck.WaitForURL(healthCtx, p.HealthURL(), 90*time.Second, time.Second); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			s.logs.add("health check failed: " + err.Error())
+			s.stopSessionResources(session, true)
+			return
 		}
-		s.mu.Lock()
-		s.session = nil
-		s.mu.Unlock()
+		s.logs.add("health check OK: " + p.HealthURL())
+		if p.OpenBrowser {
+			if err := browser.Open(p.BrowserURL()); err != nil {
+				s.logs.add("warning: could not open browser: " + err.Error())
+			}
+		}
 	}()
 	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) blockActiveForwardingConflict(p config.Profile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.session
+	if session == nil {
+		return nil
+	}
+	if session.id != p.ID || session.forwarding {
+		return errors.New("a session is already running")
+	}
+	return nil
+}
+
+func (s *Server) restartForwardingIfPaused(p config.Profile) (bool, error) {
+	s.mu.Lock()
+	session := s.session
+	if session == nil {
+		s.mu.Unlock()
+		return false, nil
+	}
+	if session.id != p.ID || session.forwarding {
+		s.mu.Unlock()
+		return true, errors.New("a session is already running")
+	}
+	client := session.client
+	if client == nil {
+		s.mu.Unlock()
+		return true, errors.New("session is still running, but its SSH connection is no longer available")
+	}
+	s.mu.Unlock()
+
+	s.logs.add("service is already running; restarting forwarding only for " + p.Name)
+	tunnel, err := sshclient.StartTunnel(context.Background(), client, p)
+	if err != nil {
+		return true, err
+	}
+	healthCtx, healthStop := context.WithCancel(context.Background())
+
+	s.mu.Lock()
+	if s.session != session || session.forwarding {
+		s.mu.Unlock()
+		healthStop()
+		_ = tunnel.Close()
+		return true, errors.New("a session is already running")
+	}
+	session.profile = p
+	session.tunnel = tunnel
+	session.healthStop = healthStop
+	session.forwarding = true
+	s.mu.Unlock()
+
+	go s.waitForRestartedForwardingHealth(session, p, healthCtx)
+	s.logs.add("forwarding restarted for " + p.BrowserURL())
+	return true, nil
+}
+
+func (s *Server) waitForRestartedForwardingHealth(session *activeSession, p config.Profile, ctx context.Context) {
+	if err := netcheck.WaitForURL(ctx, p.HealthURL(), 90*time.Second, time.Second); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		s.logs.add("health check failed after forwarding restart: " + err.Error())
+		s.stopSessionResources(session, true)
+		return
+	}
+	s.logs.add("health check OK: " + p.HealthURL())
+	if p.OpenBrowser {
+		if err := browser.Open(p.BrowserURL()); err != nil {
+			s.logs.add("warning: could not open browser: " + err.Error())
+		}
+	}
 }
 
 func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
@@ -278,11 +410,6 @@ func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logs.add("testing SSH for " + p.Name)
-	if err := s.checkLocalPort(p); err != nil {
-		s.logs.add(err.Error())
-		writeError(w, http.StatusConflict, err)
-		return
-	}
 	policy := sshclient.HostKeyStrict
 	if req.AcceptHostKey {
 		policy = sshclient.HostKeyAcceptNew
@@ -294,20 +421,14 @@ func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logs.add("SSH connection OK for " + p.Name)
-	if err := sshclient.CheckRemotePortAvailable(client, p); err != nil {
-		s.logs.add(err.Error())
-		s.logs.add("attempting pidfile cleanup before test")
-		_ = sshclient.StopRemoteCommand(client, p)
-		time.Sleep(500 * time.Millisecond)
-		if retryErr := sshclient.CheckRemotePortAvailable(client, p); retryErr != nil {
-			_ = client.Close()
-			writeError(w, http.StatusConflict, err)
-			return
-		}
-		s.logs.add("remote port freed after pidfile cleanup")
+	if _, err := sshclient.RunCheckPortCommand(client, p, s.logs, s.logs); err != nil {
+		_ = client.Close()
+		s.logs.add("Chemweb port check failed for " + p.Name + ": " + err.Error())
+		writeError(w, http.StatusConflict, err)
+		return
 	}
 	_ = client.Close()
-	s.logs.add("remote port OK: " + p.RemoteAddress())
+	s.logs.add("Chemweb port check OK for " + p.RemoteAddress())
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
@@ -327,7 +448,136 @@ func (s *Server) checkLocalPort(p config.Profile) error {
 	return fmt.Errorf("local port occupied: %s is already in use; suggested local ports: %v", p.LocalAddress(), ports)
 }
 
+func (s *Server) watchRemoteProcess(session *activeSession) {
+	err := <-session.process.Done()
+	s.mu.Lock()
+	if s.session != session {
+		s.mu.Unlock()
+		return
+	}
+	if session.stopping {
+		session.process = nil
+		s.mu.Unlock()
+		return
+	}
+	if err == nil {
+		session.process = nil
+		s.mu.Unlock()
+		s.logs.add("remote command exited normally; keeping forwarding open")
+		return
+	}
+	s.session = nil
+	tunnel := session.tunnel
+	client := session.client
+	healthStop := session.healthStop
+	session.tunnel = nil
+	session.client = nil
+	session.healthStop = nil
+	session.forwarding = false
+	s.mu.Unlock()
+
+	s.logs.add("remote command stopped with error: " + err.Error())
+	if healthStop != nil {
+		healthStop()
+	}
+	if tunnel != nil {
+		_ = tunnel.Close()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+}
+
+func (s *Server) stopForwarding() {
+	s.mu.Lock()
+	session := s.session
+	if session == nil || !session.forwarding {
+		s.mu.Unlock()
+		return
+	}
+	tunnel := session.tunnel
+	healthStop := session.healthStop
+	session.healthStop = nil
+	session.tunnel = nil
+	session.forwarding = false
+	clearSession := session.process == nil
+	client := session.client
+	if clearSession {
+		s.session = nil
+		session.client = nil
+	}
+	s.mu.Unlock()
+
+	s.logs.add("stopping forwarding for " + session.name)
+	if healthStop != nil {
+		healthStop()
+	}
+	if tunnel != nil {
+		_ = tunnel.Close()
+	}
+	if clearSession && client != nil {
+		_ = client.Close()
+	}
+	if clearSession {
+		s.logs.add("forwarding stopped")
+	} else {
+		s.logs.add("forwarding stopped; remote service is still running")
+	}
+}
+
+func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
+	s.mu.Lock()
+	if s.session != session {
+		s.mu.Unlock()
+		return
+	}
+	s.session = nil
+	session.stopping = true
+	tunnel := session.tunnel
+	process := session.process
+	client := session.client
+	healthStop := session.healthStop
+	profile := session.profile
+	session.tunnel = nil
+	session.process = nil
+	session.client = nil
+	session.healthStop = nil
+	session.forwarding = false
+	s.mu.Unlock()
+
+	if healthStop != nil {
+		healthStop()
+	}
+	if tunnel != nil {
+		_ = tunnel.Close()
+	}
+	if stopRemote {
+		if process != nil {
+			_ = process.Stop()
+		} else if client != nil {
+			_ = sshclient.StopRemoteCommand(client, profile)
+		}
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+	if stopRemote {
+		s.logs.add("remote service and forwarding stopped")
+	} else {
+		s.logs.add("session resources stopped")
+	}
+}
+
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	s.stopForwarding()
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) handleStopService(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 		return
@@ -335,12 +585,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	session := s.session
 	s.mu.Unlock()
-	if session == nil {
-		writeJSON(w, map[string]bool{"ok": true}, nil)
-		return
+	if session != nil {
+		s.logs.add("stopping remote service and forwarding for " + session.name)
+		s.stopSessionResources(session, true)
 	}
-	s.logs.add("stopping " + session.name)
-	session.cancel()
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
@@ -353,13 +601,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	session := s.session
 	s.mu.Unlock()
 	running := session != nil
+	forwarding := false
 	name := ""
 	id := ""
 	if running {
 		name = session.name
 		id = session.id
+		forwarding = session.forwarding
 	}
-	writeJSON(w, map[string]any{"running": running, "id": id, "name": name}, nil)
+	writeJSON(w, map[string]any{"running": running, "forwarding": forwarding, "id": id, "name": name}, nil)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

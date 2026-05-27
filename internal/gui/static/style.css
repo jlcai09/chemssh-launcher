@@ -117,11 +117,16 @@ button.danger:hover {
   place-items: center;
   border: 1px solid rgba(255, 255, 255, 0.42);
   border-radius: 12px;
-  background: linear-gradient(135deg, #176b87 0%, #2c7a6f 100%);
+  background: #ffffff;
   box-shadow: 0 8px 18px rgba(23, 107, 135, 0.22);
-  color: #ffffff;
-  font-size: 13px;
-  font-weight: 750;
+  overflow: hidden;
+}
+
+.mark img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
 }
 
 h1,
@@ -148,6 +153,14 @@ p {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin: 22px 0 14px;
+}
+
+.language-switch {
+  margin-top: 16px;
+}
+
+.language-switch select {
+  min-height: 36px;
 }
 
 .profiles {
@@ -246,6 +259,49 @@ p {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.more-menu {
+  position: relative;
+}
+
+.more-menu summary {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  padding: 0 14px;
+  background: #ffffff;
+  color: var(--text);
+  font-weight: 650;
+  cursor: pointer;
+  list-style: none;
+}
+
+.more-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.more-menu summary:hover {
+  border-color: rgba(23, 107, 135, 0.34);
+  box-shadow: 0 5px 14px rgba(31, 41, 55, 0.08);
+}
+
+.more-menu[open] summary {
+  border-color: var(--primary);
+  box-shadow: var(--ring);
+}
+
+.more-menu button {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  min-width: 178px;
+  background: #ffffff;
+  box-shadow: var(--shadow-md);
 }
 
 .status {

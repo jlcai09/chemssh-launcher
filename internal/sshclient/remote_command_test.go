@@ -44,6 +44,22 @@ func TestAssembleStopCommandUsesPIDFile(t *testing.T) {
 	}
 }
 
+func TestAssembleCheckPortCommandUsesChemwebCheckPort(t *testing.T) {
+	profile := config.NewProfileDefaults()
+	profile.PreStartCommands = "cd /home/user/chemweb\nsource .venv/bin/activate"
+	profile.StartCommand = "chemweb --config config.yaml"
+
+	got := AssembleCheckPortCommand(profile)
+	for _, want := range []string{
+		"set -e\ncd /home/user/chemweb\nsource .venv/bin/activate\n",
+		"chemweb --config config.yaml --host 127.0.0.1 --port 8888 --check-port",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("check-port command missing %q\n%s", want, got)
+		}
+	}
+}
+
 func TestBackgroundLastCommand(t *testing.T) {
 	got := backgroundLastCommand("export FOO=1\nchemweb --config config.yaml")
 	want := "export FOO=1\nchemweb --config config.yaml &\n"

@@ -69,12 +69,43 @@ func AssembleStopCommand(profile config.Profile) string {
 	}, "\n")
 }
 
+func AssembleCheckPortCommand(profile config.Profile) string {
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	if strings.TrimSpace(profile.PreStartCommands) != "" {
+		b.WriteString(strings.TrimRight(profile.PreStartCommands, "\r\n"))
+		b.WriteByte('\n')
+	}
+	b.WriteString(EffectiveCheckPortCommand(profile))
+	b.WriteByte('\n')
+	return b.String()
+}
+
 func RemotePIDFile(profile config.Profile) string {
 	id := profile.ID
 	if id == "" {
 		id = "unknown"
 	}
 	return "/tmp/chemweb-launcher-" + sanitizePIDFilePart(id) + ".pid"
+}
+
+func EffectiveCheckPortCommand(profile config.Profile) string {
+	command := EffectiveStartCommand(profile)
+	lines := strings.Split(command, "\n")
+	last := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			last = i
+			break
+		}
+	}
+	if last == -1 {
+		return command
+	}
+	if !hasFlag(lines[last], "check-port") {
+		lines[last] += " --check-port"
+	}
+	return strings.Join(lines, "\n")
 }
 
 func EffectiveStartCommand(profile config.Profile) string {

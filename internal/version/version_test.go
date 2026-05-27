@@ -1,9 +1,12 @@
 package version
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestString(t *testing.T) {
-	if String() != "0.1.0" {
+	if String() != strings.TrimSpace(rawVersion) {
 		t.Fatalf("unexpected version: %q", String())
 	}
 }

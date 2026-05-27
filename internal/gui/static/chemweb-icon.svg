@@ -1,0 +1,88 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 外层背景渐变 -->
+    <linearGradient id="bgGrad" x1="160" y1="80" x2="860" y2="940" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#075C69"/>
+      <stop offset="0.55" stop-color="#003F4C"/>
+      <stop offset="1" stop-color="#022D38"/>
+    </linearGradient>
+    <!-- 窗口顶部栏 -->
+    <linearGradient id="barGrad" x1="170" y1="160" x2="860" y2="270" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#323B41"/>
+      <stop offset="1" stop-color="#20282E"/>
+    </linearGradient>
+    <!-- 面板背景 -->
+    <linearGradient id="panelGrad" x1="190" y1="270" x2="840" y2="860" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F1F5F6"/>
+    </linearGradient>
+    <!-- 青色原子 -->
+    <radialGradient id="cyanAtom" cx="35%" cy="28%" r="70%">
+      <stop offset="0" stop-color="#32E4F2"/>
+      <stop offset="0.65" stop-color="#09C3D7"/>
+      <stop offset="1" stop-color="#0798AE"/>
+    </radialGradient>
+    <!-- 深色原子 -->
+    <radialGradient id="darkAtom" cx="35%" cy="28%" r="72%">
+      <stop offset="0" stop-color="#3D4850"/>
+      <stop offset="1" stop-color="#20282E"/>
+    </radialGradient>
+    <!-- 柔和阴影 -->
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#00161C" flood-opacity="0.28"/>
+    </filter>
+    <filter id="windowShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#00161C" flood-opacity="0.18"/>
+    </filter>
+    <filter id="atomShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#00161C" flood-opacity="0.22"/>
+    </filter>
+    <!-- 外层裁剪，防止圆角溢出 -->
+    <clipPath id="appClip">
+      <rect x="0" y="0" width="1024" height="1024" rx="205" ry="205"/>
+    </clipPath>
+    <!-- 窗口裁剪 -->
+    <clipPath id="windowClip">
+      <rect x="126" y="126" width="772" height="742" rx="70" ry="70"/>
+    </clipPath>
+  </defs>
+  <!-- 外层图标 -->
+  <g clip-path="url(#appClip)">
+    <rect width="1024" height="1024" rx="205" fill="url(#bgGrad)"/>
+    <!-- 轻微背景高光 -->
+    <circle cx="280" cy="250" r="360" fill="#0A7A88" opacity="0.16"/>
+    <circle cx="820" cy="820" r="420" fill="#001C24" opacity="0.25"/>
+    <!-- 浏览器窗口，边框更窄，占比更大 -->
+    <g filter="url(#windowShadow)">
+      <rect x="126" y="126" width="772" height="742" rx="70" fill="url(#panelGrad)"/>
+      <g clip-path="url(#windowClip)">
+        <!-- 顶部栏 -->
+        <rect x="126" y="126" width="772" height="126" fill="url(#barGrad)"/>
+        <!-- 内容区 -->
+        <rect x="126" y="252" width="772" height="616" fill="url(#panelGrad)"/>
+      </g>
+      <!-- 窗口描边 -->
+      <rect x="126.5" y="126.5" width="771" height="741" rx="69.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.12"/>
+    </g>
+    <!-- 窗口控制按钮 -->
+    <circle cx="218" cy="203" r="22" fill="#FF5B5F"/>
+    <circle cx="293" cy="203" r="22" fill="#FFD83D"/>
+    <circle cx="368" cy="203" r="22" fill="#62D87C"/>
+    <!-- 分子结构：仅 4 个大节点 + 3 条粗连接线 -->
+    <g stroke="#252E35" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="435" y1="472" x2="679" y2="374"/>
+      <line x1="435" y1="472" x2="329" y2="691"/>
+      <line x1="435" y1="472" x2="681" y2="684"/>
+    </g>
+    <!-- 分子节点 -->
+    <circle cx="435" cy="472" r="82" fill="url(#cyanAtom)" filter="url(#atomShadow)"/>
+    <circle cx="681" cy="374" r="80" fill="url(#darkAtom)" filter="url(#atomShadow)"/>
+    <circle cx="329" cy="691" r="82" fill="url(#darkAtom)" filter="url(#atomShadow)"/>
+    <circle cx="681" cy="684" r="82" fill="url(#cyanAtom)" filter="url(#atomShadow)"/>
+    <!-- 极简高光，缩小后不影响识别 -->
+    <circle cx="405" cy="436" r="28" fill="#FFFFFF" opacity="0.12"/>
+    <circle cx="651" cy="648" r="30" fill="#FFFFFF" opacity="0.1"/>
+    <!-- 外层细微高光描边 -->
+    <rect x="1.5" y="1.5" width="1021" height="1021" rx="203.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
+  </g>
+</svg>

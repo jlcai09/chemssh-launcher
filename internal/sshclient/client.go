@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"chemweb-launcher/internal/config"
@@ -67,6 +68,48 @@ func StartRemoteCommand(client *ssh.Client, profile config.Profile, stdout, stde
 		close(proc.closed)
 	}()
 	return proc, nil
+}
+
+type CheckPortResult struct {
+	Reusable bool
+	Output   string
+}
+
+func RunCheckPortCommand(client *ssh.Client, profile config.Profile, stdout, stderr io.Writer) (CheckPortResult, error) {
+	session, err := client.NewSession()
+	if err != nil {
+		return CheckPortResult{}, err
+	}
+	defer session.Close()
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	var output strings.Builder
+	writer := io.MultiWriter(&output, stdout)
+	session.Stdout = writer
+	session.Stderr = io.MultiWriter(&output, stderr)
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return CheckPortResult{}, err
+	}
+	if err := session.Start("bash -s"); err != nil {
+		return CheckPortResult{}, err
+	}
+	if _, err := io.WriteString(stdin, AssembleCheckPortCommand(profile)); err != nil {
+		_ = stdin.Close()
+		return CheckPortResult{}, err
+	}
+	_ = stdin.Close()
+	err = session.Wait()
+	text := output.String()
+	return CheckPortResult{
+		Reusable: strings.Contains(text, "used by a reusable Chemweb server"),
+		Output:   text,
+	}, err
 }
 
 func (p *RemoteProcess) Done() <-chan error {

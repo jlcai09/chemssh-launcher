@@ -17,6 +17,8 @@ type Tunnel struct {
 	client   *ssh.Client
 	remote   string
 	cancel   context.CancelFunc
+	mu       sync.Mutex
+	conns    map[net.Conn]struct{}
 	wg       sync.WaitGroup
 }
 
@@ -33,6 +35,7 @@ func StartTunnel(ctx context.Context, client *ssh.Client, profile config.Profile
 		client:   client,
 		remote:   profile.RemoteAddress(),
 		cancel:   cancel,
+		conns:    make(map[net.Conn]struct{}),
 	}
 	t.wg.Add(1)
 	go t.accept(ctx)
@@ -42,6 +45,7 @@ func StartTunnel(ctx context.Context, client *ssh.Client, profile config.Profile
 func (t *Tunnel) Close() error {
 	t.cancel()
 	err := t.listener.Close()
+	t.closeActiveConnections()
 	t.wg.Wait()
 	return err
 }
@@ -59,6 +63,7 @@ func (t *Tunnel) accept(ctx context.Context) {
 				continue
 			}
 		}
+		t.addConn(local)
 		t.wg.Add(1)
 		go t.handle(local)
 	}
@@ -66,6 +71,7 @@ func (t *Tunnel) accept(ctx context.Context) {
 
 func (t *Tunnel) handle(local net.Conn) {
 	defer t.wg.Done()
+	defer t.removeConn(local)
 	defer local.Close()
 
 	remote, err := t.client.Dial("tcp", t.remote)
@@ -73,12 +79,39 @@ func (t *Tunnel) handle(local net.Conn) {
 		log.Printf("tunnel dial error: %v", err)
 		return
 	}
+	t.addConn(remote)
+	defer t.removeConn(remote)
 	defer remote.Close()
 
 	done := make(chan struct{}, 2)
 	go copyAndClose(local, remote, done)
 	go copyAndClose(remote, local, done)
 	<-done
+}
+
+func (t *Tunnel) addConn(conn net.Conn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.conns[conn] = struct{}{}
+}
+
+func (t *Tunnel) removeConn(conn net.Conn) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.conns, conn)
+}
+
+func (t *Tunnel) closeActiveConnections() {
+	t.mu.Lock()
+	conns := make([]net.Conn, 0, len(t.conns))
+	for conn := range t.conns {
+		conns = append(conns, conn)
+	}
+	t.mu.Unlock()
+
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 }
 
 func copyAndClose(dst, src net.Conn, done chan<- struct{}) {
