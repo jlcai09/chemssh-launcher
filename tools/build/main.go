@@ -107,15 +107,60 @@ func replaceJSONString(text, key, value string) string {
 }
 
 func makeWindowsResources(root string) error {
+	out := filepath.Join(root, "cmd", "chemweb-launcher", fmt.Sprintf("rsrc_windows_%s.syso", runtime.GOARCH))
+	inputs, err := windowsResourceInputs(root)
+	if err != nil {
+		return err
+	}
+	fresh, err := outputIsFresh(out, inputs)
+	if err != nil {
+		return err
+	}
+	if fresh {
+		fmt.Println("winres resources are up to date")
+		return nil
+	}
 	args := []string{
-		"run",
-		"github.com/tc-hib/go-winres@v0.3.3",
 		"make",
 		"--in", filepath.Join("winres", "winres.json"),
 		"--arch", runtime.GOARCH,
 		"--out", filepath.Join("cmd", "chemweb-launcher", "rsrc"),
 	}
-	return run(root, "go", args...)
+	if _, err := exec.LookPath("go-winres"); err == nil {
+		return run(root, "go-winres", args...)
+	}
+	fmt.Println("go-winres was not found; falling back to go run github.com/tc-hib/go-winres@v0.3.3")
+	return run(root, "go", append([]string{"run", "github.com/tc-hib/go-winres@v0.3.3"}, args...)...)
+}
+
+func windowsResourceInputs(root string) ([]string, error) {
+	inputs := []string{filepath.Join(root, "winres", "winres.json")}
+	pngs, err := filepath.Glob(filepath.Join(root, "winres", "*.png"))
+	if err != nil {
+		return nil, err
+	}
+	inputs = append(inputs, pngs...)
+	return inputs, nil
+}
+
+func outputIsFresh(output string, inputs []string) (bool, error) {
+	outInfo, err := os.Stat(output)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, input := range inputs {
+		info, err := os.Stat(input)
+		if err != nil {
+			return false, err
+		}
+		if info.ModTime().After(outInfo.ModTime()) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func goBuild(root string, webview2, windowsGUI bool, out string) error {

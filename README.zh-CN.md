@@ -143,7 +143,13 @@ chemweb-launcher start <name-or-id>
 
 本项目不需要 Python、Node、Electron，也不需要系统 `ssh` 命令。Go 会在首次构建或测试时自动下载 `go.mod` 里的模块依赖。
 
-Windows 图标和版本资源由构建工具自动生成，不需要手动安装 `go-winres`；首次运行 `go run ./tools/build` 时，Go 会自动下载 `github.com/tc-hib/go-winres`。如果构建 WebView2 版本，运行机器还需要 Microsoft Edge WebView2 Runtime；Windows 10/11 通常已经预装。
+Windows 图标和版本资源由构建工具自动生成。为了获得稳定的离线构建体验，建议先一次性安装 `go-winres`：
+
+```bash
+go install github.com/tc-hib/go-winres@v0.3.3
+```
+
+当需要重新生成 Windows 资源时，构建工具会优先使用已安装的 `go-winres`。如果没有安装，则回退到 `go run github.com/tc-hib/go-winres@v0.3.3`，这一步可能需要联网。如果构建 WebView2 版本，运行机器还需要 Microsoft Edge WebView2 Runtime；Windows 10/11 通常已经预装。
 
 ## 构建
 
