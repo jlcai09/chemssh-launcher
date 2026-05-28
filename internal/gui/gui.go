@@ -10,6 +10,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +39,7 @@ type Server struct {
 	logs     *safeLog
 	localLog *safeLog
 	options  Options
+	baseURL  string
 	mu       sync.Mutex
 	session  *activeSession
 	shutdown context.CancelFunc
@@ -83,6 +86,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 		return err
 	}
 	addr := "http://" + ln.Addr().String()
+	server.baseURL = addr
 	startLine := "Chemweb Launcher " + version.String() + " GUI: " + addr
 	server.localLog.add(startLine)
 	fmt.Fprintln(stdout, startLine)
@@ -152,6 +156,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/shell", s.handleShell)
 	s.mux.HandleFunc("/launcher-logs", s.handleLauncherLogsPage)
+	s.mux.HandleFunc("/chemweb", s.handleChemwebProxy)
+	s.mux.HandleFunc("/chemweb/", s.handleChemwebProxy)
+	s.mux.HandleFunc("/assets/", s.handleChemwebProxy)
 	s.mux.Handle("/static/", http.FileServer(http.FS(assets)))
 	s.mux.HandleFunc("/api/profiles", s.handleProfiles)
 	s.mux.HandleFunc("/api/profiles/", s.handleProfileByID)
@@ -164,6 +171,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/launcher-logs", s.handleLauncherLogs)
 	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/defaults", s.handleDefaults)
+	s.mux.HandleFunc("/api/", s.handleChemwebProxy)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -490,10 +498,130 @@ func (s *Server) openSessionURL(p config.Profile) {
 	if s.options.UseWebView && !s.options.ForceBrowser {
 		return
 	}
-	url := p.BrowserURL()
+	url := s.sessionProxyURL(p)
 	if err := browser.Open(url); err != nil {
 		s.logs.add("warning: could not open browser: " + err.Error())
 	}
+}
+
+func (s *Server) sessionProxyURL(p config.Profile) string {
+	path := normalizedProxyPath(p.LocalURLPath)
+	if path == "/" {
+		return s.baseURL + "/chemweb"
+	}
+	return s.baseURL + "/chemweb" + path
+}
+
+func normalizedProxyPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if path[0] != '/' {
+		return "/" + path
+	}
+	return path
+}
+
+func (s *Server) activeChemwebTarget() (*url.URL, *activeSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.session
+	if session == nil || !session.forwarding {
+		return nil, nil
+	}
+	target, err := url.Parse("http://" + session.profile.LocalAddress())
+	if err != nil {
+		return nil, nil
+	}
+	return target, session
+}
+
+func (s *Server) handleChemwebProxy(w http.ResponseWriter, r *http.Request) {
+	target, session := s.activeChemwebTarget()
+	if target == nil || session == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("chemweb service is not available; start forwarding first"))
+		return
+	}
+	proxy := s.newChemwebReverseProxy(target)
+	proxy.ServeHTTP(w, s.rewriteChemwebProxyRequest(r, target))
+}
+
+func (s *Server) rewriteChemwebProxyRequest(r *http.Request, target *url.URL) *http.Request {
+	req := r.Clone(r.Context())
+	req.Host = target.Host
+	req.URL.Scheme = target.Scheme
+	req.URL.Host = target.Host
+	req.URL.Path = chemwebProxyTargetPath(r.URL.Path)
+	req.URL.RawPath = req.URL.Path
+	return req
+}
+
+func chemwebProxyTargetPath(path string) string {
+	switch {
+	case path == "/chemweb":
+		return "/"
+	case strings.HasPrefix(path, "/chemweb/"):
+		trimmed := strings.TrimPrefix(path, "/chemweb")
+		if trimmed == "" {
+			return "/"
+		}
+		return trimmed
+	default:
+		return path
+	}
+}
+
+func (s *Server) newChemwebReverseProxy(target *url.URL) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = target.Host
+		req.Header.Set("X-Forwarded-Host", target.Host)
+		req.Header.Set("X-Forwarded-Proto", "http")
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy Chemweb request failed: %w", err))
+	}
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		location := resp.Header.Get("Location")
+		if location == "" {
+			return nil
+		}
+		rewritten := rewriteChemwebLocationHeader(location, target)
+		if rewritten != "" {
+			resp.Header.Set("Location", rewritten)
+		}
+		return nil
+	}
+	return proxy
+}
+
+func rewriteChemwebLocationHeader(location string, target *url.URL) string {
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return ""
+	}
+	if parsed.IsAbs() {
+		if !sameHost(parsed, target) {
+			return ""
+		}
+		parsed.Scheme = ""
+		parsed.Host = ""
+	}
+	if parsed.Path == "/" {
+		parsed.Path = "/chemweb"
+	} else if strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(parsed.Path, "/chemweb") {
+		parsed.Path = "/chemweb" + parsed.Path
+	}
+	return parsed.String()
+}
+
+func sameHost(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Hostname(), b.Hostname()) && a.Port() == b.Port()
 }
 
 func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
@@ -748,7 +876,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	url := ""
 	if running && forwarding {
-		url = session.profile.BrowserURL()
+		url = s.sessionProxyURL(session.profile)
 	}
 	openBrowser := false
 	if running {

@@ -24,6 +24,8 @@ chemweb-launcher-webview2.exe
 
 `--browser` 可以强制使用系统浏览器。`--webview` 可以在支持 WebView2 的构建中显式请求内嵌模式。`--devtools` 仅用于调试 WebView2 内嵌页面。普通 WebView2 模式会关闭 DevTools 快捷键，并拦截 `Ctrl+Shift+C`，避免它打开 DevTools。
 
+WebView2 模式下，Chemweb 会通过启动器自己的同源代理打开，而不是直接打开 tunnel 地址。例如启动器日志显示 `GUI: http://127.0.0.1:63456` 时，Chemweb 页面会使用 `http://127.0.0.1:63456/chemweb`，不是 `http://127.0.0.1:8888`。这样可以避开 WebView2 跨源 iframe 的外拖限制，通过代理页面把 Chemweb 文件拖拽到桌面。
+
 ## 常用字段
 
 `SSH Host`、`SSH Port`、`SSH User` 用于连接远程服务器。

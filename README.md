@@ -24,6 +24,8 @@ chemweb-launcher-webview2.exe
 
 Use `--browser` to force the system browser. Use `--webview` to request embedded mode explicitly in builds that support it. Use `--devtools` only when debugging the embedded page. In normal WebView2 mode, DevTools shortcuts are disabled and `Ctrl+Shift+C` is intercepted so it does not open DevTools.
 
+In WebView2 mode, Chemweb is opened through the launcher's own same-origin proxy instead of directly through the tunnel URL. For example, if the launcher prints `GUI: http://127.0.0.1:63456`, Chemweb is opened as `http://127.0.0.1:63456/chemweb`, not `http://127.0.0.1:8888`. This avoids cross-origin iframe drag limitations in WebView2 and allows dragging files from Chemweb to the desktop through the proxy page.
+
 ## CLI Commands
 
 ```bash
