@@ -1,5 +1,3 @@
-const legacyDefaultStartCommand = "chemweb --config config.yaml";
-
 let defaults = {
   id: "",
   name: "",
@@ -16,7 +14,7 @@ let defaults = {
   local_port: 8888,
   local_url_path: "/",
   pre_start_commands: "",
-  start_command: legacyDefaultStartCommand,
+  start_command: "",
   health_check_url: "",
   open_browser: true
 };
@@ -243,10 +241,10 @@ async function loadProfiles() {
   if (!profiles.length) {
     current = { ...defaults };
   } else if (!current.id || !profiles.some((profile) => profile.id === current.id)) {
-    current = normalizeProfile({ ...defaults, ...profiles[0] });
+    current = { ...defaults, ...profiles[0] };
   } else {
     const selected = profiles.find((profile) => profile.id === current.id);
-    current = normalizeProfile({ ...defaults, ...selected });
+    current = { ...defaults, ...selected };
   }
 
   renderProfiles();
@@ -254,7 +252,7 @@ async function loadProfiles() {
 }
 
 function setCurrent(profile) {
-  current = normalizeProfile({ ...defaults, ...profile });
+  current = { ...defaults, ...profile };
   fillForm();
   renderProfiles();
 }
@@ -462,14 +460,6 @@ async function loadVersion() {
 async function loadDefaults() {
   defaults = { ...defaults, ...(await api("/api/defaults")) };
   if (!current.id) current = { ...defaults };
-}
-
-function normalizeProfile(profile) {
-  const normalized = { ...profile };
-  if ((normalized.start_command || "").trim() === legacyDefaultStartCommand) {
-    normalized.start_command = defaults.start_command;
-  }
-  return normalized;
 }
 
 async function runWithFeedback(message, fn, rollback) {

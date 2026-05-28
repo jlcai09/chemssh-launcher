@@ -70,10 +70,6 @@ func (p Profile) HealthURL() string {
 	return p.BrowserURL()
 }
 
-func (p Profile) LocalURL() string {
-	return p.BrowserURL()
-}
-
 func normalizeURLPath(path string) string {
 	if path == "" {
 		path = "/"

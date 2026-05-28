@@ -391,33 +391,6 @@ async function handleAddressEditAction(action) {
   }
 }
 
-async function handleNativeFileDragMessage(event, data) {
-  const requestId = data.requestId;
-  const payload = data.payload;
-  const reply = (ok, error = "") => {
-    if (!event.source || !requestId) return;
-    try {
-      event.source.postMessage({
-        type: "chemweb-launcher:native-file-drag-result",
-        requestId,
-        ok,
-        error
-      }, event.origin || "*");
-    } catch (_) {
-    }
-  };
-
-  try {
-    if (!requestId || !payload || typeof window.chemwebStartNativeFileDrag !== "function") {
-      throw new Error("native file drag is not available");
-    }
-    await window.chemwebStartNativeFileDrag(payload);
-    reply(true);
-  } catch (err) {
-    reply(false, err && err.message ? err.message : String(err));
-  }
-}
-
 async function pollSession() {
   try {
     const res = await fetch("/api/session/status");
@@ -490,9 +463,6 @@ window.addEventListener("message", (event) => {
   }
   if (data.type === "chemweb-launcher:close-downloads") {
     closeDownloadsPanel();
-  }
-  if (data.type === "chemweb-launcher:native-file-drag") {
-    handleNativeFileDragMessage(event, data);
   }
 });
 
