@@ -2,9 +2,9 @@
 
 ## Project Purpose
 
-This project is a standalone Chemweb launcher written in Go. It should produce a small single-file executable that can connect to a remote server over SSH, run Chemweb there, create a local SSH tunnel, check the local URL, and open the browser.
+This project is a standalone ChemSSH launcher written in Go. It should produce a small single-file executable that can connect to a remote server over SSH, run ChemSSH there, create a local SSH tunnel, check the local URL, and open the browser.
 
-The launcher exists because Chemweb is usually run on a remote Linux server or HPC login node while the browser runs locally. Users should not need to manually open two SSH sessions.
+The launcher exists because ChemSSH is usually run on a remote Linux server or HPC login node while the browser runs locally. Users should not need to manually open two SSH sessions.
 
 ## Core Direction
 
@@ -20,12 +20,12 @@ The launcher exists because Chemweb is usually run on a remote Linux server or H
 - Decode and write repository text files as UTF-8.
 - Documentation files, especially README.md, README.zh-CN.md, and AGENTS.md, must remain valid UTF-8.
 
-## Chemweb Context
+## ChemSSH Context
 
-Chemweb normally starts like this on the remote machine:
+ChemSSH normally starts like this on the remote machine:
 
 ```bash
-chemweb --config config.yaml --host 127.0.0.1 --port 8888
+chemssh --config config.yaml --host 127.0.0.1 --port 8888
 ```
 
 It is intentionally bound to `127.0.0.1` on the remote server. The launcher should forward a local port to that remote loopback address:
@@ -47,7 +47,7 @@ Implement these before polishing:
 3. Password login.
 4. Private key login.
 5. Multi-line pre-start commands.
-6. Multi-line Chemweb start command.
+6. Multi-line ChemSSH start command.
 7. Local port conflict detection.
 8. SSH local port forwarding.
 9. Health check for local URL.
@@ -94,7 +94,7 @@ Preferred implementation:
 - Use an OS credential store library such as `github.com/zalando/go-keyring`.
 - Store profile JSON separately from secrets.
 - Use keys like:
-  - service: `chemweb-launcher`
+  - service: `chemssh-launcher`
   - username: `<profile-id>:password`
   - username: `<profile-id>:key-passphrase`
 
@@ -199,12 +199,12 @@ Avoid Electron-style stacks. This is intended to stay small.
 Initial commands:
 
 ```bash
-chemweb-launcher profile list
-chemweb-launcher profile add
-chemweb-launcher profile edit <name-or-id>
-chemweb-launcher profile delete <name-or-id>
-chemweb-launcher profile test <name-or-id>
-chemweb-launcher start <name-or-id>
+chemssh-launcher profile list
+chemssh-launcher profile add
+chemssh-launcher profile edit <name-or-id>
+chemssh-launcher profile delete <name-or-id>
+chemssh-launcher profile test <name-or-id>
+chemssh-launcher start <name-or-id>
 ```
 
 Interactive profile creation is acceptable and preferred for v1.
@@ -224,7 +224,7 @@ Prompt defaults:
 Start with this structure:
 
 ```text
-cmd/chemweb-launcher/main.go
+cmd/chemssh-launcher/main.go
 internal/app/
 internal/config/
 internal/secret/
@@ -277,7 +277,7 @@ Tunnel integration tests can be added later with a local SSH test server or manu
 - Do not show saved passwords while editing.
 - Do not silently bind to `0.0.0.0`.
 - Do not rewrite custom user commands behind their back.
-- Do not require Chemweb to listen on a public interface.
+- Do not require ChemSSH to listen on a public interface.
 - Do not assume the remote machine has npm, conda, module, or bash unless the user configured commands accordingly.
 
 ## Manual Smoke Test
@@ -289,20 +289,20 @@ Expected happy path:
 3. Use pre-start commands:
 
 ```bash
-cd /home/user/chemweb
+cd /home/user/chemssh
 source .venv/bin/activate
 ```
 
 4. Use start command:
 
 ```bash
-chemweb --config config.yaml --host 127.0.0.1 --port 8888
+chemssh --config config.yaml --host 127.0.0.1 --port 8888
 ```
 
 5. Run:
 
 ```bash
-chemweb-launcher start <profile>
+chemssh-launcher start <profile>
 ```
 
 6. Confirm local URL opens:

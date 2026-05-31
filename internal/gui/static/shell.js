@@ -179,10 +179,10 @@ async function openDownloadsPanel() {
   const button = $("downloads");
   if (button) button.disabled = true;
   try {
-    if (typeof window.chemwebOpenDownloads !== "function") {
+    if (typeof window.chemsshOpenDownloads !== "function") {
       throw new Error("当前浏览器不支持内置下载面板入口");
     }
-    await window.chemwebOpenDownloads();
+    await window.chemsshOpenDownloads();
     showDownloadsBackdrop();
   } catch (err) {
     console.error("open downloads panel failed", err);
@@ -195,9 +195,9 @@ async function openDownloadsPanel() {
 
 async function closeDownloadsPanel() {
   hideDownloadsBackdrop();
-  if (typeof window.chemwebCloseDownloads !== "function") return;
+  if (typeof window.chemsshCloseDownloads !== "function") return;
   try {
-    await window.chemwebCloseDownloads();
+    await window.chemsshCloseDownloads();
   } catch (_) {
   }
 }
@@ -398,7 +398,7 @@ async function pollSession() {
     const url = status.forwarding && status.url ? status.url : "";
     if (url && status.open_browser !== false && url !== lastSessionURL) {
       lastSessionURL = url;
-      openOrFocus(status.name || "Chemweb", url);
+      openOrFocus(status.name || "ChemSSH", url);
       return;
     }
     if (!url) lastSessionURL = "";
@@ -458,10 +458,10 @@ window.addEventListener("keydown", (event) => {
 });
 window.addEventListener("message", (event) => {
   const data = event.data || {};
-  if (data.type === "chemweb-launcher:new-tab" && data.url) {
+  if (data.type === "chemssh-launcher:new-tab" && data.url) {
     openOrFocus(shortTitle(data.url), data.url);
   }
-  if (data.type === "chemweb-launcher:close-downloads") {
+  if (data.type === "chemssh-launcher:close-downloads") {
     closeDownloadsPanel();
   }
 });

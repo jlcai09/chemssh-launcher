@@ -1,8 +1,8 @@
-# Chemweb Launcher 中文说明
+# ChemSSH Launcher 中文说明
 
 [English](README.md) | 中文
 
-Chemweb Launcher 是一个用 Go 编写的小型 GUI 启动器，用来通过 SSH 在远程 Linux 服务器或 HPC 登录节点上启动 Chemweb，并在本机浏览器里访问。
+ChemSSH Launcher 是一个用 Go 编写的小型 GUI 启动器，用来通过 SSH 在远程 Linux 服务器或 HPC 登录节点上启动 ChemSSH，并在本机浏览器里访问。
 
 程序不依赖 Python、Node、Electron 或系统 `ssh` 命令。直接运行后会启动一个只绑定在 `127.0.0.1` 的本地 Web GUI，并自动打开浏览器。
 
@@ -11,20 +11,20 @@ Chemweb Launcher 是一个用 Go 编写的小型 GUI 启动器，用来通过 SS
 双击或直接运行：
 
 ```bash
-chemweb-launcher
+chemssh-launcher
 ```
 
-页面里可以新建/编辑/删除服务器 profile，保存 SSH 密码或私钥 passphrase，测试 SSH，启动远程 Chemweb，建立本地 SSH tunnel，查看日志，并停止当前 session。
+页面里可以新建/编辑/删除服务器 profile，保存 SSH 密码或私钥 passphrase，测试 SSH，启动远程 ChemSSH，建立本地 SSH tunnel，查看日志，并停止当前 session。
 
-Windows 下如果使用带 WebView2 的构建，默认不依赖系统浏览器，而是用内嵌窗口打开启动器和 Chemweb 页面：
+Windows 下如果使用带 WebView2 的构建，默认不依赖系统浏览器，而是用内嵌窗口打开启动器和 ChemSSH 页面：
 
 ```bash
-chemweb-launcher-webview2.exe
+chemssh-launcher-webview2.exe
 ```
 
 `--browser` 可以强制使用系统浏览器。`--webview` 可以在支持 WebView2 的构建中显式请求内嵌模式。`--devtools` 仅用于调试 WebView2 内嵌页面。普通 WebView2 模式会关闭 DevTools 快捷键，并拦截 `Ctrl+Shift+C`，避免它打开 DevTools。
 
-WebView2 模式下，Chemweb 会通过启动器自己的同源代理打开，而不是直接打开 tunnel 地址。例如启动器日志显示 `GUI: http://127.0.0.1:63456` 时，Chemweb 页面会使用 `http://127.0.0.1:63456/chemweb`，不是 `http://127.0.0.1:8888`。这样可以避开 WebView2 跨源 iframe 的外拖限制，通过代理页面把 Chemweb 文件拖拽到桌面。
+WebView2 模式下，ChemSSH 会通过启动器自己的同源代理打开，而不是直接打开 tunnel 地址。例如启动器日志显示 `GUI: http://127.0.0.1:63456` 时，ChemSSH 页面会使用 `http://127.0.0.1:63456/chemssh`，不是 `http://127.0.0.1:8888`。这样可以避开 WebView2 跨源 iframe 的外拖限制，通过代理页面把 ChemSSH 文件拖拽到桌面。
 
 ## 常用字段
 
@@ -34,11 +34,11 @@ WebView2 模式下，Chemweb 会通过启动器自己的同源代理打开，而
 
 `Secrets` 用于保存 SSH 密码或私钥 passphrase。已保存的 secret 只显示为 `*******`，不会明文展示。点击 `Edit` 可以替换；编辑后留空并保存会清除对应 secret。
 
-`Remote Host`、`Remote Port` 是 Chemweb 在远程机器上的监听地址，默认 `127.0.0.1:8888`。
+`Remote Host`、`Remote Port` 是 ChemSSH 在远程机器上的监听地址，默认 `127.0.0.1:8888`。
 
 `Local Host`、`Local Port` 是本机 tunnel 的监听地址，默认 `127.0.0.1:8888`。本地浏览器访问的是这个地址。
 
-`Local URL Path` 是本机浏览器打开的路径，默认 `/`。如果 Chemweb 入口在 `/chemweb/` 之类的子路径，就填对应路径。
+`Local URL Path` 是本机浏览器打开的路径，默认 `/`。如果 ChemSSH 入口在 `/chemssh/` 之类的子路径，就填对应路径。
 
 `Health Check URL` 通常留空。留空时程序检查 `http://<Local Host>:<Local Port><Local URL Path>`。只有服务有专门的 `/health`、`/status` 等检查地址时才需要填写。
 
@@ -48,23 +48,23 @@ WebView2 模式下，Chemweb 会通过启动器自己的同源代理打开，而
 
 ```bash
 source .venv/bin/activate
-__chemweb_conda_prompt=""
+__chemssh_conda_prompt=""
 if [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
-  __chemweb_conda_prompt="(${CONDA_DEFAULT_ENV}) "
+  __chemssh_conda_prompt="(${CONDA_DEFAULT_ENV}) "
 fi
 
-__chemweb_venv_prompt=""
+__chemssh_venv_prompt=""
 if [ -n "${VIRTUAL_ENV:-}" ]; then
-  __chemweb_venv_prompt="($(basename "$VIRTUAL_ENV")) "
+  __chemssh_venv_prompt="($(basename "$VIRTUAL_ENV")) "
 fi
 
-__chemweb_prompt_char="$"
+__chemssh_prompt_char="$"
 if [ "$(id -u)" = "0" ]; then
-  __chemweb_prompt_char="#"
+  __chemssh_prompt_char="#"
 fi
 
-export PS1="${__chemweb_conda_prompt}${__chemweb_venv_prompt}[\u@\h \W]${__chemweb_prompt_char} "
-chemweb --config config.yaml
+export PS1="${__chemssh_conda_prompt}${__chemssh_venv_prompt}[\u@\h \W]${__chemssh_prompt_char} "
+chemssh --config config.yaml
 ```
 
 程序运行时会自动追加：
@@ -100,29 +100,29 @@ chemweb --config config.yaml
 
 非 secret 的 SSH/profile 配置保存为 JSON：
 
-- Windows: `%AppData%\ChemwebLauncher\profiles.json`
-- macOS: `~/Library/Application Support/ChemwebLauncher/profiles.json`
-- Linux: `~/.config/chemweb-launcher/profiles.json`
+- Windows: `%AppData%\ChemSSHLauncher\profiles.json`
+- macOS: `~/Library/Application Support/ChemSSHLauncher/profiles.json`
+- Linux: `~/.config/chemssh-launcher/profiles.json`
 
 SSH host key 保存为 OpenSSH 兼容格式：
 
-- Windows: `%AppData%\ChemwebLauncher\known_hosts`
-- macOS: `~/Library/Application Support/ChemwebLauncher/known_hosts`
-- Linux: `~/.config/chemweb-launcher/known_hosts`
+- Windows: `%AppData%\ChemSSHLauncher\known_hosts`
+- macOS: `~/Library/Application Support/ChemSSHLauncher/known_hosts`
+- Linux: `~/.config/chemssh-launcher/known_hosts`
 
 密码和私钥 passphrase 不会写入 `profiles.json`。默认保存到系统凭证管理器：
 
-- service: `chemweb-launcher`
+- service: `chemssh-launcher`
 - username: `<profile-id>:password`
 - username: `<profile-id>:key-passphrase`
 
 这通常比自己在应用里写一套加密逻辑更安全，因为系统凭证管理器会使用操作系统的账户隔离、加密和访问控制。
 
-如果系统凭证管理器不可用，可以设置环境变量 `CHEMWEB_LAUNCHER_VAULT_PASSWORD`，程序会改用本地加密 vault：
+如果系统凭证管理器不可用，可以设置环境变量 `CHEMSSH_LAUNCHER_VAULT_PASSWORD`，程序会改用本地加密 vault：
 
-- Windows: `%AppData%\ChemwebLauncher\vault.json`
-- macOS: `~/Library/Application Support/ChemwebLauncher/vault.json`
-- Linux: `~/.config/chemweb-launcher/vault.json`
+- Windows: `%AppData%\ChemSSHLauncher\vault.json`
+- macOS: `~/Library/Application Support/ChemSSHLauncher/vault.json`
+- Linux: `~/.config/chemssh-launcher/vault.json`
 
 vault 密码不会被程序保存。
 
@@ -131,12 +131,12 @@ vault 密码不会被程序保存。
 GUI 是主要入口，CLI 保留用于调试和自动化：
 
 ```bash
-chemweb-launcher profile list
-chemweb-launcher profile add
-chemweb-launcher profile edit <name-or-id>
-chemweb-launcher profile delete <name-or-id>
-chemweb-launcher profile test <name-or-id>
-chemweb-launcher start <name-or-id>
+chemssh-launcher profile list
+chemssh-launcher profile add
+chemssh-launcher profile edit <name-or-id>
+chemssh-launcher profile delete <name-or-id>
+chemssh-launcher profile test <name-or-id>
+chemssh-launcher start <name-or-id>
 ```
 
 ## 开发依赖
@@ -159,7 +159,7 @@ go install github.com/tc-hib/go-winres@v0.3.3
 go run ./tools/build
 ```
 
-Windows 下会生成 `chemweb-launcher.exe`。构建工具会先读取 `internal/version/VERSION`，同步 `winres/winres.json`，并重新生成 Windows 资源文件。
+Windows 下会生成 `chemssh-launcher.exe`。构建工具会先读取 `internal/version/VERSION`，同步 `winres/winres.json`，并重新生成 Windows 资源文件。
 
 默认构建不包含 WebView2。Windows 下可以单独构建 WebView2 版本：
 
@@ -187,7 +187,7 @@ internal/version/VERSION
 使用 `go run ./tools/build` 构建时，会自动把这个版本同步到 Windows 资源信息。版本号会显示在 GUI 左侧栏，也可以用命令查看：
 
 ```bash
-chemweb-launcher --version
+chemssh-launcher --version
 ```
 
 ## 仓库说明

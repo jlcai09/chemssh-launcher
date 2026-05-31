@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"chemweb-launcher/internal/config"
+	"chemssh-launcher/internal/config"
 )
 
 func AssembleRemoteCommand(profile config.Profile) string {
@@ -15,29 +15,29 @@ func AssembleRemoteCommand(profile config.Profile) string {
 		b.WriteString(strings.TrimRight(profile.PreStartCommands, "\r\n"))
 		b.WriteByte('\n')
 	}
-	b.WriteString("__chemweb_launcher_pid=\n")
-	b.WriteString("__chemweb_launcher_cleanup() {\n")
-	b.WriteString("  if [ -n \"$__chemweb_launcher_pid\" ]; then\n")
-	b.WriteString("    kill -TERM \"$__chemweb_launcher_pid\" 2>/dev/null || true\n")
+	b.WriteString("__chemssh_launcher_pid=\n")
+	b.WriteString("__chemssh_launcher_cleanup() {\n")
+	b.WriteString("  if [ -n \"$__chemssh_launcher_pid\" ]; then\n")
+	b.WriteString("    kill -TERM \"$__chemssh_launcher_pid\" 2>/dev/null || true\n")
 	b.WriteString("    i=0\n")
-	b.WriteString("    while kill -0 \"$__chemweb_launcher_pid\" 2>/dev/null && [ \"$i\" -lt 5 ]; do\n")
+	b.WriteString("    while kill -0 \"$__chemssh_launcher_pid\" 2>/dev/null && [ \"$i\" -lt 5 ]; do\n")
 	b.WriteString("      i=$((i + 1))\n")
 	b.WriteString("      sleep 1\n")
 	b.WriteString("    done\n")
-	b.WriteString("    kill -KILL \"$__chemweb_launcher_pid\" 2>/dev/null || true\n")
-	b.WriteString("    wait \"$__chemweb_launcher_pid\" 2>/dev/null || true\n")
+	b.WriteString("    kill -KILL \"$__chemssh_launcher_pid\" 2>/dev/null || true\n")
+	b.WriteString("    wait \"$__chemssh_launcher_pid\" 2>/dev/null || true\n")
 	b.WriteString("  fi\n")
 	b.WriteString("}\n")
-	b.WriteString("trap '__chemweb_launcher_cleanup; exit 143' INT TERM HUP\n")
+	b.WriteString("trap '__chemssh_launcher_cleanup; exit 143' INT TERM HUP\n")
 	b.WriteString(backgroundLastCommand(EffectiveStartCommand(profile)))
-	b.WriteString("__chemweb_launcher_pid=$!\n")
+	b.WriteString("__chemssh_launcher_pid=$!\n")
 	b.WriteString("set +e\n")
-	b.WriteString("wait \"$__chemweb_launcher_pid\"\n")
-	b.WriteString("__chemweb_launcher_status=$?\n")
+	b.WriteString("wait \"$__chemssh_launcher_pid\"\n")
+	b.WriteString("__chemssh_launcher_status=$?\n")
 	b.WriteString("set -e\n")
 	b.WriteString("trap - INT TERM HUP\n")
-	b.WriteString("__chemweb_launcher_cleanup\n")
-	b.WriteString("exit \"$__chemweb_launcher_status\"\n")
+	b.WriteString("__chemssh_launcher_cleanup\n")
+	b.WriteString("exit \"$__chemssh_launcher_status\"\n")
 	return b.String()
 }
 
@@ -45,14 +45,14 @@ func AssembleKillPIDCommand(pid int) string {
 	pidValue := shellQuote(strconv.Itoa(pid))
 	return strings.Join([]string{
 		"set +e",
-		"__chemweb_launcher_pid=" + pidValue,
-		"kill -TERM \"$__chemweb_launcher_pid\" 2>/dev/null || true",
+		"__chemssh_launcher_pid=" + pidValue,
+		"kill -TERM \"$__chemssh_launcher_pid\" 2>/dev/null || true",
 		"i=0",
-		"while kill -0 \"$__chemweb_launcher_pid\" 2>/dev/null && [ \"$i\" -lt 5 ]; do",
+		"while kill -0 \"$__chemssh_launcher_pid\" 2>/dev/null && [ \"$i\" -lt 5 ]; do",
 		"  i=$((i + 1))",
 		"  sleep 1",
 		"done",
-		"kill -KILL \"$__chemweb_launcher_pid\" 2>/dev/null || true",
+		"kill -KILL \"$__chemssh_launcher_pid\" 2>/dev/null || true",
 		"exit 0",
 		"",
 	}, "\n")

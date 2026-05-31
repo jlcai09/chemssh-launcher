@@ -11,13 +11,13 @@ import (
 	"strconv"
 	"strings"
 
-	"chemweb-launcher/internal/app"
-	"chemweb-launcher/internal/config"
-	"chemweb-launcher/internal/netcheck"
-	"chemweb-launcher/internal/runtime"
-	"chemweb-launcher/internal/secret"
-	"chemweb-launcher/internal/sshclient"
-	"chemweb-launcher/internal/version"
+	"chemssh-launcher/internal/app"
+	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/netcheck"
+	"chemssh-launcher/internal/runtime"
+	"chemssh-launcher/internal/secret"
+	"chemssh-launcher/internal/sshclient"
+	"chemssh-launcher/internal/version"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
@@ -31,7 +31,7 @@ func Run(args []string, in io.Reader, out, errOut io.Writer) error {
 
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Fprintln(out, "chemweb-launcher", version.String())
+		fmt.Fprintln(out, "chemssh-launcher", version.String())
 		return nil
 	}
 
@@ -45,7 +45,7 @@ func Run(args []string, in io.Reader, out, errOut io.Writer) error {
 		return runProfile(args[1:], in, out, errOut, rt.Profiles, rt.Secrets)
 	case "start":
 		if len(args) != 2 {
-			return errors.New("usage: chemweb-launcher start <profile>")
+			return errors.New("usage: chemssh-launcher start <profile>")
 		}
 		return runStart(args[1], in, out, errOut, rt.Profiles, rt.Secrets)
 	default:
@@ -66,17 +66,17 @@ func runProfile(args []string, in io.Reader, out, errOut io.Writer, profiles con
 		return addProfile(in, out, profiles, secrets)
 	case "edit":
 		if len(args) != 2 {
-			return errors.New("usage: chemweb-launcher profile edit <profile>")
+			return errors.New("usage: chemssh-launcher profile edit <profile>")
 		}
 		return editProfile(args[1], in, out, profiles, secrets)
 	case "delete":
 		if len(args) != 2 {
-			return errors.New("usage: chemweb-launcher profile delete <profile>")
+			return errors.New("usage: chemssh-launcher profile delete <profile>")
 		}
 		return deleteProfile(args[1], out, profiles, secrets)
 	case "test":
 		if len(args) != 2 {
-			return errors.New("usage: chemweb-launcher profile test <profile>")
+			return errors.New("usage: chemssh-launcher profile test <profile>")
 		}
 		return testProfile(args[1], in, out, profiles, secrets)
 	default:
@@ -91,7 +91,7 @@ func listProfiles(out io.Writer, profiles config.ProfileStore) error {
 		return err
 	}
 	if len(items) == 0 {
-		fmt.Fprintln(out, "No profiles yet. Run: chemweb-launcher profile add")
+		fmt.Fprintln(out, "No profiles yet. Run: chemssh-launcher profile add")
 		return nil
 	}
 	for _, p := range items {
@@ -169,7 +169,7 @@ func testProfile(idOrName string, in io.Reader, out io.Writer, profiles config.P
 	if _, err := sshclient.RunCheckPortCommand(client, p, out, out); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Chemweb port check OK: %s\n", p.RemoteAddress())
+	fmt.Fprintf(out, "ChemSSH port check OK: %s\n", p.RemoteAddress())
 	return nil
 }
 
@@ -248,8 +248,8 @@ func promptProfile(reader *bufio.Reader, out io.Writer, p *config.Profile, editi
 	} else {
 		p.PrivateKeyPath = ""
 	}
-	p.RemoteHost = promptString(reader, out, "Remote Chemweb host", p.RemoteHost)
-	p.RemotePort = promptInt(reader, out, "Remote Chemweb port", p.RemotePort)
+	p.RemoteHost = promptString(reader, out, "Remote ChemSSH host", p.RemoteHost)
+	p.RemotePort = promptInt(reader, out, "Remote ChemSSH port", p.RemotePort)
 	p.LocalHost = promptString(reader, out, "Local bind host", p.LocalHost)
 	p.LocalPort = promptInt(reader, out, "Local bind port", p.LocalPort)
 	p.LocalURLPath = promptString(reader, out, "Local URL path", p.LocalURLPath)
@@ -412,16 +412,16 @@ func readLine(reader *bufio.Reader) string {
 
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  chemweb-launcher --version")
-	fmt.Fprintln(out, "  chemweb-launcher profile <list|add|edit|delete|test>")
-	fmt.Fprintln(out, "  chemweb-launcher start <profile>")
+	fmt.Fprintln(out, "  chemssh-launcher --version")
+	fmt.Fprintln(out, "  chemssh-launcher profile <list|add|edit|delete|test>")
+	fmt.Fprintln(out, "  chemssh-launcher start <profile>")
 }
 
 func printProfileUsage(out io.Writer) {
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  chemweb-launcher profile list")
-	fmt.Fprintln(out, "  chemweb-launcher profile add")
-	fmt.Fprintln(out, "  chemweb-launcher profile edit <profile>")
-	fmt.Fprintln(out, "  chemweb-launcher profile delete <profile>")
-	fmt.Fprintln(out, "  chemweb-launcher profile test <profile>")
+	fmt.Fprintln(out, "  chemssh-launcher profile list")
+	fmt.Fprintln(out, "  chemssh-launcher profile add")
+	fmt.Fprintln(out, "  chemssh-launcher profile edit <profile>")
+	fmt.Fprintln(out, "  chemssh-launcher profile delete <profile>")
+	fmt.Fprintln(out, "  chemssh-launcher profile test <profile>")
 }

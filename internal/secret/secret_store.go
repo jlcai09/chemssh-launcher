@@ -1,7 +1,7 @@
 package secret
 
 const (
-	ServiceName          = "chemweb-launcher"
+	ServiceName          = "chemssh-launcher"
 	KeyPassword          = "password"
 	KeyPrivatePassphrase = "key-passphrase"
 )

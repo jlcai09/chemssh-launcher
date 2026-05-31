@@ -2,13 +2,13 @@
   "RT_GROUP_ICON": {
     "APP": {
       "0000": [
-        "chemweb-icon-16.png",
-        "chemweb-icon-24.png",
-        "chemweb-icon-32.png",
-        "chemweb-icon-48.png",
-        "chemweb-icon-64.png",
-        "chemweb-icon-128.png",
-        "chemweb-icon-256.png"
+        "chemssh-icon-16.png",
+        "chemssh-icon-24.png",
+        "chemssh-icon-32.png",
+        "chemssh-icon-48.png",
+        "chemssh-icon-64.png",
+        "chemssh-icon-128.png",
+        "chemssh-icon-256.png"
       ]
     }
   },
@@ -16,10 +16,10 @@
     "#1": {
       "0409": {
         "identity": {
-          "name": "ChemwebLauncher",
-          "version": "0.2.3.0"
+          "name": "ChemSSHLauncher",
+          "version": "0.2.4.0"
         },
-        "description": "Chemweb Launcher",
+        "description": "ChemSSH Launcher",
         "minimum-os": "win10",
         "execution-level": "as invoker",
         "ui-access": false,
@@ -41,19 +41,19 @@
     "#1": {
       "0000": {
         "fixed": {
-          "file_version": "0.2.3.0",
-          "product_version": "0.2.3.0"
+          "file_version": "0.2.4.0",
+          "product_version": "0.2.4.0"
         },
         "info": {
           "0409": {
-            "CompanyName": "Chemweb",
-            "FileDescription": "Chemweb Launcher",
-            "FileVersion": "0.2.3",
-            "InternalName": "chemweb-launcher",
+            "CompanyName": "ChemSSH",
+            "FileDescription": "ChemSSH Launcher",
+            "FileVersion": "0.2.4",
+            "InternalName": "chemssh-launcher",
             "LegalCopyright": "",
-            "OriginalFilename": "chemweb-launcher.exe",
-            "ProductName": "Chemweb Launcher",
-            "ProductVersion": "0.2.3"
+            "OriginalFilename": "chemssh-launcher.exe",
+            "ProductName": "ChemSSH Launcher",
+            "ProductVersion": "0.2.4"
           }
         }
       }

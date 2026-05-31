@@ -4,21 +4,21 @@ import (
 	"strings"
 	"testing"
 
-	"chemweb-launcher/internal/config"
+	"chemssh-launcher/internal/config"
 )
 
 func TestAssembleRemoteCommandPreservesMultilinePreStart(t *testing.T) {
 	profile := config.NewProfileDefaults()
-	profile.PreStartCommands = "cd /home/user/chemweb\nsource .venv/bin/activate"
-	profile.StartCommand = "chemweb --config config.yaml"
+	profile.PreStartCommands = "cd /home/user/chemssh\nsource .venv/bin/activate"
+	profile.StartCommand = "chemssh --config config.yaml"
 
 	got := AssembleRemoteCommand(profile)
 	mustContain := []string{
-		"set -e\ncd /home/user/chemweb\nsource .venv/bin/activate\n",
-		"trap '__chemweb_launcher_cleanup; exit 143' INT TERM HUP",
-		"chemweb --config config.yaml --host 127.0.0.1 --port 8888 &",
-		"__chemweb_launcher_pid=$!",
-		"kill -TERM \"$__chemweb_launcher_pid\"",
+		"set -e\ncd /home/user/chemssh\nsource .venv/bin/activate\n",
+		"trap '__chemssh_launcher_cleanup; exit 143' INT TERM HUP",
+		"chemssh --config config.yaml --host 127.0.0.1 --port 8888 &",
+		"__chemssh_launcher_pid=$!",
+		"kill -TERM \"$__chemssh_launcher_pid\"",
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(got, want) {
@@ -33,9 +33,9 @@ func TestAssembleRemoteCommandPreservesMultilinePreStart(t *testing.T) {
 func TestAssembleKillPIDCommandUsesExplicitPID(t *testing.T) {
 	got := AssembleKillPIDCommand(12345)
 	for _, want := range []string{
-		"__chemweb_launcher_pid=12345",
-		"kill -TERM \"$__chemweb_launcher_pid\"",
-		"kill -KILL \"$__chemweb_launcher_pid\"",
+		"__chemssh_launcher_pid=12345",
+		"kill -TERM \"$__chemssh_launcher_pid\"",
+		"kill -KILL \"$__chemssh_launcher_pid\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stop command missing %q\n%s", want, got)
@@ -46,15 +46,15 @@ func TestAssembleKillPIDCommandUsesExplicitPID(t *testing.T) {
 	}
 }
 
-func TestAssembleCheckPortCommandUsesChemwebCheckPort(t *testing.T) {
+func TestAssembleCheckPortCommandUsesChemSSHCheckPort(t *testing.T) {
 	profile := config.NewProfileDefaults()
-	profile.PreStartCommands = "cd /home/user/chemweb\nsource .venv/bin/activate"
-	profile.StartCommand = "chemweb --config config.yaml"
+	profile.PreStartCommands = "cd /home/user/chemssh\nsource .venv/bin/activate"
+	profile.StartCommand = "chemssh --config config.yaml"
 
 	got := AssembleCheckPortCommand(profile)
 	for _, want := range []string{
-		"set -e\ncd /home/user/chemweb\nsource .venv/bin/activate\n",
-		"chemweb --config config.yaml --host 127.0.0.1 --port 8888 --check-port",
+		"set -e\ncd /home/user/chemssh\nsource .venv/bin/activate\n",
+		"chemssh --config config.yaml --host 127.0.0.1 --port 8888 --check-port",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("check-port command missing %q\n%s", want, got)
@@ -63,8 +63,8 @@ func TestAssembleCheckPortCommandUsesChemwebCheckPort(t *testing.T) {
 }
 
 func TestBackgroundLastCommand(t *testing.T) {
-	got := backgroundLastCommand("export FOO=1\nchemweb --config config.yaml")
-	want := "export FOO=1\nchemweb --config config.yaml &\n"
+	got := backgroundLastCommand("export FOO=1\nchemssh --config config.yaml")
+	want := "export FOO=1\nchemssh --config config.yaml &\n"
 	if got != want {
 		t.Fatalf("unexpected background command\nwant: %q\n got: %q", want, got)
 	}
@@ -73,7 +73,7 @@ func TestBackgroundLastCommand(t *testing.T) {
 func TestPortWarning(t *testing.T) {
 	profile := config.NewProfileDefaults()
 	profile.RemotePort = 8888
-	profile.StartCommand = "chemweb --port 8899"
+	profile.StartCommand = "chemssh --port 8899"
 
 	warning := PortWarning(profile)
 	if !strings.Contains(warning, "8899") || !strings.Contains(warning, "8888") {
@@ -85,7 +85,7 @@ func TestEffectiveStartCommandDoesNotDuplicateExplicitFlags(t *testing.T) {
 	profile := config.NewProfileDefaults()
 	profile.RemoteHost = "127.0.0.1"
 	profile.RemotePort = 8888
-	profile.StartCommand = "chemweb --config config.yaml --host 127.0.0.1 --port 8888"
+	profile.StartCommand = "chemssh --config config.yaml --host 127.0.0.1 --port 8888"
 
 	got := EffectiveStartCommand(profile)
 	if strings.Count(got, "--host") != 1 || strings.Count(got, "--port") != 1 {
@@ -93,13 +93,13 @@ func TestEffectiveStartCommandDoesNotDuplicateExplicitFlags(t *testing.T) {
 	}
 }
 
-func TestEffectiveDefaultStartCommandAppendsFlagsToChemwebLine(t *testing.T) {
+func TestEffectiveDefaultStartCommandAppendsFlagsToChemSSHLine(t *testing.T) {
 	profile := config.NewProfileDefaults()
 	got := EffectiveStartCommand(profile)
 	if !strings.Contains(got, "source .venv/bin/activate") {
 		t.Fatalf("default command missing venv activation\n%s", got)
 	}
-	if !strings.Contains(got, "chemweb --config config.yaml --host 127.0.0.1 --port 8888") {
-		t.Fatalf("default command did not append host/port to chemweb line\n%s", got)
+	if !strings.Contains(got, "chemssh --config config.yaml --host 127.0.0.1 --port 8888") {
+		t.Fatalf("default command did not append host/port to chemssh line\n%s", got)
 	}
 }

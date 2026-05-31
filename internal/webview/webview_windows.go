@@ -49,7 +49,7 @@ func Open(ctx context.Context, opts Options) error {
 
 	title := opts.Title
 	if title == "" {
-		title = "Chemweb Launcher"
+		title = "ChemSSH Launcher"
 	}
 	width := opts.Width
 	if width <= 0 {
@@ -136,12 +136,12 @@ func chromiumFromWebView(w webview2.WebView) (*edge.Chromium, bool) {
 }
 
 func bindDownloadDialog(w webview2.WebView) error {
-	if err := w.Bind("chemwebOpenDownloads", func() error {
+	if err := w.Bind("chemsshOpenDownloads", func() error {
 		return openDefaultDownloadDialog(w)
 	}); err != nil {
 		return err
 	}
-	return w.Bind("chemwebCloseDownloads", func() error {
+	return w.Bind("chemsshCloseDownloads", func() error {
 		return closeDefaultDownloadDialog(w)
 	})
 }
@@ -244,7 +244,7 @@ func acceleratorScript(opts Options) string {
     if (!url) return false;
     try {
       const absolute = new URL(String(url), window.location.href).href;
-      window.top.postMessage({ type: "chemweb-launcher:new-tab", url: absolute }, "*");
+      window.top.postMessage({ type: "chemssh-launcher:new-tab", url: absolute }, "*");
       return true;
     } catch (_) {
       return false;
@@ -272,12 +272,12 @@ func acceleratorScript(opts Options) string {
   window.addEventListener("pointerdown", (event) => {
     const target = event.target;
     if (target && target.closest && target.closest("#downloads")) return;
-    if (typeof window.chemwebCloseDownloads === "function") {
-      window.chemwebCloseDownloads().catch(() => {});
+    if (typeof window.chemsshCloseDownloads === "function") {
+      window.chemsshCloseDownloads().catch(() => {});
       return;
     }
     try {
-      window.top.postMessage({ type: "chemweb-launcher:close-downloads" }, "*");
+      window.top.postMessage({ type: "chemssh-launcher:close-downloads" }, "*");
     } catch (_) {}
   }, true);
 })();`, disableDevTools, copyOnCtrlShiftC)

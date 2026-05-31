@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
-	"chemweb-launcher/internal/browser"
-	"chemweb-launcher/internal/config"
-	"chemweb-launcher/internal/netcheck"
-	"chemweb-launcher/internal/sshclient"
+	"chemssh-launcher/internal/browser"
+	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/netcheck"
+	"chemssh-launcher/internal/sshclient"
 )
 
 type Session struct {

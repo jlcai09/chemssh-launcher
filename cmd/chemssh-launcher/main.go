@@ -6,15 +6,15 @@ import (
 	"os"
 	"strings"
 
-	"chemweb-launcher/internal/gui"
-	"chemweb-launcher/internal/ui"
-	"chemweb-launcher/internal/version"
-	"chemweb-launcher/internal/webview"
+	"chemssh-launcher/internal/gui"
+	"chemssh-launcher/internal/ui"
+	"chemssh-launcher/internal/version"
+	"chemssh-launcher/internal/webview"
 )
 
 func main() {
 	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
-		fmt.Fprintln(os.Stdout, "chemweb-launcher", version.String())
+		fmt.Fprintln(os.Stdout, "chemssh-launcher", version.String())
 		return
 	}
 
@@ -38,14 +38,14 @@ func main() {
 
 func parseGUIOptions(args []string) (gui.Options, bool, error) {
 	options := gui.Options{UseWebView: webview.DefaultEnabled()}
-	switch strings.ToLower(os.Getenv("CHEMWEB_LAUNCHER_WEBVIEW")) {
+	switch strings.ToLower(os.Getenv("CHEMSSH_LAUNCHER_WEBVIEW")) {
 	case "1", "true", "yes", "on":
 		options.UseWebView = true
 	case "0", "false", "no", "off":
 		options.UseWebView = false
 	}
-	if strings.EqualFold(os.Getenv("CHEMWEB_LAUNCHER_DEVTOOLS"), "1") ||
-		strings.EqualFold(os.Getenv("CHEMWEB_LAUNCHER_DEVTOOLS"), "true") {
+	if strings.EqualFold(os.Getenv("CHEMSSH_LAUNCHER_DEVTOOLS"), "1") ||
+		strings.EqualFold(os.Getenv("CHEMSSH_LAUNCHER_DEVTOOLS"), "true") {
 		options.DevTools = true
 		options.UseWebView = true
 	}

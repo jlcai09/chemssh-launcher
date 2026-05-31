@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"chemweb-launcher/internal/config"
-	"chemweb-launcher/internal/secret"
+	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/secret"
 
 	"golang.org/x/crypto/ssh"
 )

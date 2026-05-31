@@ -17,15 +17,15 @@ import (
 	"sync"
 	"time"
 
-	"chemweb-launcher/internal/browser"
-	"chemweb-launcher/internal/chemweb"
-	"chemweb-launcher/internal/config"
-	"chemweb-launcher/internal/netcheck"
-	"chemweb-launcher/internal/runtime"
-	"chemweb-launcher/internal/secret"
-	"chemweb-launcher/internal/sshclient"
-	"chemweb-launcher/internal/version"
-	"chemweb-launcher/internal/webview"
+	"chemssh-launcher/internal/browser"
+	"chemssh-launcher/internal/chemssh"
+	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/netcheck"
+	"chemssh-launcher/internal/runtime"
+	"chemssh-launcher/internal/secret"
+	"chemssh-launcher/internal/sshclient"
+	"chemssh-launcher/internal/version"
+	"chemssh-launcher/internal/webview"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -87,7 +87,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	}
 	addr := "http://" + ln.Addr().String()
 	server.baseURL = addr
-	startLine := "Chemweb Launcher " + version.String() + " GUI: " + addr
+	startLine := "ChemSSH Launcher " + version.String() + " GUI: " + addr
 	server.localLog.add(startLine)
 	fmt.Fprintln(stdout, startLine)
 
@@ -100,7 +100,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	if options.UseWebView && !options.ForceBrowser {
 		shellAddr := addr + "/shell"
 		if err := webview.Open(context.Background(), webview.Options{
-			Title:            "Chemweb Launcher",
+			Title:            "ChemSSH Launcher",
 			URL:              shellAddr,
 			Width:            1240,
 			Height:           820,
@@ -156,9 +156,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/shell", s.handleShell)
 	s.mux.HandleFunc("/launcher-logs", s.handleLauncherLogsPage)
-	s.mux.HandleFunc("/chemweb", s.handleChemwebProxy)
-	s.mux.HandleFunc("/chemweb/", s.handleChemwebProxy)
-	s.mux.HandleFunc("/assets/", s.handleChemwebProxy)
+	s.mux.HandleFunc("/chemssh", s.handleChemSSHProxy)
+	s.mux.HandleFunc("/chemssh/", s.handleChemSSHProxy)
+	s.mux.HandleFunc("/assets/", s.handleChemSSHProxy)
 	s.mux.Handle("/static/", http.FileServer(http.FS(assets)))
 	s.mux.HandleFunc("/api/profiles", s.handleProfiles)
 	s.mux.HandleFunc("/api/profiles/", s.handleProfileByID)
@@ -171,7 +171,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/launcher-logs", s.handleLauncherLogs)
 	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/defaults", s.handleDefaults)
-	s.mux.HandleFunc("/api/", s.handleChemwebProxy)
+	s.mux.HandleFunc("/api/", s.handleChemSSHProxy)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -321,14 +321,14 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	check, err := sshclient.RunCheckPortCommand(client, p, s.logs, s.logs)
 	if err != nil {
 		_ = client.Close()
-		s.logs.add("Chemweb port check failed for " + p.Name + ": " + err.Error())
+		s.logs.add("ChemSSH port check failed for " + p.Name + ": " + err.Error())
 		writeError(w, http.StatusConflict, err)
 		return
 	}
 	if check.Reusable {
-		s.logs.add("remote Chemweb is reusable; starting tunnel without launching another server")
+		s.logs.add("remote ChemSSH is reusable; starting tunnel without launching another server")
 	} else {
-		s.logs.add("remote Chemweb port is available; starting configured command")
+		s.logs.add("remote ChemSSH port is available; starting configured command")
 	}
 
 	s.mu.Lock()
@@ -481,9 +481,9 @@ func (s *Server) refreshRemoteIdentity(session *activeSession, p config.Profile)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	identity, err := chemweb.FetchIdentity(ctx, client, p)
+	identity, err := chemssh.FetchIdentity(ctx, client, p)
 	if err != nil {
-		s.logs.add("warning: could not read Chemweb identity: " + err.Error())
+		s.logs.add("warning: could not read ChemSSH identity: " + err.Error())
 		return
 	}
 	s.mu.Lock()
@@ -491,7 +491,7 @@ func (s *Server) refreshRemoteIdentity(session *activeSession, p config.Profile)
 		session.remotePID = identity.PID
 	}
 	s.mu.Unlock()
-	s.logs.add("Chemweb identity OK: pid " + strconv.Itoa(identity.PID) + ", version " + identity.ProjectVersion)
+	s.logs.add("ChemSSH identity OK: pid " + strconv.Itoa(identity.PID) + ", version " + identity.ProjectVersion)
 }
 
 func (s *Server) openSessionURL(p config.Profile) {
@@ -507,9 +507,9 @@ func (s *Server) openSessionURL(p config.Profile) {
 func (s *Server) sessionProxyURL(p config.Profile) string {
 	path := normalizedProxyPath(p.LocalURLPath)
 	if path == "/" {
-		return s.baseURL + "/chemweb"
+		return s.baseURL + "/chemssh"
 	}
-	return s.baseURL + "/chemweb" + path
+	return s.baseURL + "/chemssh" + path
 }
 
 func normalizedProxyPath(path string) string {
@@ -522,7 +522,7 @@ func normalizedProxyPath(path string) string {
 	return path
 }
 
-func (s *Server) activeChemwebTarget() (*url.URL, *activeSession) {
+func (s *Server) activeChemSSHTarget() (*url.URL, *activeSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session := s.session
@@ -536,32 +536,32 @@ func (s *Server) activeChemwebTarget() (*url.URL, *activeSession) {
 	return target, session
 }
 
-func (s *Server) handleChemwebProxy(w http.ResponseWriter, r *http.Request) {
-	target, session := s.activeChemwebTarget()
+func (s *Server) handleChemSSHProxy(w http.ResponseWriter, r *http.Request) {
+	target, session := s.activeChemSSHTarget()
 	if target == nil || session == nil {
-		writeError(w, http.StatusServiceUnavailable, errors.New("chemweb service is not available; start forwarding first"))
+		writeError(w, http.StatusServiceUnavailable, errors.New("chemssh service is not available; start forwarding first"))
 		return
 	}
-	proxy := s.newChemwebReverseProxy(target)
-	proxy.ServeHTTP(w, s.rewriteChemwebProxyRequest(r, target))
+	proxy := s.newChemSSHReverseProxy(target)
+	proxy.ServeHTTP(w, s.rewriteChemSSHProxyRequest(r, target))
 }
 
-func (s *Server) rewriteChemwebProxyRequest(r *http.Request, target *url.URL) *http.Request {
+func (s *Server) rewriteChemSSHProxyRequest(r *http.Request, target *url.URL) *http.Request {
 	req := r.Clone(r.Context())
 	req.Host = target.Host
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
-	req.URL.Path = chemwebProxyTargetPath(r.URL.Path)
+	req.URL.Path = chemsshProxyTargetPath(r.URL.Path)
 	req.URL.RawPath = req.URL.Path
 	return req
 }
 
-func chemwebProxyTargetPath(path string) string {
+func chemsshProxyTargetPath(path string) string {
 	switch {
-	case path == "/chemweb":
+	case path == "/chemssh":
 		return "/"
-	case strings.HasPrefix(path, "/chemweb/"):
-		trimmed := strings.TrimPrefix(path, "/chemweb")
+	case strings.HasPrefix(path, "/chemssh/"):
+		trimmed := strings.TrimPrefix(path, "/chemssh")
 		if trimmed == "" {
 			return "/"
 		}
@@ -571,7 +571,7 @@ func chemwebProxyTargetPath(path string) string {
 	}
 }
 
-func (s *Server) newChemwebReverseProxy(target *url.URL) *httputil.ReverseProxy {
+func (s *Server) newChemSSHReverseProxy(target *url.URL) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -581,14 +581,14 @@ func (s *Server) newChemwebReverseProxy(target *url.URL) *httputil.ReverseProxy 
 		req.Header.Set("X-Forwarded-Proto", "http")
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy Chemweb request failed: %w", err))
+		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy ChemSSH request failed: %w", err))
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		location := resp.Header.Get("Location")
 		if location == "" {
 			return nil
 		}
-		rewritten := rewriteChemwebLocationHeader(location, target)
+		rewritten := rewriteChemSSHLocationHeader(location, target)
 		if rewritten != "" {
 			resp.Header.Set("Location", rewritten)
 		}
@@ -597,7 +597,7 @@ func (s *Server) newChemwebReverseProxy(target *url.URL) *httputil.ReverseProxy 
 	return proxy
 }
 
-func rewriteChemwebLocationHeader(location string, target *url.URL) string {
+func rewriteChemSSHLocationHeader(location string, target *url.URL) string {
 	parsed, err := url.Parse(location)
 	if err != nil {
 		return ""
@@ -610,9 +610,9 @@ func rewriteChemwebLocationHeader(location string, target *url.URL) string {
 		parsed.Host = ""
 	}
 	if parsed.Path == "/" {
-		parsed.Path = "/chemweb"
-	} else if strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(parsed.Path, "/chemweb") {
-		parsed.Path = "/chemweb" + parsed.Path
+		parsed.Path = "/chemssh"
+	} else if strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(parsed.Path, "/chemssh") {
+		parsed.Path = "/chemssh" + parsed.Path
 	}
 	return parsed.String()
 }
@@ -656,12 +656,12 @@ func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 	s.logs.add("SSH connection OK for " + p.Name)
 	if _, err := sshclient.RunCheckPortCommand(client, p, s.logs, s.logs); err != nil {
 		_ = client.Close()
-		s.logs.add("Chemweb port check failed for " + p.Name + ": " + err.Error())
+		s.logs.add("ChemSSH port check failed for " + p.Name + ": " + err.Error())
 		writeError(w, http.StatusConflict, err)
 		return
 	}
 	_ = client.Close()
-	s.logs.add("Chemweb port check OK for " + p.RemoteAddress())
+	s.logs.add("ChemSSH port check OK for " + p.RemoteAddress())
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
@@ -750,7 +750,7 @@ func (s *Server) stopForwarding() {
 	}
 	if session.process == nil && session.remotePID <= 0 && client != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-		identity, err := chemweb.FetchIdentity(ctx, client, session.profile)
+		identity, err := chemssh.FetchIdentity(ctx, client, session.profile)
 		cancel()
 		if err == nil {
 			s.mu.Lock()
@@ -758,9 +758,9 @@ func (s *Server) stopForwarding() {
 				session.remotePID = identity.PID
 			}
 			s.mu.Unlock()
-			s.logs.add("Chemweb identity OK: pid " + strconv.Itoa(identity.PID) + ", version " + identity.ProjectVersion)
+			s.logs.add("ChemSSH identity OK: pid " + strconv.Itoa(identity.PID) + ", version " + identity.ProjectVersion)
 		} else {
-			s.logs.add("warning: could not read Chemweb identity after stopping forwarding: " + err.Error())
+			s.logs.add("warning: could not read ChemSSH identity after stopping forwarding: " + err.Error())
 		}
 	}
 	if clearSession && client != nil {
@@ -803,24 +803,24 @@ func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
 		pid := session.remotePID
 		if pid <= 0 && client != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-			identity, err := chemweb.FetchIdentity(ctx, client, profile)
+			identity, err := chemssh.FetchIdentity(ctx, client, profile)
 			cancel()
 			if err != nil {
-				s.logs.add("warning: could not read Chemweb identity before stopping: " + err.Error())
+				s.logs.add("warning: could not read ChemSSH identity before stopping: " + err.Error())
 			} else {
 				pid = identity.PID
 			}
 		}
 		if pid > 0 && client != nil {
 			if err := sshclient.StopRemotePID(client, pid); err != nil {
-				s.logs.add("warning: could not kill remote Chemweb pid " + strconv.Itoa(pid) + ": " + err.Error())
+				s.logs.add("warning: could not kill remote ChemSSH pid " + strconv.Itoa(pid) + ": " + err.Error())
 			} else {
-				s.logs.add("remote Chemweb pid stopped: " + strconv.Itoa(pid))
+				s.logs.add("remote ChemSSH pid stopped: " + strconv.Itoa(pid))
 			}
 		} else if process != nil {
 			_ = process.Stop()
 		} else {
-			s.logs.add("warning: remote Chemweb pid is unknown; remote service may still be running")
+			s.logs.add("warning: remote ChemSSH pid is unknown; remote service may still be running")
 		}
 	}
 	if client != nil {

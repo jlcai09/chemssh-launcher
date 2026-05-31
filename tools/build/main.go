@@ -107,7 +107,7 @@ func replaceJSONString(text, key, value string) string {
 }
 
 func makeWindowsResources(root string) error {
-	out := filepath.Join(root, "cmd", "chemweb-launcher", fmt.Sprintf("rsrc_windows_%s.syso", runtime.GOARCH))
+	out := filepath.Join(root, "cmd", "chemssh-launcher", fmt.Sprintf("rsrc_windows_%s.syso", runtime.GOARCH))
 	inputs, err := windowsResourceInputs(root)
 	if err != nil {
 		return err
@@ -124,7 +124,7 @@ func makeWindowsResources(root string) error {
 		"make",
 		"--in", filepath.Join("winres", "winres.json"),
 		"--arch", runtime.GOARCH,
-		"--out", filepath.Join("cmd", "chemweb-launcher", "rsrc"),
+		"--out", filepath.Join("cmd", "chemssh-launcher", "rsrc"),
 	}
 	if _, err := exec.LookPath("go-winres"); err == nil {
 		return run(root, "go-winres", args...)
@@ -172,12 +172,12 @@ func goBuild(root string, webview2, windowsGUI bool, out string) error {
 		args = append(args, "-ldflags", "-H=windowsgui")
 	}
 	if out == "" && webview2 {
-		out = executableName("chemweb-launcher-webview2")
+		out = executableName("chemssh-launcher-webview2")
 	}
 	if out != "" {
 		args = append(args, "-o", out)
 	}
-	args = append(args, "./cmd/chemweb-launcher")
+	args = append(args, "./cmd/chemssh-launcher")
 	return run(root, "go", args...)
 }
 

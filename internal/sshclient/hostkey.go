@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync"
 
-	"chemweb-launcher/internal/config"
+	"chemssh-launcher/internal/config"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"

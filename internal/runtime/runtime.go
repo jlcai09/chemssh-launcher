@@ -3,8 +3,8 @@ package runtime
 import (
 	"os"
 
-	"chemweb-launcher/internal/config"
-	"chemweb-launcher/internal/secret"
+	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/secret"
 )
 
 type Runtime struct {
@@ -19,7 +19,7 @@ func New() (*Runtime, error) {
 	}
 
 	var secrets secret.Store = secret.NewKeyringStore()
-	if masterPassword := os.Getenv("CHEMWEB_LAUNCHER_VAULT_PASSWORD"); masterPassword != "" {
+	if masterPassword := os.Getenv("CHEMSSH_LAUNCHER_VAULT_PASSWORD"); masterPassword != "" {
 		vaultPath, err := config.DefaultVaultPath()
 		if err != nil {
 			return nil, err

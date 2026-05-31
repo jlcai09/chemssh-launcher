@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"chemweb-launcher/internal/config"
-	"chemweb-launcher/internal/secret"
+	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/secret"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -107,7 +107,7 @@ func RunCheckPortCommand(client *ssh.Client, profile config.Profile, stdout, std
 	err = session.Wait()
 	text := output.String()
 	return CheckPortResult{
-		Reusable: strings.Contains(text, "used by a reusable Chemweb server"),
+		Reusable: strings.Contains(text, "used by a reusable ChemSSH server"),
 		Output:   text,
 	}, err
 }

@@ -6,7 +6,7 @@ import (
 	"runtime"
 )
 
-const AppName = "ChemwebLauncher"
+const AppName = "ChemSSHLauncher"
 
 func DefaultDir() (string, error) {
 	if runtime.GOOS == "windows" {
@@ -20,7 +20,7 @@ func DefaultDir() (string, error) {
 		return "", err
 	}
 	if runtime.GOOS == "linux" {
-		return filepath.Join(dir, "chemweb-launcher"), nil
+		return filepath.Join(dir, "chemssh-launcher"), nil
 	}
 	return filepath.Join(dir, AppName), nil
 }

@@ -1,4 +1,4 @@
-module chemweb-launcher
+module chemssh-launcher
 
 go 1.22
 

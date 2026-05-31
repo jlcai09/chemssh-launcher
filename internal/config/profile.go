@@ -6,23 +6,23 @@ const (
 )
 
 const DefaultStartCommand = `source .venv/bin/activate
-__chemweb_conda_prompt=""
+__chemssh_conda_prompt=""
 if [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
-  __chemweb_conda_prompt="(${CONDA_DEFAULT_ENV}) "
+  __chemssh_conda_prompt="(${CONDA_DEFAULT_ENV}) "
 fi
 
-__chemweb_venv_prompt=""
+__chemssh_venv_prompt=""
 if [ -n "${VIRTUAL_ENV:-}" ]; then
-  __chemweb_venv_prompt="($(basename "$VIRTUAL_ENV")) "
+  __chemssh_venv_prompt="($(basename "$VIRTUAL_ENV")) "
 fi
 
-__chemweb_prompt_char="$"
+__chemssh_prompt_char="$"
 if [ "$(id -u)" = "0" ]; then
-  __chemweb_prompt_char="#"
+  __chemssh_prompt_char="#"
 fi
 
-export PS1="${__chemweb_conda_prompt}${__chemweb_venv_prompt}[\u@\h \W]${__chemweb_prompt_char} "
-chemweb --config config.yaml`
+export PS1="${__chemssh_conda_prompt}${__chemssh_venv_prompt}[\u@\h \W]${__chemssh_prompt_char} "
+chemssh --config config.yaml`
 
 type Profile struct {
 	ID                      string `json:"id"`

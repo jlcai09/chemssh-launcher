@@ -3,8 +3,8 @@ package app
 import (
 	"io"
 
-	"chemweb-launcher/internal/config"
-	"chemweb-launcher/internal/secret"
+	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/secret"
 )
 
 type App struct {

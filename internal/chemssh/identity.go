@@ -1,4 +1,4 @@
-package chemweb
+package chemssh
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"chemweb-launcher/internal/config"
+	"chemssh-launcher/internal/config"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -36,21 +36,21 @@ func FetchIdentity(ctx context.Context, client *ssh.Client, profile config.Profi
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return Identity{}, fmt.Errorf("fetch Chemweb identity: %w", err)
+		return Identity{}, fmt.Errorf("fetch ChemSSH identity: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return Identity{}, fmt.Errorf("fetch Chemweb identity: unexpected HTTP status %d", resp.StatusCode)
+		return Identity{}, fmt.Errorf("fetch ChemSSH identity: unexpected HTTP status %d", resp.StatusCode)
 	}
 	var identity Identity
 	if err := json.NewDecoder(resp.Body).Decode(&identity); err != nil {
-		return Identity{}, fmt.Errorf("decode Chemweb identity: %w", err)
+		return Identity{}, fmt.Errorf("decode ChemSSH identity: %w", err)
 	}
-	if identity.App != "chemweb" {
-		return Identity{}, fmt.Errorf("remote service identity is %q, not chemweb", identity.App)
+	if identity.App != "chemssh" {
+		return Identity{}, fmt.Errorf("remote service identity is %q, not chemssh", identity.App)
 	}
 	if identity.PID <= 0 {
-		return Identity{}, fmt.Errorf("remote Chemweb identity returned invalid pid %d", identity.PID)
+		return Identity{}, fmt.Errorf("remote ChemSSH identity returned invalid pid %d", identity.PID)
 	}
 	return identity, nil
 }

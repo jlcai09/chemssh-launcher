@@ -23,11 +23,11 @@ let profiles = [];
 let current = { ...defaults };
 let activeProfileId = "";
 let activeForwarding = false;
-let lang = localStorage.getItem("chemweb-launcher-language") || "zh-CN";
+let lang = localStorage.getItem("chemssh-launcher-language") || "zh-CN";
 
 const messages = {
   "zh-CN": {
-    tagline: "远程 Chemweb 启动器",
+    tagline: "远程 ChemSSH 启动器",
     language: "语言",
     newProfile: "新建配置",
     refresh: "刷新",
@@ -57,7 +57,7 @@ const messages = {
     localPort: "本地端口",
     localUrlPath: "本地 URL 路径",
     healthCheckUrl: "健康检查 URL",
-    openBrowser: "启动后打开 Chemweb 标签页",
+    openBrowser: "启动后打开 ChemSSH 标签页",
     remoteCommands: "远端命令",
     preStartCommands: "预启动命令",
     startCommand: "启动命令",
@@ -84,12 +84,12 @@ const messages = {
     profileDeleted: "配置已删除。",
     deleteConfirm: "删除配置“{name}”？",
     startingSession: "正在启动会话...",
-    startRequested: "已请求启动。请查看日志中的 SSH、Chemweb 检测、命令、隧道和健康检查进度。",
+    startRequested: "已请求启动。请查看日志中的 SSH、ChemSSH 检测、命令、隧道和健康检查进度。",
     testingSsh: "正在测试 SSH...",
-    testOk: "SSH 和 Chemweb 端口检测通过。",
+    testOk: "SSH 和 ChemSSH 端口检测通过。",
     stoppingForwarding: "正在停止转发...",
     forwardingStopRequested: "已请求停止转发，远端服务不会被停止。",
-    confirmStopService: "这会停止远端 Chemweb 服务并关闭转发。如果其他用户正在访问该服务，他们会断开。确定继续吗？",
+    confirmStopService: "这会停止远端 ChemSSH 服务并关闭转发。如果其他用户正在访问该服务，他们会断开。确定继续吗？",
     stoppingService: "正在停止服务和转发...",
     serviceStopRequested: "已请求停止远端服务和转发。",
     done: "完成。",
@@ -103,7 +103,7 @@ const messages = {
     savedTo: "将保存到：{path}"
   },
   en: {
-    tagline: "Remote Chemweb launcher",
+    tagline: "Remote ChemSSH launcher",
     language: "Language",
     newProfile: "New Profile",
     refresh: "Refresh",
@@ -133,7 +133,7 @@ const messages = {
     localPort: "Local Port",
     localUrlPath: "Local URL Path",
     healthCheckUrl: "Health Check URL",
-    openBrowser: "Open Chemweb tab after startup",
+    openBrowser: "Open ChemSSH tab after startup",
     remoteCommands: "Remote Commands",
     preStartCommands: "Pre-start Commands",
     startCommand: "Start Command",
@@ -160,12 +160,12 @@ const messages = {
     profileDeleted: "Profile deleted.",
     deleteConfirm: "Delete profile \"{name}\"?",
     startingSession: "Starting session...",
-    startRequested: "Session start requested. Watch logs for SSH, Chemweb check, command, tunnel, and health check progress.",
+    startRequested: "Session start requested. Watch logs for SSH, ChemSSH check, command, tunnel, and health check progress.",
     testingSsh: "Testing SSH...",
-    testOk: "SSH and Chemweb port checks OK.",
+    testOk: "SSH and ChemSSH port checks OK.",
     stoppingForwarding: "Stopping forwarding...",
     forwardingStopRequested: "Forwarding stop requested. The remote service will keep running.",
-    confirmStopService: "This will stop the remote Chemweb service and close forwarding. Other users may lose access. Continue?",
+    confirmStopService: "This will stop the remote ChemSSH service and close forwarding. Other users may lose access. Continue?",
     stoppingService: "Stopping service and forwarding...",
     serviceStopRequested: "Remote service and forwarding stop requested.",
     done: "Done.",
@@ -600,7 +600,7 @@ $("passwordDisplay").addEventListener("input", syncPasswordEdit);
 $("passphraseDisplay").addEventListener("input", syncPassphraseEdit);
 $("language").addEventListener("change", () => {
   lang = $("language").value;
-  localStorage.setItem("chemweb-launcher-language", lang);
+  localStorage.setItem("chemssh-launcher-language", lang);
   applyTranslations();
 });
 

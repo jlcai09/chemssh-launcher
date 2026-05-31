@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"testing"
 
-	"chemweb-launcher/internal/config"
+	"chemssh-launcher/internal/config"
 
 	"golang.org/x/crypto/ssh"
 )

@@ -2,8 +2,8 @@
 /idea
 
 # Binaries
-/chemweb-launcher
-/chemweb-launcher.exe
+/chemssh-launcher
+/chemssh-launcher.exe
 *.exe~
 *.exe
 *.dll

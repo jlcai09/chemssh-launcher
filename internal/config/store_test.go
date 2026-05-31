@@ -67,10 +67,10 @@ func TestFileStoreDelete(t *testing.T) {
 
 func TestProfileBrowserAndHealthURLsAreSeparate(t *testing.T) {
 	profile := NewProfileDefaults()
-	profile.LocalURLPath = "chemweb"
+	profile.LocalURLPath = "chemssh"
 	profile.HealthCheckURL = "http://127.0.0.1:8888/health"
 
-	if got := profile.BrowserURL(); got != "http://127.0.0.1:8888/chemweb" {
+	if got := profile.BrowserURL(); got != "http://127.0.0.1:8888/chemssh" {
 		t.Fatalf("unexpected browser URL: %q", got)
 	}
 	if got := profile.HealthURL(); got != "http://127.0.0.1:8888/health" {
@@ -78,14 +78,14 @@ func TestProfileBrowserAndHealthURLsAreSeparate(t *testing.T) {
 	}
 }
 
-func TestDefaultStartCommandIncludesEnvironmentPromptAndChemweb(t *testing.T) {
+func TestDefaultStartCommandIncludesEnvironmentPromptAndChemSSH(t *testing.T) {
 	profile := NewProfileDefaults()
 	for _, want := range []string{
 		"source .venv/bin/activate",
-		"__chemweb_conda_prompt",
-		"__chemweb_venv_prompt",
+		"__chemssh_conda_prompt",
+		"__chemssh_venv_prompt",
 		"export PS1=",
-		"chemweb --config config.yaml",
+		"chemssh --config config.yaml",
 	} {
 		if !strings.Contains(profile.StartCommand, want) {
 			t.Fatalf("default start command missing %q\n%s", want, profile.StartCommand)
