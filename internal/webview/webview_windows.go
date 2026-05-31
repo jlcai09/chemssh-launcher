@@ -37,7 +37,10 @@ func Open(ctx context.Context, opts Options) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	w := webview2.New(opts.Debug)
+	w := webview2.NewWithOptions(webview2.WebViewOptions{
+		Debug:    opts.Debug,
+		DataPath: opts.DataPath,
+	})
 	if w == nil {
 		return errors.New("could not initialize WebView2")
 	}

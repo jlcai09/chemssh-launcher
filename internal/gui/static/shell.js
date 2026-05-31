@@ -2,6 +2,7 @@ let nextID = 1;
 let activeID = "";
 let lastSessionURL = "";
 let menuTabID = "";
+let draggingTabID = "";
 
 const tabs = new Map();
 const $ = (id) => document.getElementById(id);
@@ -42,7 +43,7 @@ function shortTitle(url) {
     const parsed = new URL(url);
     if (parsed.origin === window.location.origin) {
       if (parsed.pathname === "/") return "启动器";
-      if (parsed.pathname === "/launcher-logs") return "启动器后台";
+      if (parsed.pathname === "/launcher-logs") return "后台";
     }
     return parsed.hostname || url;
   } catch (_) {
@@ -58,6 +59,53 @@ function tabList() {
   return Array.from(document.querySelectorAll(".tab[data-id]"))
     .map((tab) => tabs.get(tab.dataset.id))
     .filter(Boolean);
+}
+
+function reorderTabsByDOM() {
+  const pages = $("pages");
+  tabList().forEach((item) => {
+    pages.appendChild(item.page);
+  });
+}
+
+function clearDragState() {
+  draggingTabID = "";
+  document.querySelectorAll(".tab.dragging").forEach((tab) => tab.classList.remove("dragging"));
+}
+
+function bindTabDrag(tab, id) {
+  tab.draggable = true;
+  tab.addEventListener("dragstart", (event) => {
+    draggingTabID = id;
+    tab.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", id);
+    }
+  });
+  tab.addEventListener("dragend", () => {
+    clearDragState();
+  });
+  tab.addEventListener("dragover", (event) => {
+    if (!draggingTabID || draggingTabID === id) return;
+    event.preventDefault();
+    const dragged = tabs.get(draggingTabID);
+    const current = tabs.get(id);
+    if (!dragged || !current) return;
+    const rect = tab.getBoundingClientRect();
+    const insertAfter = event.clientX > rect.left + rect.width / 2;
+    if (insertAfter) {
+      current.tab.after(dragged.tab);
+    } else {
+      current.tab.before(dragged.tab);
+    }
+  });
+  tab.addEventListener("drop", (event) => {
+    if (!draggingTabID) return;
+    event.preventDefault();
+    reorderTabsByDOM();
+    clearDragState();
+  });
 }
 
 function createTab(title, url, pinned = false, focus = true, afterID = "") {
@@ -99,6 +147,7 @@ function createTab(title, url, pinned = false, focus = true, afterID = "") {
 
   tab.addEventListener("click", () => activateTab(id));
   tab.addEventListener("contextmenu", (event) => openTabMenu(event, id));
+  bindTabDrag(tab, id);
 
   const after = afterID ? tabs.get(afterID) : null;
   if (after) {
@@ -425,6 +474,22 @@ $("downloadsBackdrop").addEventListener("contextmenu", (event) => {
 $("newTab").addEventListener("click", () => createTab("新标签页", "about:blank", false, true));
 $("back").addEventListener("click", goBack);
 $("forward").addEventListener("click", goForward);
+$("tabs").addEventListener("dragover", (event) => {
+  if (!draggingTabID) return;
+  event.preventDefault();
+});
+$("tabs").addEventListener("drop", (event) => {
+  if (!draggingTabID) return;
+  const newTabButton = $("newTab");
+  if (event.target === newTabButton || newTabButton.contains(event.target)) {
+    const dragged = tabs.get(draggingTabID);
+    if (dragged) {
+      newTabButton.before(dragged.tab);
+    }
+  }
+  reorderTabsByDOM();
+  clearDragState();
+});
 $("tabMenu").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button || button.disabled) return;
@@ -466,7 +531,7 @@ window.addEventListener("message", (event) => {
   }
 });
 
-createTab("启动器后台", "/launcher-logs", true, false);
+createTab("后台", "/launcher-logs", true, false);
 createTab("启动器", "/", true, true);
 pollSession();
 setInterval(pollSession, 1500);

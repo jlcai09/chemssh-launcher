@@ -13,6 +13,7 @@ type Options struct {
 	Width            int
 	Height           int
 	Debug            bool
+	DataPath         string
 	CopyOnCtrlShiftC bool
 	DisableDevTools  bool
 	Fullscreen       bool

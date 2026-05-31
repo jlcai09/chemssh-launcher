@@ -73,6 +73,11 @@ input {
   color: #15212e;
 }
 
+.tab.dragging {
+  opacity: 0.56;
+  box-shadow: 0 10px 24px rgba(21, 33, 46, 0.16);
+}
+
 .tab-title {
   min-width: 0;
   flex: 1;

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +88,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	}
 	addr := "http://" + ln.Addr().String()
 	server.baseURL = addr
+	applyPendingCacheCleanup(server.localLog)
 	startLine := "ChemSSH Launcher " + version.String() + " GUI: " + addr
 	server.localLog.add(startLine)
 	fmt.Fprintln(stdout, startLine)
@@ -99,6 +101,10 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 
 	if options.UseWebView && !options.ForceBrowser {
 		shellAddr := addr + "/shell"
+		dataPath, err := config.DefaultWebViewDataDir()
+		if err != nil {
+			return err
+		}
 		if err := webview.Open(context.Background(), webview.Options{
 			Title:            "ChemSSH Launcher",
 			URL:              shellAddr,
@@ -108,6 +114,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 			CopyOnCtrlShiftC: true,
 			DisableDevTools:  !options.DevTools,
 			Fullscreen:       true,
+			DataPath:         dataPath,
 		}); err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -169,6 +176,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/status", s.handleStatus)
 	s.mux.HandleFunc("/api/logs", s.handleLogs)
 	s.mux.HandleFunc("/api/launcher-logs", s.handleLauncherLogs)
+	s.mux.HandleFunc("/api/backend", s.handleBackendInfo)
+	s.mux.HandleFunc("/api/backend/open-config-dir", s.handleOpenConfigDir)
+	s.mux.HandleFunc("/api/backend/export", s.handleExportProfiles)
+	s.mux.HandleFunc("/api/backend/import", s.handleImportProfiles)
+	s.mux.HandleFunc("/api/backend/clear-cache", s.handleClearCache)
 	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/defaults", s.handleDefaults)
 	s.mux.HandleFunc("/api/", s.handleChemSSHProxy)
@@ -891,6 +903,96 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLauncherLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string][]string{"lines": s.localLog.snapshot()}, nil)
+}
+
+func (s *Server) handleBackendInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	info, err := backendInfo()
+	writeJSON(w, info, err)
+}
+
+func (s *Server) handleOpenConfigDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	info, err := backendInfo()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := os.MkdirAll(info.ConfigDir, 0o700); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := browser.OpenPath(info.ConfigDir); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.localLog.add("opened config directory: " + info.ConfigDir)
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) handleExportProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	profiles, err := s.rt.Profiles.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="chemssh-launcher-profiles.json"`)
+	if err := exportProfiles(w, profiles); err != nil {
+		s.localLog.add("export profiles failed: " + err.Error())
+	}
+}
+
+func (s *Server) handleImportProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	profiles, err := importProfilesFromReader(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	for _, profile := range profiles {
+		_ = s.rt.Secrets.Delete(profile.ID, secret.KeyPassword)
+		_ = s.rt.Secrets.Delete(profile.ID, secret.KeyPrivatePassphrase)
+		if err := s.rt.Profiles.Save(profile); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	s.localLog.add("imported profiles: " + strconv.Itoa(len(profiles)))
+	writeJSON(w, map[string]any{"ok": true, "count": len(profiles)}, nil)
+}
+
+func (s *Server) handleClearCache(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	info, messages, err := clearBackendCache()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	for _, message := range messages {
+		s.localLog.add(message)
+	}
+	writeJSON(w, map[string]any{
+		"ok":       true,
+		"info":     info,
+		"messages": messages,
+	}, nil)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {

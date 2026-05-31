@@ -7,14 +7,65 @@
     <link rel="icon" href="/static/chemssh-icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/style.css" />
   </head>
-  <body class="logs-page">
-    <section class="logs full-log">
-      <div class="logs-title">
-        <h2>启动器后台</h2>
-        <button id="refreshLogs">刷新</button>
-      </div>
-      <pre id="logs"></pre>
-    </section>
+  <body class="logs-page backend-page">
+    <main class="backend-layout">
+      <section class="backend-hero">
+        <div>
+          <p class="backend-eyebrow">Launcher Backend</p>
+          <h1>后台</h1>
+          <p class="backend-summary">在这里查看启动器后台日志，管理配置文件，并清理 WebView2 旧版缓存。</p>
+        </div>
+        <div class="backend-path-card">
+          <span class="backend-path-label">配置目录</span>
+          <div class="path-line">
+            <code id="configDir">-</code>
+            <button id="copyConfigDir" class="copy-path" type="button">复制</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="backend-grid">
+        <article class="backend-panel backend-actions-panel">
+          <div class="backend-panel-head">
+            <h2>配置管理</h2>
+            <p>导入或导出 SSH 配置，不包含密码和私钥口令。</p>
+          </div>
+          <div class="backend-actions">
+            <button id="exportProfiles" class="primary" type="button">导出配置</button>
+            <label class="button-like" for="importProfilesInput">导入配置</label>
+            <input id="importProfilesInput" type="file" accept="application/json,.json" hidden />
+            <button id="openConfigDir" type="button">打开配置目录</button>
+          </div>
+          <p class="backend-note">导入会按配置 ID 覆盖同名条目，密码相关字段不会被写入。</p>
+        </article>
+
+        <article class="backend-panel backend-actions-panel">
+          <div class="backend-panel-head">
+            <h2>缓存维护</h2>
+            <p>只清理旧版 WebView2 缓存目录；当前目录由运行中的 WebView2 占用，不提供清理按钮。</p>
+          </div>
+          <div class="backend-actions">
+            <button id="clearCache" class="danger" type="button">清理旧版缓存</button>
+            <span id="clearPending" class="backend-badge">状态读取中</span>
+          </div>
+          <div id="cacheEntries" class="cache-list"></div>
+        </article>
+      </section>
+
+      <section class="backend-panel backend-log-panel">
+        <div class="logs-title">
+          <div>
+            <h2>后台日志</h2>
+            <p class="backend-log-caption">记录启动器行为、导入导出和旧版缓存清理结果。</p>
+          </div>
+          <div class="backend-log-actions">
+            <span id="backendNotice" class="notice"></span>
+            <button id="refreshLogs" type="button">刷新</button>
+          </div>
+        </div>
+        <pre id="logs"></pre>
+      </section>
+    </main>
     <script src="/static/logs.js"></script>
   </body>
 </html>
