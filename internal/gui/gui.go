@@ -548,14 +548,115 @@ func (s *Server) activeChemSSHTarget() (*url.URL, *activeSession) {
 	return target, session
 }
 
+const chemsshProxyMaxRetries = 5
+const chemsshProxyRetryBase = 200 * time.Millisecond
+
 func (s *Server) handleChemSSHProxy(w http.ResponseWriter, r *http.Request) {
 	target, session := s.activeChemSSHTarget()
 	if target == nil || session == nil {
 		writeError(w, http.StatusServiceUnavailable, errors.New("chemssh service is not available; start forwarding first"))
 		return
 	}
-	proxy := s.newChemSSHReverseProxy(target)
-	proxy.ServeHTTP(w, s.rewriteChemSSHProxyRequest(r, target))
+
+	var lastErr error
+	for attempt := range chemsshProxyMaxRetries {
+		if attempt > 0 {
+			delay := chemsshProxyRetryBase * time.Duration(1<<(attempt-1))
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(delay):
+			}
+		}
+		proxy := s.newChemSSHReverseProxy(target)
+		errCh := make(chan error, 1)
+		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+			errCh <- err
+		}
+		proxy.ServeHTTP(w, s.rewriteChemSSHProxyRequest(r, target))
+		select {
+		case err := <-errCh:
+			lastErr = err
+			if isRetriableProxyError(err) {
+				log.Printf("chemssh proxy: retryable error on attempt %d: %v", attempt+1, err)
+				continue
+			}
+			s.writeProxyError(w, r, http.StatusBadGateway, err)
+			return
+		default:
+			return
+		}
+	}
+	s.writeProxyError(w, r, http.StatusBadGateway, fmt.Errorf("proxy ChemSSH request failed after %d retries: %w", chemsshProxyMaxRetries, lastErr))
+}
+
+func (s *Server) writeProxyError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	if wantsHTML(r) {
+		writeLoadingPage(w, r.URL.RequestURI())
+		return
+	}
+	writeError(w, status, err)
+}
+
+func wantsHTML(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "text/html")
+}
+
+func writeLoadingPage(w http.ResponseWriter, refreshURL string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Refresh", "2;url="+refreshURL)
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = io.WriteString(w, chemsshLoadingHTML)
+}
+
+const chemsshLoadingHTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChemSSH - Loading</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{display:flex;align-items:center;justify-content:center;min-height:100vh;
+  background:#f5f6fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#333}
+.card{text-align:center;padding:48px 64px;background:#fff;border-radius:12px;
+  box-shadow:0 2px 12px rgba(0,0,0,.08)}
+.spinner{width:40px;height:40px;margin:0 auto 20px;border:4px solid #e0e0e0;
+  border-top-color:#4a90d9;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+h2{font-size:18px;font-weight:500;margin-bottom:8px;color:#444}
+p{font-size:14px;color:#888}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="spinner"></div>
+  <h2>ChemSSH is starting up…</h2>
+  <p>The service is being prepared. This page will refresh automatically.</p>
+</div>
+</body>
+</html>`
+
+func isRetriableProxyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "forcibly closed") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "wsarecv") ||
+		strings.Contains(msg, "wsasend") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF") {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
 }
 
 func (s *Server) rewriteChemSSHProxyRequest(r *http.Request, target *url.URL) *http.Request {

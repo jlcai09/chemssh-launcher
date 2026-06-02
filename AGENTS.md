@@ -219,6 +219,23 @@ Prompt defaults:
 - Local URL path: `/`
 - Open browser: `true`
 
+## Build Configuration
+
+Default release builds (two versions):
+
+```bash
+go run ./tools/build                              # Standard CLI/console executable
+go run ./tools/build --webview2 --windowsgui      # WebView2 GUI executable (no console window)
+```
+
+Debug builds:
+
+```bash
+go run ./tools/build --webview2                   # WebView2 executable (with console window, for debugging only)
+```
+
+The standard release consists of two executables: the CLI version and the WebView2 GUI version (no console).
+
 ## Code Organization
 
 Start with this structure:
