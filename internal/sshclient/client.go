@@ -3,6 +3,7 @@ package sshclient
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -22,7 +23,21 @@ func DialWithHostKeyPolicy(profile config.Profile, secrets secret.Store, policy 
 	if err != nil {
 		return nil, err
 	}
-	return ssh.Dial("tcp", fmt.Sprintf("%s:%d", profile.SSHHost, profile.SSHPort), cfg)
+	address := fmt.Sprintf("%s:%d", profile.SSHHost, profile.SSHPort)
+	dialer := &net.Dialer{
+		Timeout:       15 * time.Second,
+		FallbackDelay: 300 * time.Millisecond,
+	}
+	conn, err := dialer.Dial("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	clientConn, chans, reqs, err := ssh.NewClientConn(conn, address, cfg)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 
 type RemoteProcess struct {

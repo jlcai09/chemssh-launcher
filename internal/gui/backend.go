@@ -21,6 +21,7 @@ type backendOverview struct {
 	ConfigDir          string            `json:"config_dir"`
 	ProfilesPath       string            `json:"profiles_path"`
 	WebViewDataDir     string            `json:"webview_data_dir"`
+	SFTPOpenCacheDir   string            `json:"sftp_open_cache_dir"`
 	ClearPending       bool              `json:"clear_pending"`
 	ManagedCacheExists bool              `json:"managed_cache_exists"`
 	CacheEntries       []backendCacheDir `json:"cache_entries"`
@@ -115,6 +116,10 @@ func backendInfo() (backendOverview, error) {
 	if err != nil {
 		return backendOverview{}, err
 	}
+	sftpOpenCacheDir, err := config.DefaultSFTPOpenCacheDir()
+	if err != nil {
+		return backendOverview{}, err
+	}
 	clearMarker, err := config.DefaultWebViewClearMarkerPath()
 	if err != nil {
 		return backendOverview{}, err
@@ -122,12 +127,18 @@ func backendInfo() (backendOverview, error) {
 	_, clearPendingErr := os.Stat(clearMarker)
 	clearPending := clearPendingErr == nil
 	_, managedCacheErr := os.Stat(webViewDataDir)
+	_, sftpOpenCacheErr := os.Stat(sftpOpenCacheDir)
 
 	entries := []backendCacheDir{
 		{
 			Path:   webViewDataDir,
 			Kind:   "managed",
 			Exists: managedCacheErr == nil,
+		},
+		{
+			Path:   sftpOpenCacheDir,
+			Kind:   "sftp-open",
+			Exists: sftpOpenCacheErr == nil,
 		},
 	}
 	for _, legacy := range config.LegacyWebViewDataDirs() {
@@ -143,6 +154,7 @@ func backendInfo() (backendOverview, error) {
 		ConfigDir:          configDir,
 		ProfilesPath:       profilesPath,
 		WebViewDataDir:     webViewDataDir,
+		SFTPOpenCacheDir:   sftpOpenCacheDir,
 		ClearPending:       clearPending,
 		ManagedCacheExists: managedCacheErr == nil,
 		CacheEntries:       entries,
@@ -159,7 +171,7 @@ func clearBackendCache() (backendOverview, []string, error) {
 	var pending bool
 	var cleared bool
 	for _, entry := range info.CacheEntries {
-		if entry.Kind != "legacy" {
+		if entry.Kind != "legacy" && entry.Kind != "sftp-open" {
 			continue
 		}
 		if !entry.Exists {
@@ -167,14 +179,14 @@ func clearBackendCache() (backendOverview, []string, error) {
 		}
 		if err := os.RemoveAll(entry.Path); err != nil {
 			pending = true
-			messages = append(messages, fmt.Sprintf("could not remove %s now: %v", entry.Path, err))
+			messages = append(messages, fmt.Sprintf("暂时无法清理 %s：%v", entry.Path, err))
 			continue
 		}
 		cleared = true
-		messages = append(messages, "cleared "+entry.Path)
+		messages = append(messages, "已清理 "+entry.Path)
 	}
 	if !cleared && !pending {
-		messages = append(messages, "no legacy backend cache directories found")
+		messages = append(messages, "没有发现可清理的后台缓存目录")
 	}
 
 	clearMarker, err := config.DefaultWebViewClearMarkerPath()
@@ -185,7 +197,7 @@ func clearBackendCache() (backendOverview, []string, error) {
 		if err := os.WriteFile(clearMarker, []byte("pending\n"), 0o600); err != nil {
 			return backendOverview{}, messages, err
 		}
-		messages = append(messages, "some cache files are in use; cleanup will retry on next startup")
+		messages = append(messages, "部分缓存文件正在使用中，下次启动时会继续尝试清理")
 	} else if err := os.Remove(clearMarker); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return backendOverview{}, messages, err
 	}
@@ -210,6 +222,13 @@ func applyPendingCacheCleanup(logs *safeLog) {
 	}
 
 	var failed []string
+	if dir, err := config.DefaultSFTPOpenCacheDir(); err != nil {
+		failed = append(failed, fmt.Sprintf("SFTP file cache (%v)", err))
+	} else if dir != "" {
+		if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failed = append(failed, fmt.Sprintf("%s (%v)", dir, err))
+		}
+	}
 	for _, dir := range config.LegacyWebViewDataDirs() {
 		if dir == "" {
 			continue
@@ -227,6 +246,28 @@ func applyPendingCacheCleanup(logs *safeLog) {
 	_ = os.Remove(clearMarker)
 	if logs != nil {
 		logs.add("pending backend cache cleanup completed")
+	}
+}
+
+func cleanupSFTPOpenCache(logs *safeLog) {
+	dir, err := config.DefaultSFTPOpenCacheDir()
+	if err != nil {
+		if logs != nil {
+			logs.add("warning: resolve SFTP file cache directory: " + err.Error())
+		}
+		return
+	}
+	if dir == "" {
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if logs != nil {
+			logs.add("warning: cleanup SFTP file cache: " + err.Error())
+		}
+		return
+	}
+	if logs != nil {
+		logs.add("SFTP file cache cleaned: " + dir)
 	}
 }
 

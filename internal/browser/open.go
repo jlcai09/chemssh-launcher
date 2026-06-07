@@ -43,3 +43,45 @@ func OpenPath(path string) error {
 	}
 	return nil
 }
+
+func OpenFile(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve file: %w", err)
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", abs)
+	case "darwin":
+		cmd = exec.Command("open", abs)
+	default:
+		cmd = exec.Command("xdg-open", abs)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("open file: %w", err)
+	}
+	return nil
+}
+
+func OpenTextFile(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve file: %w", err)
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("notepad.exe", abs)
+	case "darwin":
+		cmd = exec.Command("open", "-e", abs)
+	default:
+		cmd = exec.Command("xdg-open", abs)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("open text file: %w", err)
+	}
+	return nil
+}

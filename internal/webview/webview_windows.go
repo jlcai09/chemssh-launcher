@@ -21,6 +21,15 @@ var dpiOnce sync.Once
 
 const desktopChromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+const (
+	gwlpWndProc   = ^uintptr(3) // GWLP_WNDPROC = -4
+	wmClose       = 0x0010
+	mbYesNo       = 0x00000004
+	mbIconWarning = 0x00000030
+	idYes         = 6
+	idNo          = 7
+)
+
 func Available() bool {
 	return true
 }
@@ -86,6 +95,9 @@ func Open(ctx context.Context, opts Options) error {
 	}()
 
 	w.Navigate(opts.URL)
+	if opts.CloseInterceptor != nil {
+		installCloseInterceptor(w, opts.CloseInterceptor)
+	}
 	w.Run()
 	close(done)
 	return nil
@@ -413,4 +425,60 @@ func setWindowIcon(hwndPointer unsafe.Pointer) {
 	sendMessage.Call(hwnd, wmSetIcon, iconBig, icon)
 	sendMessage.Call(hwnd, wmSetIcon, iconSmall, icon)
 	sendMessage.Call(hwnd, wmSetIcon, iconSmall2, icon)
+}
+
+// installCloseInterceptor subclasses the webview's native window to intercept
+// WM_CLOSE. When the interceptor returns true (transfers in progress), a native
+// MessageBox is shown; if the user clicks "No" the close is cancelled.
+func installCloseInterceptor(w webview2.WebView, interceptor func() bool) {
+	hwndPtr := w.Window()
+	if hwndPtr == nil {
+		return
+	}
+	hwnd := uintptr(hwndPtr)
+
+	user32 := syscall.NewLazyDLL("user32.dll")
+	getPtr := user32.NewProc("GetWindowLongPtrW")
+	setPtr := user32.NewProc("SetWindowLongPtrW")
+	callWndProc := user32.NewProc("CallWindowProcW")
+	msgBox := user32.NewProc("MessageBoxW")
+
+	if err := getPtr.Find(); err != nil {
+		log.Printf("warning: GetWindowLongPtrW not available: %v", err)
+		return
+	}
+	if err := setPtr.Find(); err != nil {
+		log.Printf("warning: SetWindowLongPtrW not available: %v", err)
+		return
+	}
+
+	oldProc, _, _ := getPtr.Call(hwnd, uintptr(gwlpWndProc))
+	if oldProc == 0 {
+		log.Printf("warning: could not get original wndproc")
+		return
+	}
+
+	title, _ := syscall.UTF16PtrFromString("ChemSSH Launcher")
+	text, _ := syscall.UTF16PtrFromString("\u6709\u4f20\u8f93\u4efb\u52a1\u6b63\u5728\u8fdb\u884c\u4e2d\u3002\n\u5173\u95ed\u7a97\u53e3\u5c06\u4e2d\u65ad\u8fd9\u4e9b\u4efb\u52a1\u3002\n\n\u786e\u5b9a\u8981\u5173\u95ed\u5417\uff1f\n\nTransfer tasks are still running.\nClosing this window will interrupt them.\n\nAre you sure you want to close?")
+
+	newProc := syscall.NewCallback(func(hwndArg, msg, wp, lp uintptr) uintptr {
+		if msg == wmClose {
+			if interceptor() {
+				ret, _, _ := msgBox.Call(
+					hwndArg,
+					uintptr(unsafe.Pointer(text)),
+					uintptr(unsafe.Pointer(title)),
+					uintptr(mbYesNo|mbIconWarning),
+				)
+				if ret != idYes {
+					return 0 // cancel close
+				}
+			}
+			// fall through to original wndproc (which calls DestroyWindow)
+		}
+		r, _, _ := callWndProc.Call(oldProc, hwndArg, msg, wp, lp)
+		return r
+	})
+
+	setPtr.Call(hwnd, uintptr(gwlpWndProc), newProc)
 }

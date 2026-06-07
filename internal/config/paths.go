@@ -66,6 +66,21 @@ func DefaultWebViewClearMarkerPath() (string, error) {
 	return filepath.Join(dir, "webview2-clear-pending"), nil
 }
 
+func DefaultSFTPOpenCacheDir() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err == nil && dir != "" {
+		if runtime.GOOS == "linux" {
+			return filepath.Join(dir, "chemssh-launcher", "sftp-open"), nil
+		}
+		return filepath.Join(dir, AppName, "sftp-open"), nil
+	}
+	fallback, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(fallback, "sftp-open-cache"), nil
+}
+
 func LegacyWebViewDataDirs() []string {
 	if runtime.GOOS != "windows" {
 		return nil

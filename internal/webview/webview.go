@@ -18,6 +18,10 @@ type Options struct {
 	DisableDevTools  bool
 	Fullscreen       bool
 	UserAgent        string
+	// CloseInterceptor is called when the user attempts to close the window.
+	// If it returns true, a confirmation dialog is shown. If the user cancels,
+	// the window stays open. If it returns false, the window closes normally.
+	CloseInterceptor func() bool
 }
 
 type Opener interface {

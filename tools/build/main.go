@@ -31,6 +31,9 @@ func main() {
 	if err := syncWinres(root, version); err != nil {
 		fatal(err)
 	}
+	if err := buildFrontend(root); err != nil {
+		fatal(err)
+	}
 	if runtime.GOOS == "windows" {
 		if err := makeWindowsResources(root); err != nil {
 			fatal(err)
@@ -131,6 +134,21 @@ func makeWindowsResources(root string) error {
 	}
 	fmt.Println("go-winres was not found; falling back to go run github.com/tc-hib/go-winres@v0.3.3")
 	return run(root, "go", append([]string{"run", "github.com/tc-hib/go-winres@v0.3.3"}, args...)...)
+}
+
+func buildFrontend(root string) error {
+	manifest := filepath.Join(root, "frontend", "package.json")
+	if _, err := os.Stat(manifest); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	name := "npm"
+	if runtime.GOOS == "windows" {
+		name = "npm.cmd"
+	}
+	return run(filepath.Join(root, "frontend"), name, "run", "build")
 }
 
 func windowsResourceInputs(root string) ([]string, error) {

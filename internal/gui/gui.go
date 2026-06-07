@@ -16,14 +16,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"chemssh-launcher/internal/browser"
 	"chemssh-launcher/internal/chemssh"
 	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/fileicon"
 	"chemssh-launcher/internal/netcheck"
 	"chemssh-launcher/internal/runtime"
 	"chemssh-launcher/internal/secret"
+	"chemssh-launcher/internal/sftpclient"
 	"chemssh-launcher/internal/sshclient"
 	"chemssh-launcher/internal/version"
 	"chemssh-launcher/internal/webview"
@@ -35,15 +38,22 @@ import (
 var assets embed.FS
 
 type Server struct {
-	rt       *runtime.Runtime
-	mux      *http.ServeMux
-	logs     *safeLog
-	localLog *safeLog
-	options  Options
-	baseURL  string
-	mu       sync.Mutex
-	session  *activeSession
-	shutdown context.CancelFunc
+	rt        *runtime.Runtime
+	mux       *http.ServeMux
+	logs      *safeLog
+	localLog  *safeLog
+	sftp      *sftpclient.Manager
+	sftpSync  *sftpOpenSyncManager
+	icons     *fileicon.Service
+	transfers *transferProgressStore
+	options   Options
+	baseURL   string
+	mu        sync.Mutex
+	session   *activeSession
+	shutdown  context.CancelFunc
+	// activeTransferCount is updated by the frontend via /api/transfer-count.
+	// It tracks how many transfer tasks are currently running.
+	activeTransferCount atomic.Int32
 }
 
 type Options struct {
@@ -81,6 +91,9 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	}
 	server := NewServer(rt)
 	server.options = options
+	defer cleanupSFTPOpenCache(server.localLog)
+	defer server.sftp.CloseAll()
+	defer server.sftpSync.CloseAll()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -115,6 +128,9 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 			DisableDevTools:  !options.DevTools,
 			Fullscreen:       true,
 			DataPath:         dataPath,
+			CloseInterceptor: func() bool {
+				return server.activeTransferCount.Load() > 0
+			},
 		}); err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -150,11 +166,15 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 
 func NewServer(rt *runtime.Runtime) *Server {
 	s := &Server{
-		rt:       rt,
-		mux:      http.NewServeMux(),
-		logs:     &safeLog{},
-		localLog: &safeLog{},
+		rt:        rt,
+		mux:       http.NewServeMux(),
+		logs:      &safeLog{},
+		localLog:  &safeLog{},
+		sftp:      sftpclient.NewManager(),
+		icons:     fileicon.NewService(),
+		transfers: newTransferProgressStore(),
 	}
+	s.sftpSync = newSFTPOpenSyncManager(s.sftp, s.logs)
 	s.routes()
 	return s
 }
@@ -162,6 +182,7 @@ func NewServer(rt *runtime.Runtime) *Server {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/shell", s.handleShell)
+	s.mux.HandleFunc("/sftp", s.handleSFTPPage)
 	s.mux.HandleFunc("/launcher-logs", s.handleLauncherLogsPage)
 	s.mux.HandleFunc("/chemssh", s.handleChemSSHProxy)
 	s.mux.HandleFunc("/chemssh/", s.handleChemSSHProxy)
@@ -175,14 +196,43 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/stop-service", s.handleStopService)
 	s.mux.HandleFunc("/api/session/status", s.handleStatus)
 	s.mux.HandleFunc("/api/logs", s.handleLogs)
+	s.mux.HandleFunc("/api/sftp/connect", s.handleSFTPConnect)
+	s.mux.HandleFunc("/api/sftp/disconnect", s.handleSFTPDisconnect)
+	s.mux.HandleFunc("/api/sftp/list", s.handleSFTPList)
+	s.mux.HandleFunc("/api/sftp/mkdir", s.handleSFTPMkdir)
+	s.mux.HandleFunc("/api/sftp/create-file", s.handleSFTPCreateFile)
+	s.mux.HandleFunc("/api/sftp/rename", s.handleSFTPRename)
+	s.mux.HandleFunc("/api/sftp/delete", s.handleSFTPDelete)
+	s.mux.HandleFunc("/api/sftp/upload", s.handleSFTPUpload)
+	s.mux.HandleFunc("/api/sftp/download", s.handleSFTPDownload)
+	s.mux.HandleFunc("/api/sftp/open", s.handleSFTPOpen)
+	s.mux.HandleFunc("/api/sftp/open-text", s.handleSFTPOpenText)
+	s.mux.HandleFunc("/api/sftp/open-sync-events", s.handleSFTPOpenSyncEvents)
+	s.mux.HandleFunc("/api/sftp/upload-local", s.handleSFTPUploadLocal)
+	s.mux.HandleFunc("/api/sftp/download-local", s.handleSFTPDownloadLocal)
+	s.mux.HandleFunc("/api/sftp/copy-remote", s.handleSFTPCopyRemote)
+	s.mux.HandleFunc("/api/local/home", s.handleLocalHome)
+	s.mux.HandleFunc("/api/local/list", s.handleLocalList)
+	s.mux.HandleFunc("/api/local/mkdir", s.handleLocalMkdir)
+	s.mux.HandleFunc("/api/local/create-file", s.handleLocalCreateFile)
+	s.mux.HandleFunc("/api/local/rename", s.handleLocalRename)
+	s.mux.HandleFunc("/api/local/delete", s.handleLocalDelete)
+	s.mux.HandleFunc("/api/local/copy", s.handleLocalCopy)
+	s.mux.HandleFunc("/api/local/open", s.handleLocalOpen)
+	s.mux.HandleFunc("/api/local/open-text", s.handleLocalOpenText)
+	s.mux.HandleFunc("/api/file-icon", s.handleFileIcon)
+	s.mux.HandleFunc("/api/transfer-progress", s.handleTransferProgress)
+	s.mux.HandleFunc("/api/transfer-control", s.handleTransferControl)
 	s.mux.HandleFunc("/api/launcher-logs", s.handleLauncherLogs)
 	s.mux.HandleFunc("/api/backend", s.handleBackendInfo)
 	s.mux.HandleFunc("/api/backend/open-config-dir", s.handleOpenConfigDir)
+	s.mux.HandleFunc("/api/backend/open-sftp-cache-dir", s.handleOpenSFTPCacheDir)
 	s.mux.HandleFunc("/api/backend/export", s.handleExportProfiles)
 	s.mux.HandleFunc("/api/backend/import", s.handleImportProfiles)
 	s.mux.HandleFunc("/api/backend/clear-cache", s.handleClearCache)
 	s.mux.HandleFunc("/api/version", s.handleVersion)
 	s.mux.HandleFunc("/api/defaults", s.handleDefaults)
+	s.mux.HandleFunc("/api/transfer-count", s.handleTransferCount)
 	s.mux.HandleFunc("/api/", s.handleChemSSHProxy)
 }
 
@@ -191,7 +241,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFileFS(w, r, assets, "static/index.html")
+	s.serveVueApp(w, r)
 }
 
 func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +249,15 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFileFS(w, r, assets, "static/shell.html")
+	s.serveVueApp(w, r)
+}
+
+func (s *Server) handleSFTPPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/sftp" {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveVueApp(w, r)
 }
 
 func (s *Server) handleLauncherLogsPage(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +265,16 @@ func (s *Server) handleLauncherLogsPage(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFileFS(w, r, assets, "static/logs.html")
+	s.serveVueApp(w, r)
+}
+
+func (s *Server) serveVueApp(w http.ResponseWriter, r *http.Request) {
+	if file, err := assets.Open("static/vue/index.html"); err == nil {
+		_ = file.Close()
+		http.ServeFileFS(w, r, assets, "static/vue/index.html")
+		return
+	}
+	http.Error(w, "frontend assets are not built; run go run ./tools/build", http.StatusInternalServerError)
 }
 
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
@@ -1034,6 +1101,28 @@ func (s *Server) handleOpenConfigDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.localLog.add("opened config directory: " + info.ConfigDir)
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) handleOpenSFTPCacheDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	info, err := backendInfo()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := os.MkdirAll(info.SFTPOpenCacheDir, 0o700); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := browser.OpenPath(info.SFTPOpenCacheDir); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.localLog.add("opened SFTP file cache directory: " + info.SFTPOpenCacheDir)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
