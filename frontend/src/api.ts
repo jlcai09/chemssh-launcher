@@ -1,5 +1,6 @@
 export interface Profile {
   id: string
+  kind: 'remote' | 'local' | ''
   name: string
   ssh_host: string
   ssh_port: number

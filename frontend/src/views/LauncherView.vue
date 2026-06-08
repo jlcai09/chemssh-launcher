@@ -24,10 +24,10 @@
           type="button"
           @click="selectProfile(profile)"
         >
-          <span class="state-dot" :class="{ running: activeProfileId === profile.id }" />
+          <span class="state-dot" :class="{ running: runningProfileIds.has(profile.id) }" />
           <span>
             <strong>{{ profile.name || t('launcher.unnamed') }}</strong>
-            <small>{{ profile.ssh_user || '?' }}@{{ profile.ssh_host || '?' }}</small>
+            <small>{{ profileSummary(profile) }}</small>
           </span>
         </button>
         <p v-if="!profiles.length" class="empty">{{ t('launcher.emptyProfiles') }}</p>
@@ -38,7 +38,7 @@
       <div class="launcher-toolbar">
         <div>
           <h2>{{ current.name || t('launcher.unsaved') }}</h2>
-          <p>{{ current.id ? `${current.ssh_user || 'user'}@${current.ssh_host || 'host'}` : t('launcher.noProfileHint') }}</p>
+          <p>{{ current.id ? profileSummary(current) : t('launcher.noProfileHint') }}</p>
         </div>
         <div class="toolbar-actions">
           <el-tooltip :content="t('launcher.sshTest')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
@@ -61,23 +61,29 @@
           <section class="form-section">
             <h3>{{ t('launcher.server') }}</h3>
             <div class="form-grid">
+              <el-form-item :label="t('launcher.profileKind')">
+                <el-select :model-value="current.kind || 'remote'" @update:model-value="setProfileKind">
+                  <el-option :label="t('launcher.kindRemote')" value="remote" />
+                  <el-option :label="t('launcher.kindLocal')" value="local" />
+                </el-select>
+              </el-form-item>
               <el-form-item :label="t('launcher.name')"><el-input v-model="current.name" :placeholder="t('launcher.placeholder.name')" /></el-form-item>
-              <el-form-item :label="t('launcher.sshHost')"><el-input v-model="current.ssh_host" :placeholder="t('launcher.placeholder.sshHost')" /></el-form-item>
-              <el-form-item :label="t('launcher.sshPort')"><el-input-number v-model="current.ssh_port" :min="1" :max="65535" /></el-form-item>
-              <el-form-item :label="t('launcher.sshUser')"><el-input v-model="current.ssh_user" :placeholder="t('launcher.placeholder.sshUser')" /></el-form-item>
-              <el-form-item :label="t('launcher.authMethod')">
+              <el-form-item v-if="!isLocalProfile" :label="t('launcher.sshHost')"><el-input v-model="current.ssh_host" :placeholder="t('launcher.placeholder.sshHost')" /></el-form-item>
+              <el-form-item v-if="!isLocalProfile" :label="t('launcher.sshPort')"><el-input-number v-model="current.ssh_port" :min="1" :max="65535" /></el-form-item>
+              <el-form-item v-if="!isLocalProfile" :label="t('launcher.sshUser')"><el-input v-model="current.ssh_user" :placeholder="t('launcher.placeholder.sshUser')" /></el-form-item>
+              <el-form-item v-if="!isLocalProfile" :label="t('launcher.authMethod')">
                 <el-select v-model="current.auth_method">
                   <el-option :label="t('launcher.authPassword')" value="password" />
                   <el-option :label="t('launcher.authPrivateKey')" value="private_key" />
                 </el-select>
               </el-form-item>
-              <el-form-item v-if="current.auth_method === 'private_key'" :label="t('launcher.authPrivateKey')">
+              <el-form-item v-if="!isLocalProfile && current.auth_method === 'private_key'" :label="t('launcher.authPrivateKey')">
                 <el-input v-model="current.private_key_path" :placeholder="t('launcher.placeholder.privateKeyPath')" />
               </el-form-item>
             </div>
           </section>
 
-          <section class="form-section">
+          <section v-if="!isLocalProfile" class="form-section">
             <h3>{{ t('launcher.credentials') }}</h3>
             <div class="form-grid">
               <el-form-item v-if="current.auth_method === 'password'" :label="t('launcher.authPassword')">
@@ -104,12 +110,12 @@
           </section>
 
           <section class="form-section">
-            <h3>{{ t('launcher.tunnel') }}</h3>
+            <h3>{{ isLocalProfile ? t('launcher.localAccess') : t('launcher.tunnel') }}</h3>
             <div class="form-grid">
-              <el-form-item :label="t('launcher.remoteHost')"><el-input v-model="current.remote_host" :placeholder="t('launcher.placeholder.remoteHost')" /></el-form-item>
-              <el-form-item :label="t('launcher.remotePort')"><el-input-number v-model="current.remote_port" :min="1" :max="65535" /></el-form-item>
-              <el-form-item :label="t('launcher.localHost')"><el-input v-model="current.local_host" :placeholder="t('launcher.placeholder.localHost')" /></el-form-item>
-              <el-form-item :label="t('launcher.localPort')"><el-input-number v-model="current.local_port" :min="1" :max="65535" /></el-form-item>
+              <el-form-item v-if="!isLocalProfile" :label="t('launcher.remoteHost')"><el-input v-model="current.remote_host" :placeholder="t('launcher.placeholder.remoteHost')" /></el-form-item>
+              <el-form-item v-if="!isLocalProfile" :label="t('launcher.remotePort')"><el-input-number v-model="current.remote_port" :min="1" :max="65535" /></el-form-item>
+              <el-form-item :label="isLocalProfile ? t('launcher.localTargetHost') : t('launcher.localHost')"><el-input v-model="current.local_host" :placeholder="t('launcher.placeholder.localHost')" /></el-form-item>
+              <el-form-item :label="isLocalProfile ? t('launcher.localTargetPort') : t('launcher.localPort')"><el-input-number v-model="current.local_port" :min="1" :max="65535" /></el-form-item>
               <el-form-item :label="t('launcher.localURLPath')"><el-input v-model="current.local_url_path" :placeholder="t('launcher.placeholder.localURLPath')" /></el-form-item>
               <el-form-item :label="t('launcher.healthURL')"><el-input v-model="current.health_check_url" :placeholder="t('launcher.placeholder.healthURL')" /></el-form-item>
             </div>
@@ -117,12 +123,12 @@
           </section>
 
           <section class="form-section">
-            <h3>{{ t('launcher.remoteCommands') }}</h3>
+            <h3>{{ isLocalProfile ? t('launcher.localCommands') : t('launcher.remoteCommands') }}</h3>
             <el-form-item :label="t('launcher.preStartCommands')">
-              <el-input v-model="current.pre_start_commands" type="textarea" :rows="5" :placeholder="t('launcher.placeholder.preStartCommands')" />
+              <el-input v-model="current.pre_start_commands" type="textarea" :rows="5" :placeholder="isLocalProfile ? t('launcher.placeholder.localPreStartCommands') : t('launcher.placeholder.preStartCommands')" />
             </el-form-item>
             <el-form-item :label="t('launcher.startCommand')">
-              <el-input v-model="current.start_command" type="textarea" :rows="5" :placeholder="t('launcher.placeholder.startCommand')" />
+              <el-input v-model="current.start_command" type="textarea" :rows="5" :placeholder="isLocalProfile ? t('launcher.placeholder.localStartCommand') : t('launcher.placeholder.startCommand')" />
             </el-form-item>
           </section>
 
@@ -139,7 +145,7 @@
               <el-button :icon="Refresh" circle @click="refreshLogs" />
             </el-tooltip>
           </div>
-          <pre>{{ logs.join('\n') }}</pre>
+          <pre ref="logRef" @scroll="logScroller.onScroll">{{ logs.join('\n') }}</pre>
         </section>
       </div>
     </section>
@@ -147,36 +153,75 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, CircleClose, Connection, Delete, Plus, Refresh, SwitchButton, VideoPlay } from '@element-plus/icons-vue'
 import { api, APIError, postJSON, putJSON, type HostKeyInfo, type Profile } from '../api'
+import { createAutoScroll } from '../autoScroll'
 import { t } from '../i18n'
 
 const defaults = ref<Profile | null>(null)
 const profiles = ref<Profile[]>([])
 const current = reactive<Profile>({} as Profile)
 const activeProfileId = ref('')
+const runningProfileIds = ref(new Set<string>())
 const logs = ref<string[]>([])
+const logRef = ref<HTMLElement | null>(null)
+const logScroller = createAutoScroll(() => logRef.value)
 const passwordInput = ref('')
 const passphraseInput = ref('')
 const passwordAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const passphraseAction = ref<'keep' | 'replace' | 'clear'>('keep')
+const isLocalProfile = computed(() => current.kind === 'local')
 
 function applyProfile(profile: Partial<Profile>) {
   Object.assign(current, defaults.value, profile)
+  current.kind = current.kind || 'remote'
   passwordInput.value = ''
   passphraseInput.value = ''
   passwordAction.value = 'keep'
   passphraseAction.value = 'keep'
 }
 
+function setProfileKind(kind: string | number | boolean) {
+  const nextKind = kind === 'local' ? 'local' : 'remote'
+  if (current.kind === nextKind) return
+  current.kind = nextKind
+  if (nextKind === 'local') {
+    current.ssh_host = ''
+    current.ssh_port = 0
+    current.ssh_user = ''
+    current.auth_method = ''
+    current.has_password = false
+    current.private_key_path = ''
+    current.has_private_key_passphrase = false
+    current.remote_host = ''
+    current.remote_port = 0
+    current.pre_start_commands = ''
+    current.start_command = ''
+    if (!current.name) current.name = t('launcher.kindLocal')
+  } else if (defaults.value) {
+    current.ssh_port = current.ssh_port || defaults.value.ssh_port
+    current.auth_method = current.auth_method || defaults.value.auth_method
+    current.remote_host = current.remote_host || defaults.value.remote_host
+    current.remote_port = current.remote_port || defaults.value.remote_port
+    current.start_command = current.start_command || defaults.value.start_command
+  }
+}
+
+function profileSummary(profile: Partial<Profile>) {
+  if (profile.kind === 'local') return `local ${profile.local_host || '127.0.0.1'}:${profile.local_port || 8888}`
+  return `${profile.ssh_user || '?'}@${profile.ssh_host || '?'}`
+}
+
 function newProfile() {
   applyProfile({})
+  logs.value = []
 }
 
 function selectProfile(profile: Profile) {
   applyProfile(profile)
+  void refreshLogs(true)
 }
 
 async function loadProfiles() {
@@ -199,6 +244,7 @@ async function saveProfile() {
     : await postJSON<Profile>('/api/profiles', payload)
   applyProfile(saved)
   await loadProfiles()
+  await refreshLogs(true)
   ElMessage.success(t('launcher.profileSaved'))
 }
 
@@ -248,26 +294,45 @@ async function startSession() {
 }
 
 async function stopForwarding() {
-  await postJSON('/api/session/stop', {})
+  await postJSON('/api/session/stop', { id: current.id })
   await refreshStatus()
   await refreshLogs()
 }
 
 async function stopService() {
   await ElMessageBox.confirm(t('launcher.confirmStop'), t('launcher.confirmTitle'), { type: 'warning' })
-  await postJSON('/api/session/stop-service', {})
+  await postJSON('/api/session/stop-service', { id: current.id })
   await refreshStatus()
   await refreshLogs()
 }
 
 async function refreshStatus() {
-  const status = await api<{ running: boolean; id: string }>('/api/session/status')
-  activeProfileId.value = status.running ? status.id : ''
+  if (!profiles.value.length) {
+    runningProfileIds.value = new Set()
+    activeProfileId.value = ''
+    return
+  }
+  const statuses = await Promise.all(profiles.value.map(profile =>
+    api<{ running: boolean; id: string }>(`/api/session/status?profile_id=${encodeURIComponent(profile.id)}${profile.id === current.id ? '&activate=1' : ''}`)
+      .catch(() => ({ running: false, id: profile.id }))
+  ))
+  const running = new Set<string>()
+  statuses.forEach(status => {
+    if (status.running && status.id) running.add(status.id)
+  })
+  runningProfileIds.value = running
+  activeProfileId.value = current.id && running.has(current.id) ? current.id : ''
 }
 
-async function refreshLogs() {
-  const data = await api<{ lines: string[] }>('/api/logs')
+async function refreshLogs(forceScroll = false) {
+  if (!current.id) {
+    logs.value = []
+    return
+  }
+  const data = await api<{ lines: string[] }>(`/api/logs?profile_id=${encodeURIComponent(current.id)}`)
   logs.value = data.lines || []
+  await nextTick()
+  logScroller.scrollToBottom(forceScroll)
 }
 
 watch(passwordInput, value => {

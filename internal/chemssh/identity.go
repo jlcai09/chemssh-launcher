@@ -39,6 +39,25 @@ func FetchIdentity(ctx context.Context, client *ssh.Client, profile config.Profi
 		return Identity{}, fmt.Errorf("fetch ChemSSH identity: %w", err)
 	}
 	defer resp.Body.Close()
+	return decodeIdentity(resp, "remote")
+}
+
+func FetchLocalIdentity(ctx context.Context, profile config.Profile) (Identity, error) {
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	url := "http://" + profile.LocalAddress() + "/api/system/identity"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Identity{}, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return Identity{}, fmt.Errorf("fetch local ChemSSH identity: %w", err)
+	}
+	defer resp.Body.Close()
+	return decodeIdentity(resp, "local")
+}
+
+func decodeIdentity(resp *http.Response, scope string) (Identity, error) {
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return Identity{}, fmt.Errorf("fetch ChemSSH identity: unexpected HTTP status %d", resp.StatusCode)
 	}
@@ -47,10 +66,10 @@ func FetchIdentity(ctx context.Context, client *ssh.Client, profile config.Profi
 		return Identity{}, fmt.Errorf("decode ChemSSH identity: %w", err)
 	}
 	if identity.App != "chemssh" {
-		return Identity{}, fmt.Errorf("remote service identity is %q, not chemssh", identity.App)
+		return Identity{}, fmt.Errorf("%s service identity is %q, not chemssh", scope, identity.App)
 	}
 	if identity.PID <= 0 {
-		return Identity{}, fmt.Errorf("remote ChemSSH identity returned invalid pid %d", identity.PID)
+		return Identity{}, fmt.Errorf("%s ChemSSH identity returned invalid pid %d", scope, identity.PID)
 	}
 	return identity, nil
 }

@@ -1,6 +1,9 @@
 package config
 
 const (
+	ProfileKindRemote = "remote"
+	ProfileKindLocal  = "local"
+
 	AuthPassword   = "password"
 	AuthPrivateKey = "private_key"
 )
@@ -26,6 +29,7 @@ chemssh --config config.yaml`
 
 type Profile struct {
 	ID                      string `json:"id"`
+	Kind                    string `json:"kind"`
 	Name                    string `json:"name"`
 	SSHHost                 string `json:"ssh_host"`
 	SSHPort                 int    `json:"ssh_port"`
@@ -47,6 +51,7 @@ type Profile struct {
 
 func NewProfileDefaults() Profile {
 	return Profile{
+		Kind:         ProfileKindRemote,
 		SSHPort:      22,
 		AuthMethod:   AuthPassword,
 		RemoteHost:   "127.0.0.1",
@@ -57,6 +62,35 @@ func NewProfileDefaults() Profile {
 		StartCommand: DefaultStartCommand,
 		OpenBrowser:  true,
 	}
+}
+
+func NewLocalProfileDefaults() Profile {
+	p := NewProfileDefaults()
+	p.Kind = ProfileKindLocal
+	p.Name = "Local ChemSSH"
+	p.SSHPort = 0
+	p.AuthMethod = ""
+	p.SSHHost = ""
+	p.SSHUser = ""
+	p.HasPassword = false
+	p.PrivateKeyPath = ""
+	p.HasPrivateKeyPassphrase = false
+	p.RemoteHost = ""
+	p.RemotePort = 0
+	p.PreStartCommands = ""
+	p.StartCommand = ""
+	return p
+}
+
+func (p Profile) EffectiveKind() string {
+	if p.Kind == ProfileKindLocal {
+		return ProfileKindLocal
+	}
+	return ProfileKindRemote
+}
+
+func (p Profile) IsLocal() bool {
+	return p.EffectiveKind() == ProfileKindLocal
 }
 
 func (p Profile) BrowserURL() string {

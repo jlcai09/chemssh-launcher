@@ -16,6 +16,9 @@
 /.gocache/
 /.gocache-hostkey/
 /.gocache-*/
+/.codex-gocache-*/
+/.codex-gotmp-*/
+/.gotmp-test/
 /.gomodcache/
 /.gopath/
 *.test

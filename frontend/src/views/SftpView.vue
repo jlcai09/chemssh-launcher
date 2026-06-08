@@ -47,7 +47,7 @@
               <div v-else class="xftp-new-form">
                 <el-select v-model="panes[paneName].draft.profileID" placeholder="选择已保存服务器">
                   <el-option
-                    v-for="profile in profiles"
+                    v-for="profile in remoteProfiles"
                     :key="profile.id"
                     :label="`${profile.name || profile.ssh_host} - ${profile.ssh_user || '?'}@${profile.ssh_host || '?'}`"
                     :value="profile.id"
@@ -457,7 +457,7 @@
           />
         </div>
       </div>
-      <pre v-else>{{ transferLogs.join('\n') }}</pre>
+      <pre v-else ref="transferLogRef" @scroll="transferLogScroller.onScroll">{{ transferLogs.join('\n') }}</pre>
     </section>
 
     <Teleport to="body">
@@ -528,6 +528,7 @@ import {
   View
 } from '@element-plus/icons-vue'
 import { api, APIError, baseName, formatBytes, formatDate, joinPath, parentPath, postJSON, type FileEntry, type HostKeyInfo, type Profile } from '../api'
+import { createAutoScroll } from '../autoScroll'
 import {
   collectDropUploadEntries,
   filesToUploadEntries,
@@ -718,11 +719,14 @@ const transferPanelOptions = computed(() => [
   { label: t('sftp.logs'), value: 'logs' }
 ])
 const profiles = ref<Profile[]>([])
+const remoteProfiles = computed(() => profiles.value.filter(profile => profile.kind !== 'local'))
 const home = ref('.')
 const transferLogs = ref<string[]>([])
 const transferItems = ref<TransferItem[]>([])
 const transferPanelMode = ref<TransferPanelMode>('transfers')
 const transferListRef = ref<HTMLElement | null>(null)
+const transferLogRef = ref<HTMLElement | null>(null)
+const transferLogScroller = createAutoScroll(() => transferLogRef.value)
 const selectedTransferIDs = ref(new Set<string>())
 const transferAnchorID = ref('')
 const failedSystemIconKeys = ref(new Set<string>())
@@ -971,6 +975,7 @@ function observeScrollElement(el: HTMLElement | null) {
 function log(message: string) {
   transferLogs.value.push(`${new Date().toLocaleTimeString()}  ${message}`)
   if (transferLogs.value.length > 200) transferLogs.value = transferLogs.value.slice(-200)
+  nextTick(() => transferLogScroller.scrollToBottom())
 }
 
 function createTransferItem(input: Pick<TransferItem, 'name' | 'kind' | 'sourceName' | 'targetName' | 'sourcePath' | 'targetPath' | 'total'> & Partial<Pick<TransferItem, 'parentID' | 'isGroup' | 'expanded'>>) {
@@ -1088,6 +1093,7 @@ function selectedTransferTargets(item: TransferItem | null) {
 function clearTransferPanel() {
   if (transferPanelMode.value === 'logs') {
     transferLogs.value = []
+    nextTick(() => transferLogScroller.scrollToBottom(true))
     return
   }
   transferItems.value = transferItems.value.filter(item => item.status === 'running')
@@ -1102,6 +1108,11 @@ const runningCount = computed(() => runningTransferCount())
 
 watch(runningCount, count => {
   postJSON('/api/transfer-count', { count }).catch(() => undefined)
+})
+
+watch(transferPanelMode, mode => {
+  if (mode === 'logs') nextTick(() => transferLogScroller.scrollToBottom(true))
+  else nextTick(updateTransferScrollbars)
 })
 
 function handleBeforeUnload(event: BeforeUnloadEvent) {
@@ -1600,7 +1611,7 @@ async function openDraftTab(paneName: PaneName) {
     await openLocalTab(paneName, pane.draft.localPath || home.value)
     return
   }
-  const profile = profiles.value.find(item => item.id === pane.draft.profileID)
+  const profile = remoteProfiles.value.find(item => item.id === pane.draft.profileID)
   if (!profile) {
     ElMessage.warning('请先选择已保存的服务器')
     return
@@ -3068,7 +3079,7 @@ onMounted(async () => {
   home.value = homeData.path || '.'
   paneNames.forEach(paneName => {
     panes[paneName].draft.localPath = home.value
-    panes[paneName].draft.profileID = profiles.value[0]?.id || ''
+    panes[paneName].draft.profileID = remoteProfiles.value[0]?.id || ''
     const tab = localTab(home.value)
     panes[paneName].tabs.push(tab)
     panes[paneName].active = tab.id

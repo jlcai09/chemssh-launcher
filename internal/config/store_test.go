@@ -78,6 +78,42 @@ func TestProfileBrowserAndHealthURLsAreSeparate(t *testing.T) {
 	}
 }
 
+func TestLocalProfileDefaultsDoNotRequireSSHOrCredentials(t *testing.T) {
+	profile := NewLocalProfileDefaults()
+	if !profile.IsLocal() {
+		t.Fatal("expected local profile kind")
+	}
+	if profile.SSHHost != "" || profile.SSHUser != "" || profile.SSHPort != 0 {
+		t.Fatalf("local profile should not default SSH fields: %+v", profile)
+	}
+	if profile.AuthMethod != "" || profile.HasPassword || profile.HasPrivateKeyPassphrase || profile.PrivateKeyPath != "" {
+		t.Fatalf("local profile should not default credentials: %+v", profile)
+	}
+	if got := profile.BrowserURL(); got != "http://127.0.0.1:8888/" {
+		t.Fatalf("unexpected browser URL: %q", got)
+	}
+}
+
+func TestLocalProfileRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "profiles.json")
+	store := NewFileStore(path)
+	profile := NewLocalProfileDefaults()
+	profile.ID = "local"
+	profile.Name = "Local Dev"
+	profile.StartCommand = ""
+
+	if err := store.Save(profile); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsLocal() || got.SSHHost != "" || got.AuthMethod != "" || got.StartCommand != "" {
+		t.Fatalf("unexpected local profile after round trip: %+v", got)
+	}
+}
+
 func TestDefaultStartCommandIncludesEnvironmentPromptAndChemSSH(t *testing.T) {
 	profile := NewProfileDefaults()
 	for _, want := range []string{

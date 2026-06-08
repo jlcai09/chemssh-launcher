@@ -52,6 +52,14 @@ func (m *Manager) Connect(profile config.Profile, secrets secret.Store, policy s
 	}
 	m.mu.Unlock()
 
+	return m.connect(profile, secrets, policy, true)
+}
+
+func (m *Manager) ConnectDedicated(profile config.Profile, secrets secret.Store, policy sshclient.HostKeyPolicy) (Session, error) {
+	return m.connect(profile, secrets, policy, false)
+}
+
+func (m *Manager) connect(profile config.Profile, secrets secret.Store, policy sshclient.HostKeyPolicy, reuseByProfile bool) (Session, error) {
 	sshClient, err := sshclient.DialWithHostKeyPolicy(profile, secrets, policy)
 	if err != nil {
 		return Session{}, err
@@ -82,7 +90,9 @@ func (m *Manager) Connect(profile config.Profile, secrets secret.Store, policy s
 		refs:       1,
 	}
 	m.sessions[id] = session
-	m.byProfile[profile.ID] = session
+	if reuseByProfile {
+		m.byProfile[profile.ID] = session
+	}
 	m.mu.Unlock()
 	return info, nil
 }
@@ -198,7 +208,9 @@ func (m *Manager) release(id string) (*activeSession, bool, error) {
 		return session, false, nil
 	}
 	delete(m.sessions, id)
-	delete(m.byProfile, session.info.ProfileID)
+	if m.byProfile[session.info.ProfileID] == session {
+		delete(m.byProfile, session.info.ProfileID)
+	}
 	return session, true, nil
 }
 

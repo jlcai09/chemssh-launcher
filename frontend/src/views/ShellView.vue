@@ -125,6 +125,8 @@ function shortTitle(url: string) {
       if (parsed.pathname === '/') return '启动器'
       if (parsed.pathname === '/sftp') return 'SFTP'
       if (parsed.pathname === '/launcher-logs') return '后台'
+      const parts = parsed.pathname.split('/').filter(Boolean)
+      if (parts.length >= 2 && parts[1] === 'chemssh') return decodeURIComponent(parts[0])
     }
     return parsed.hostname || url
   } catch {

@@ -74,6 +74,9 @@ func importProfilesFromReader(r io.Reader) ([]config.Profile, error) {
 
 func normalizeImportedProfile(profile config.Profile) config.Profile {
 	defaults := config.NewProfileDefaults()
+	if profile.Kind == "" {
+		profile.Kind = defaults.Kind
+	}
 	if profile.SSHPort == 0 {
 		profile.SSHPort = defaults.SSHPort
 	}
@@ -97,6 +100,28 @@ func normalizeImportedProfile(profile config.Profile) config.Profile {
 	}
 	if strings.TrimSpace(profile.StartCommand) == "" {
 		profile.StartCommand = defaults.StartCommand
+	}
+	if profile.IsLocal() {
+		localDefaults := config.NewLocalProfileDefaults()
+		if profile.LocalHost == "" {
+			profile.LocalHost = localDefaults.LocalHost
+		}
+		if profile.LocalPort == 0 {
+			profile.LocalPort = localDefaults.LocalPort
+		}
+		if profile.LocalURLPath == "" {
+			profile.LocalURLPath = localDefaults.LocalURLPath
+		}
+		profile.SSHHost = ""
+		profile.SSHPort = 0
+		profile.SSHUser = ""
+		profile.AuthMethod = ""
+		profile.PrivateKeyPath = ""
+		profile.RemoteHost = ""
+		profile.RemotePort = 0
+		if strings.TrimSpace(profile.StartCommand) == defaults.StartCommand {
+			profile.StartCommand = ""
+		}
 	}
 	profile.HasPassword = false
 	profile.HasPrivateKeyPassphrase = false

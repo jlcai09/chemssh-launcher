@@ -42,6 +42,10 @@ func (s *Server) handleSFTPConnect(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if profile.IsLocal() {
+		writeError(w, http.StatusBadRequest, errors.New("local ChemSSH profiles do not provide SFTP"))
+		return
+	}
 	policy := sshclient.HostKeyStrict
 	if req.AcceptHostKey {
 		policy = sshclient.HostKeyAcceptNew

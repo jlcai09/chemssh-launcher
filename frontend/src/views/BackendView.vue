@@ -65,17 +65,18 @@
             <el-button :icon="Refresh" circle @click="refreshLogs" />
           </el-tooltip>
         </div>
-        <pre>{{ logs.join('\n') }}</pre>
+        <pre ref="logRef" @scroll="logScroller.onScroll">{{ logs.join('\n') }}</pre>
       </section>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, Download, FolderOpened, Refresh, Upload } from '@element-plus/icons-vue'
 import { api, postJSON } from '../api'
+import { createAutoScroll } from '../autoScroll'
 import { t } from '../i18n'
 
 interface CacheEntry {
@@ -93,6 +94,8 @@ interface BackendInfo {
 
 const info = reactive<BackendInfo>({ config_dir: '', sftp_open_cache_dir: '', clear_pending: false, cache_entries: [] })
 const logs = ref<string[]>([])
+const logRef = ref<HTMLElement | null>(null)
+const logScroller = createAutoScroll(() => logRef.value)
 const notice = ref('')
 const noticeType = ref<'success' | 'info' | 'warning' | 'error'>('info')
 const importInput = ref<HTMLInputElement | null>(null)
@@ -109,6 +112,8 @@ async function refreshBackendInfo() {
 async function refreshLogs() {
   const data = await api<{ lines: string[] }>('/api/launcher-logs')
   logs.value = data.lines || []
+  await nextTick()
+  logScroller.scrollToBottom()
 }
 
 async function refreshAll() {
