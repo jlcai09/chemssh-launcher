@@ -3,7 +3,13 @@ package gui
 import (
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
+
+	"chemssh-launcher/internal/config"
 )
 
 func TestIsRetriableProxyError(t *testing.T) {
@@ -42,3 +48,63 @@ func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
 
 var _ net.Error = (*timeoutError)(nil)
+
+func TestChemSSHProxyHTMLShowsLoadingUntilSessionReady(t *testing.T) {
+	profile := config.NewProfileDefaults()
+	profile.ID = "remote-1"
+	profile.Name = "remote"
+	session := &activeSession{
+		id:         profile.ID,
+		name:       profile.Name,
+		profile:    profile,
+		forwarding: true,
+		ready:      false,
+	}
+	server := &Server{
+		sessions:       map[string]*activeSession{profile.ID: session},
+		session:        session,
+		proxyProfileID: profile.ID,
+		logs:           &safeLog{},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/remote/chemssh?profile_id=remote-1", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	server.handleChemSSHProxy(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if got := rec.Header().Get("Refresh"); got == "" {
+		t.Fatal("expected loading page refresh header")
+	}
+	if !strings.Contains(rec.Body.String(), "ChemSSH is starting up...") {
+		t.Fatalf("response did not contain loading page: %s", rec.Body.String())
+	}
+}
+
+func TestRewriteChemSSHProxyRequestStripsLauncherQuery(t *testing.T) {
+	profile := config.NewProfileDefaults()
+	profile.ID = "remote-1"
+	profile.Name = "remote"
+	session := &activeSession{id: profile.ID, name: profile.Name, profile: profile}
+	server := &Server{}
+	target, err := url.Parse("http://127.0.0.1:8888")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/remote/chemssh/api/status?profile_id=remote-1&launcher_open_seq=9&keep=1", nil)
+
+	rewritten := server.rewriteChemSSHProxyRequest(req, target, session)
+
+	if got := rewritten.URL.Query().Get("profile_id"); got != "" {
+		t.Fatalf("profile_id leaked to target query: %q", got)
+	}
+	if got := rewritten.URL.Query().Get("launcher_open_seq"); got != "" {
+		t.Fatalf("launcher_open_seq leaked to target query: %q", got)
+	}
+	if got := rewritten.URL.Query().Get("keep"); got != "1" {
+		t.Fatalf("expected keep query to survive, got %q", got)
+	}
+}

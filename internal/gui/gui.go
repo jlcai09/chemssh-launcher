@@ -55,6 +55,7 @@ type Server struct {
 	session        *activeSession
 	sessions       map[string]*activeSession
 	proxyProfileID string
+	sessionOpenSeq uint64
 	bridge         chemSSHBridgeState
 	shutdown       context.CancelFunc
 	// activeTransferCount is updated by the frontend via /api/transfer-count.
@@ -78,6 +79,8 @@ type activeSession struct {
 	tunnel        *sshclient.Tunnel
 	healthStop    context.CancelFunc
 	forwarding    bool
+	ready         bool
+	openSeq       uint64
 	stopping      bool
 	remotePID     int
 	workspaceRoot string
@@ -409,6 +412,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if p.UsesNonLoopbackLocalHost() {
 		s.profileLog(p.ID, "warning: local bind host "+p.LocalHost+" may expose the tunnel")
 	}
+	s.stopActiveForwardingBeforeStart(p.ID)
 	if err := s.blockActiveForwardingConflict(p); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
@@ -494,24 +498,13 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	s.profileLog(p.ID, "starting "+p.Name+" at "+p.BrowserURL())
+	if p.OpenBrowser {
+		s.openSessionURL(p)
+	}
 	if process != nil {
 		go s.watchRemoteProcess(session)
 	}
-	go func() {
-		if err := netcheck.WaitForURL(healthCtx, p.HealthURL(), 90*time.Second, time.Second); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			s.profileLog(p.ID, "health check failed: "+err.Error())
-			s.stopSessionResources(session, true)
-			return
-		}
-		s.profileLog(p.ID, "health check OK: "+p.HealthURL())
-		s.refreshRemoteIdentity(session, p)
-		if p.OpenBrowser {
-			s.openSessionURL(p)
-		}
-	}()
+	go s.waitForRemoteHealth(session, p, healthCtx)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
@@ -524,6 +517,7 @@ func (s *Server) startLocalSession(w http.ResponseWriter, p config.Profile) {
 	if p.UsesNonLoopbackLocalHost() {
 		s.profileLog(p.ID, "warning: local ChemSSH target "+p.LocalAddress()+" is not loopback")
 	}
+	s.stopActiveForwardingBeforeStart(p.ID)
 	if err := s.blockActiveForwardingConflict(p); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
@@ -574,6 +568,9 @@ func (s *Server) startLocalSession(w http.ResponseWriter, p config.Profile) {
 	if cmd != nil {
 		go s.watchLocalProcess(session, cmd)
 	}
+	if p.OpenBrowser {
+		s.openSessionURL(p)
+	}
 	go s.waitForLocalHealth(session, p, healthCtx)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
@@ -591,12 +588,17 @@ func (s *Server) restartLocalSessionIfPaused(p config.Profile) (bool, error) {
 	}
 	session.profile = p
 	session.forwarding = true
+	session.ready = false
 	healthCtx, healthStop := context.WithCancel(context.Background())
 	session.healthStop = healthStop
+	s.assignSessionOpenSeqLocked(session)
 	s.promoteProxySessionLocked(session)
 	s.mu.Unlock()
 
 	go s.waitForLocalHealth(session, p, healthCtx)
+	if p.OpenBrowser {
+		s.openSessionURL(p)
+	}
 	s.profileLog(p.ID, "local ChemSSH forwarding restored for "+p.BrowserURL())
 	return true, nil
 }
@@ -611,10 +613,8 @@ func (s *Server) waitForLocalHealth(session *activeSession, p config.Profile, ct
 		return
 	}
 	s.profileLog(p.ID, "local health check OK: "+p.HealthURL())
+	s.markSessionReady(session)
 	s.refreshLocalIdentity(session, p)
-	if p.OpenBrowser {
-		s.openSessionURL(p)
-	}
 }
 
 func (s *Server) localHealthReady(p config.Profile, timeout time.Duration) bool {
@@ -675,9 +675,18 @@ func (s *Server) setSessionLocked(session *activeSession) {
 	if s.sessions == nil {
 		s.sessions = map[string]*activeSession{}
 	}
+	s.assignSessionOpenSeqLocked(session)
 	s.sessions[session.id] = session
 	s.session = session
 	s.proxyProfileID = session.id
+}
+
+func (s *Server) assignSessionOpenSeqLocked(session *activeSession) {
+	if session == nil {
+		return
+	}
+	s.sessionOpenSeq++
+	session.openSeq = s.sessionOpenSeq
 }
 
 func (s *Server) removeSessionLocked(session *activeSession) {
@@ -732,6 +741,18 @@ func (s *Server) blockActiveForwardingConflict(p config.Profile) error {
 	return nil
 }
 
+func (s *Server) stopActiveForwardingBeforeStart(profileID string) {
+	s.mu.Lock()
+	session := s.sessionForProfileLocked(profileID)
+	shouldStop := session != nil && session.forwarding
+	s.mu.Unlock()
+	if !shouldStop {
+		return
+	}
+	s.profileLog(profileID, "existing forwarding is running; stopping it before start")
+	s.stopForwarding(profileID)
+}
+
 func (s *Server) restartForwardingIfPaused(p config.Profile) (bool, error) {
 	s.mu.Lock()
 	session := s.sessionForProfileLocked(p.ID)
@@ -768,10 +789,15 @@ func (s *Server) restartForwardingIfPaused(p config.Profile) (bool, error) {
 	session.tunnel = tunnel
 	session.healthStop = healthStop
 	session.forwarding = true
+	session.ready = false
+	s.assignSessionOpenSeqLocked(session)
 	s.promoteProxySessionLocked(session)
 	s.mu.Unlock()
 
 	go s.waitForRestartedForwardingHealth(session, p, healthCtx)
+	if p.OpenBrowser {
+		s.openSessionURL(p)
+	}
 	s.profileLog(p.ID, "forwarding restarted for "+p.BrowserURL())
 	return true, nil
 }
@@ -786,10 +812,36 @@ func (s *Server) waitForRestartedForwardingHealth(session *activeSession, p conf
 		return
 	}
 	s.profileLog(p.ID, "health check OK: "+p.HealthURL())
+	s.markSessionReady(session)
 	s.refreshRemoteIdentity(session, p)
-	if p.OpenBrowser {
-		s.openSessionURL(p)
+}
+
+func (s *Server) waitForRemoteHealth(session *activeSession, p config.Profile, ctx context.Context) {
+	if err := netcheck.WaitForURL(ctx, p.HealthURL(), 90*time.Second, time.Second); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		s.profileLog(p.ID, "health check failed: "+err.Error())
+		s.stopSessionResources(session, true)
+		return
 	}
+	s.profileLog(p.ID, "health check OK: "+p.HealthURL())
+	s.markSessionReady(session)
+	s.refreshRemoteIdentity(session, p)
+}
+
+func (s *Server) markSessionReady(session *activeSession) {
+	s.mu.Lock()
+	if s.sessionStillActiveLocked(session) && session.forwarding {
+		session.ready = true
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) isSessionReady(session *activeSession) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionStillActiveLocked(session) && session.forwarding && session.ready
 }
 
 func (s *Server) refreshRemoteIdentity(session *activeSession, p config.Profile) {
@@ -817,6 +869,7 @@ func (s *Server) refreshRemoteIdentity(session *activeSession, p config.Profile)
 	}
 	s.mu.Unlock()
 	s.profileLog(p.ID, "ChemSSH identity OK: pid "+strconv.Itoa(identity.PID)+", version "+identity.ProjectVersion)
+	go s.warmChemSSHBridgeSFTP(session, p, identity.WorkspaceRoot)
 }
 
 func (s *Server) refreshLocalIdentity(session *activeSession, p config.Profile) {
@@ -847,19 +900,37 @@ func (s *Server) openSessionURL(p config.Profile) {
 	if s.options.UseWebView && !s.options.ForceBrowser {
 		return
 	}
-	url := s.sessionProxyURL(p)
+	url := s.sessionProxyURL(p, s.sessionOpenSeqForProfile(p.ID))
 	if err := browser.Open(url); err != nil {
 		s.profileLog(p.ID, "warning: could not open browser: "+err.Error())
 	}
 }
 
-func (s *Server) sessionProxyURL(p config.Profile) string {
+func (s *Server) sessionOpenSeqForProfile(profileID string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session := s.sessionForProfileLocked(profileID); session != nil {
+		return session.openSeq
+	}
+	return 0
+}
+
+func (s *Server) sessionProxyURL(p config.Profile, openSeq uint64) string {
 	path := normalizedProxyPath(p.LocalURLPath)
 	prefix := s.profileProxyPrefix(p)
-	if path == "/" {
-		return s.baseURL + prefix + "?profile_id=" + url.QueryEscape(p.ID)
+	rawURL := s.baseURL + prefix
+	if path != "/" {
+		rawURL += path
 	}
-	return s.baseURL + prefix + path + "?profile_id=" + url.QueryEscape(p.ID)
+	separator := "?"
+	if strings.Contains(rawURL, "?") {
+		separator = "&"
+	}
+	query := "profile_id=" + url.QueryEscape(p.ID)
+	if openSeq > 0 {
+		query += "&launcher_open_seq=" + strconv.FormatUint(openSeq, 10)
+	}
+	return rawURL + separator + query
 }
 
 func (s *Server) profileProxyPrefix(p config.Profile) string {
@@ -977,7 +1048,12 @@ const chemsshProxyRetryBase = 200 * time.Millisecond
 func (s *Server) handleChemSSHProxy(w http.ResponseWriter, r *http.Request) {
 	target, session := s.activeChemSSHTarget(r)
 	if target == nil || session == nil {
+		setNoStore(w)
 		writeError(w, http.StatusServiceUnavailable, errors.New("chemssh service is not available; start forwarding first"))
+		return
+	}
+	if !s.isSessionReady(session) && wantsHTML(r) {
+		writeLoadingPage(w, r.URL.RequestURI())
 		return
 	}
 
@@ -1018,6 +1094,7 @@ func (s *Server) writeProxyError(w http.ResponseWriter, r *http.Request, status 
 		writeLoadingPage(w, r.URL.RequestURI())
 		return
 	}
+	setNoStore(w)
 	writeError(w, status, err)
 }
 
@@ -1028,9 +1105,16 @@ func wantsHTML(r *http.Request) bool {
 
 func writeLoadingPage(w http.ResponseWriter, refreshURL string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setNoStore(w)
 	w.Header().Set("Refresh", "2;url="+refreshURL)
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = io.WriteString(w, chemsshLoadingHTML)
+}
+
+func setNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 }
 
 const chemsshLoadingHTML = `<!doctype html>
@@ -1055,7 +1139,7 @@ p{font-size:14px;color:#888}
 <body>
 <div class="card">
   <div class="spinner"></div>
-  <h2>ChemSSH is starting up…</h2>
+  <h2>ChemSSH is starting up...</h2>
   <p>The service is being prepared. This page will refresh automatically.</p>
 </div>
 </body>
@@ -1091,6 +1175,7 @@ func (s *Server) rewriteChemSSHProxyRequest(r *http.Request, target *url.URL, se
 	req.URL.RawPath = req.URL.Path
 	query := req.URL.Query()
 	query.Del("profile_id")
+	query.Del("launcher_open_seq")
 	req.URL.RawQuery = query.Encode()
 	return req
 }
@@ -1282,6 +1367,7 @@ func (s *Server) watchRemoteProcess(session *activeSession) {
 	session.client = nil
 	session.healthStop = nil
 	session.forwarding = false
+	session.ready = false
 	s.mu.Unlock()
 
 	s.closeChemSSHBridgeSessionForProfile(session.id)
@@ -1314,6 +1400,7 @@ func (s *Server) watchLocalProcess(session *activeSession, cmd *exec.Cmd) {
 	session.healthStop = nil
 	session.localProcess = nil
 	session.forwarding = false
+	session.ready = false
 	s.mu.Unlock()
 
 	s.closeChemSSHBridgeSessionForProfile(session.id)
@@ -1343,6 +1430,7 @@ func (s *Server) stopForwarding(profileID string) {
 	session.healthStop = nil
 	session.tunnel = nil
 	session.forwarding = false
+	session.ready = false
 	clearSession := session.process == nil && session.localProcess == nil && session.remotePID <= 0 && client == nil
 	if clearSession {
 		s.removeSessionLocked(session)
@@ -1411,6 +1499,7 @@ func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
 	session.client = nil
 	session.healthStop = nil
 	session.forwarding = false
+	session.ready = false
 	s.mu.Unlock()
 
 	s.closeChemSSHBridgeSessionForProfile(profile.ID)
@@ -1531,25 +1620,28 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if session != nil && profileID != "" && session.forwarding && r.URL.Query().Get("activate") == "1" {
 		s.promoteProxySessionLocked(session)
 	}
-	s.mu.Unlock()
 	running := session != nil
 	forwarding := false
 	name := ""
 	id := ""
+	openSeq := uint64(0)
+	profile := config.Profile{}
+	openBrowser := false
 	if running {
 		name = session.name
 		id = session.id
 		forwarding = session.forwarding
-	}
-	url := ""
-	if running && forwarding {
-		url = s.sessionProxyURL(session.profile)
-	}
-	openBrowser := false
-	if running {
+		openSeq = session.openSeq
+		profile = session.profile
 		openBrowser = session.profile.OpenBrowser
 	}
-	writeJSON(w, map[string]any{"running": running, "forwarding": forwarding, "id": id, "name": name, "url": url, "open_browser": openBrowser}, nil)
+	s.mu.Unlock()
+
+	url := ""
+	if running && forwarding {
+		url = s.sessionProxyURL(profile, openSeq)
+	}
+	writeJSON(w, map[string]any{"running": running, "forwarding": forwarding, "id": id, "name": name, "url": url, "open_browser": openBrowser, "open_seq": openSeq}, nil)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

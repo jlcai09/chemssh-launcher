@@ -203,6 +203,7 @@ func TestLocalSessionStatusUsesChemSSHProxyURL(t *testing.T) {
 		name:       profile.Name,
 		profile:    profile,
 		forwarding: true,
+		openSeq:    7,
 	}
 	server := &Server{
 		baseURL:        "http://127.0.0.1:4567",
@@ -224,8 +225,11 @@ func TestLocalSessionStatusUsesChemSSHProxyURL(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body["url"] != "http://127.0.0.1:4567/Local%20ChemSSH/chemssh?profile_id=local" || body["id"] != "local" || body["forwarding"] != true {
+	if body["url"] != "http://127.0.0.1:4567/Local%20ChemSSH/chemssh?profile_id=local&launcher_open_seq=7" || body["id"] != "local" || body["forwarding"] != true {
 		t.Fatalf("unexpected status body: %+v", body)
+	}
+	if body["open_seq"] != float64(7) {
+		t.Fatalf("open_seq = %v, want 7", body["open_seq"])
 	}
 }
 

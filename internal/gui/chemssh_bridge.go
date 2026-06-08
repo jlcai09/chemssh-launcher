@@ -242,7 +242,14 @@ func (s *Server) ensureChemSSHBridgeSFTPSession(r *http.Request) (string, string
 	if profile.IsLocal() {
 		return "", "", newChemSSHBridgeHTTPError(http.StatusServiceUnavailable, "local ChemSSH profiles do not provide SFTP bridge open")
 	}
+	return s.ensureChemSSHBridgeSFTPSessionForProfile(profile, workspaceRoot)
+}
 
+func (s *Server) ensureChemSSHBridgeSFTPSessionForProfile(profile config.Profile, workspaceRoot string) (string, string, error) {
+	workspaceRoot = cleanRemotePath(workspaceRoot)
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return "", "", newChemSSHBridgeHTTPError(http.StatusServiceUnavailable, "ChemSSH identity did not include workspace_root")
+	}
 	s.mu.Lock()
 	current := s.bridge
 	if current.sftpSessionID != "" && current.profileID == profile.ID && current.workspaceRoot == workspaceRoot {
@@ -289,6 +296,23 @@ func (s *Server) ensureChemSSHBridgeSFTPSession(r *http.Request) (string, string
 
 	s.profileLog(profile.ID, "ChemSSH bridge SFTP connection OK for "+profile.Name)
 	return session.ID, workspaceRoot, nil
+}
+
+func (s *Server) warmChemSSHBridgeSFTP(session *activeSession, profile config.Profile, workspaceRoot string) {
+	if profile.IsLocal() || strings.TrimSpace(workspaceRoot) == "" {
+		return
+	}
+	s.mu.Lock()
+	active := s.sessionStillActiveLocked(session) && session.forwarding
+	s.mu.Unlock()
+	if !active {
+		return
+	}
+	if _, _, err := s.ensureChemSSHBridgeSFTPSessionForProfile(profile, workspaceRoot); err != nil {
+		s.profileLog(profile.ID, "warning: ChemSSH bridge SFTP preconnect failed: "+err.Error())
+		return
+	}
+	s.profileLog(profile.ID, "ChemSSH bridge SFTP preconnected for "+profile.Name)
 }
 
 func (s *Server) chemSSHBridgeContext(r *http.Request, requireWorkspace bool) (config.Profile, string, error) {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"chemssh-launcher/internal/config"
 
@@ -46,7 +47,16 @@ func (t *Tunnel) Close() error {
 	t.cancel()
 	err := t.listener.Close()
 	t.closeActiveConnections()
-	t.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		log.Printf("tunnel close timed out; background connections will finish asynchronously")
+	}
 	return err
 }
 

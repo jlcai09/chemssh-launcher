@@ -3,7 +3,7 @@
     <header class="browser-chrome">
       <div class="browser-tabs">
         <button
-          v-for="tab in tabs"
+          v-for="tab in orderedTabs"
           :key="tab.id"
           class="browser-tab"
           :class="{ active: tab.id === activeID, pinned: tab.pinned }"
@@ -78,14 +78,24 @@ declare global {
 }
 
 const tabs = reactive<BrowserTab[]>([])
+const tabOrder = ref<string[]>([])
 const activeID = ref('')
 const address = ref('')
 const draggingID = ref('')
 const lastSessionURL = ref('')
+const lastSessionOpenSeq = ref(0)
 const downloadsBackdrop = ref(false)
 let nextID = 1
 
 const activeTab = computed(() => tabs.find(tab => tab.id === activeID.value))
+const orderedTabs = computed(() => {
+  const byID = new Map(tabs.map(tab => [tab.id, tab]))
+  const ordered = tabOrder.value
+    .map(id => byID.get(id))
+    .filter((tab): tab is BrowserTab => Boolean(tab))
+  const missing = tabs.filter(tab => !tabOrder.value.includes(tab.id))
+  return [...ordered, ...missing]
+})
 const canBack = computed(() => Boolean(activeTab.value && activeTab.value.historyIndex > 0))
 const canForward = computed(() => Boolean(activeTab.value && activeTab.value.historyIndex < activeTab.value.history.length - 1))
 
@@ -145,6 +155,7 @@ function createTab(title: string, url: string, pinned = false, focus = true) {
     historyIndex: 0
   }
   tabs.push(tab)
+  tabOrder.value.push(tab.id)
   if (focus) activate(tab.id)
   return tab.id
 }
@@ -160,8 +171,13 @@ function closeTab(id: string) {
   const index = tabs.findIndex(tab => tab.id === id)
   const tab = tabs[index]
   if (!tab || tab.pinned) return
+  const orderIndex = tabOrder.value.indexOf(id)
+  const nextActiveID = orderIndex >= 0
+    ? (tabOrder.value[orderIndex - 1] || tabOrder.value[orderIndex + 1] || '')
+    : (tabs[Math.max(0, index - 1)]?.id || tabs[0]?.id || '')
   tabs.splice(index, 1)
-  if (activeID.value === id) activate(tabs[Math.max(0, index - 1)]?.id || tabs[0]?.id || '')
+  tabOrder.value = tabOrder.value.filter(tabID => tabID !== id)
+  if (activeID.value === id) activate(nextActiveID)
 }
 
 function navigateTab(id: string, url: string, addHistory = true) {
@@ -208,11 +224,13 @@ function goForward() {
 
 function moveBefore(targetID: string) {
   if (!draggingID.value || draggingID.value === targetID) return
-  const from = tabs.findIndex(tab => tab.id === draggingID.value)
-  const to = tabs.findIndex(tab => tab.id === targetID)
+  const from = tabOrder.value.findIndex(id => id === draggingID.value)
+  const to = tabOrder.value.findIndex(id => id === targetID)
   if (from < 0 || to < 0) return
-  const [tab] = tabs.splice(from, 1)
-  tabs.splice(to, 0, tab)
+  const nextOrder = [...tabOrder.value]
+  const [tabID] = nextOrder.splice(from, 1)
+  nextOrder.splice(to, 0, tabID)
+  tabOrder.value = nextOrder
 }
 
 function syncLoadedURL(id: string) {
@@ -252,11 +270,19 @@ async function pollSession() {
     const res = await fetch('/api/session/status')
     const status = await res.json()
     const url = status.forwarding && status.url ? status.url : ''
-    if (url && status.open_browser !== false && url !== lastSessionURL.value) {
+    const openSeq = Number(status.open_seq || 0)
+    const shouldOpen = openSeq > 0
+      ? openSeq !== lastSessionOpenSeq.value
+      : url !== lastSessionURL.value
+    if (url && status.open_browser !== false && shouldOpen) {
       lastSessionURL.value = url
+      lastSessionOpenSeq.value = openSeq
       openOrFocus(status.name || 'ChemSSH', url)
     }
-    if (!url) lastSessionURL.value = ''
+    if (!url) {
+      lastSessionURL.value = ''
+      lastSessionOpenSeq.value = 0
+    }
   } catch {
     // Polling should stay quiet while the backend is starting or stopping.
   }
