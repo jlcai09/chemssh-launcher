@@ -226,6 +226,7 @@ p,
   flex: 0 0 300px;
   --el-segmented-item-color: #415463;
   --el-segmented-item-hover-color: #0f5267;
+  overflow: hidden;
 }
 
 .topbar-actions > .el-segmented .el-segmented__item {
@@ -307,7 +308,122 @@ p,
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+}
+
+.header-actions .el-button.is-circle {
+  width: 36px;
+  height: 36px;
+  border: 1.5px solid rgba(94, 111, 126, 0.2);
+  background: linear-gradient(135deg, #ffffff 0%, #f5f9fb 100%);
+  color: #2d3e4f;
+  box-shadow: 0 2px 6px rgba(24, 39, 54, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+.header-actions .el-button.is-circle:hover {
+  transform: translateY(-2px) scale(1.05);
+  border-color: rgba(14, 116, 144, 0.4);
+  background: linear-gradient(135deg, #ffffff 0%, #e8f4f7 100%);
+  box-shadow: 0 4px 12px rgba(14, 116, 144, 0.2), inset 0 1px 0 rgba(255, 255, 255, 1);
+  color: var(--accent);
+}
+
+.header-actions .el-button.is-circle:active {
+  transform: translateY(0) scale(1);
+  box-shadow: 0 2px 4px rgba(24, 39, 54, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.header-actions .el-button--primary.is-circle {
+  border: none;
+  background: linear-gradient(135deg, #0e7490 0%, #0a5f76 100%);
+  color: #ffffff;
+  box-shadow: 0 3px 10px rgba(14, 116, 144, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.header-actions .el-button--primary.is-circle:hover {
+  background: linear-gradient(135deg, #0c6278 0%, #084956 100%);
+  box-shadow: 0 6px 18px rgba(14, 116, 144, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transform: translateY(-2px) scale(1.05);
+}
+
+.header-actions .el-button--primary.is-circle:active {
+  background: linear-gradient(135deg, #0a5566 0%, #073f4a 100%);
+  box-shadow: 0 2px 8px rgba(14, 116, 144, 0.35), inset 0 2px 4px rgba(0, 0, 0, 0.15);
+  transform: translateY(0) scale(1);
+}
+
+.toolbar-actions .el-button.is-circle {
+  width: 44px;
+  height: 44px;
+  border: 2px solid rgba(94, 111, 126, 0.2);
+  background: linear-gradient(135deg, #ffffff 0%, #f5f9fb 100%);
+  color: #2d3e4f;
+  box-shadow: 0 2px 8px rgba(24, 39, 54, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  font-size: 18px;
+}
+
+.toolbar-actions .el-button.is-circle:not(.is-disabled):hover {
+  transform: translateY(-2px) scale(1.05);
+  border-color: rgba(14, 116, 144, 0.4);
+  background: linear-gradient(135deg, #ffffff 0%, #e8f4f7 100%);
+  box-shadow: 0 6px 16px rgba(14, 116, 144, 0.2), inset 0 1px 0 rgba(255, 255, 255, 1);
+  color: var(--accent);
+}
+
+.toolbar-actions .el-button.is-circle:not(.is-disabled):active {
+  transform: translateY(0) scale(1);
+  box-shadow: 0 2px 6px rgba(24, 39, 54, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.toolbar-actions .el-button--primary.is-circle {
+  width: 52px;
+  height: 52px;
+  border: none;
+  background: linear-gradient(135deg, #0e7490 0%, #0a5f76 100%);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(14, 116, 144, 0.35), 0 2px 4px rgba(14, 116, 144, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  font-size: 26px;
+}
+
+.toolbar-actions .el-button--primary.is-circle:not(.is-disabled):hover {
+  background: linear-gradient(135deg, #0c6278 0%, #084956 100%);
+  box-shadow: 0 8px 24px rgba(14, 116, 144, 0.45), 0 3px 6px rgba(14, 116, 144, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transform: translateY(-3px) scale(1.08);
+  border-color: transparent;
+}
+
+.toolbar-actions .el-button--primary.is-circle:not(.is-disabled):active {
+  background: linear-gradient(135deg, #0a5566 0%, #073f4a 100%);
+  box-shadow: 0 3px 10px rgba(14, 116, 144, 0.4), inset 0 2px 4px rgba(0, 0, 0, 0.15);
+  transform: translateY(0) scale(1.02);
+}
+
+.toolbar-actions .el-button--danger.is-circle {
+  border-color: rgba(180, 35, 24, 0.35);
+  background: linear-gradient(135deg, #ffffff 0%, #fffcfc 100%);
+  color: #c93026;
+  box-shadow: 0 2px 8px rgba(180, 35, 24, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+  font-size: 20px;
+}
+
+.toolbar-actions .el-button--danger.is-circle:not(.is-disabled):hover {
+  border-color: rgba(180, 35, 24, 0.55);
+  background: linear-gradient(135deg, #fffafa 0%, #fff0f0 100%);
+  box-shadow: 0 6px 16px rgba(180, 35, 24, 0.3), inset 0 1px 0 rgba(255, 255, 255, 1);
+  color: #b42318;
+  transform: translateY(-2px) scale(1.05);
+}
+
+.toolbar-actions .el-button--danger.is-circle:not(.is-disabled):active {
+  background: linear-gradient(135deg, #fff5f5 0%, #ffe8e8 100%);
+  box-shadow: 0 2px 6px rgba(180, 35, 24, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transform: translateY(0) scale(1);
+}
+
+.toolbar-actions .el-button.is-circle.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .profile-list {
@@ -613,11 +729,33 @@ p,
 .file-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 7px 10px;
   border-bottom: 1px solid var(--panel-border);
   background: linear-gradient(180deg, rgba(246, 250, 252, 0.68) 0%, var(--soft-bg) 100%);
   overflow: visible;
+}
+
+.file-toolbar .el-button.is-circle {
+  width: 36px;
+  height: 36px;
+  border: 1.5px solid rgba(94, 111, 126, 0.2);
+  background: linear-gradient(135deg, #ffffff 0%, #f5f9fb 100%);
+  color: #2d3e4f;
+  box-shadow: 0 2px 6px rgba(24, 39, 54, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+.file-toolbar .el-button.is-circle:not(.is-disabled):hover {
+  transform: translateY(-2px) scale(1.05);
+  border-color: rgba(14, 116, 144, 0.4);
+  background: linear-gradient(135deg, #ffffff 0%, #e8f4f7 100%);
+  box-shadow: 0 4px 12px rgba(14, 116, 144, 0.2), inset 0 1px 0 rgba(255, 255, 255, 1);
+  color: var(--accent);
+}
+
+.file-toolbar .el-button.is-circle:not(.is-disabled):active {
+  transform: translateY(0) scale(1);
+  box-shadow: 0 2px 4px rgba(24, 39, 54, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .file-toolbar > .muted {
@@ -886,8 +1024,14 @@ p,
   height: 0;
 }
 
+.file-list-virtual-spacer {
+  min-height: 0;
+  pointer-events: none;
+}
+
 .file-row {
   width: 100%;
+  height: 36px;
   min-height: 36px;
   margin: 2px 0;
   border: 0;
@@ -1753,6 +1897,13 @@ p,
   gap: 6px;
   padding: 6px 10px 4px;
   overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.browser-tabs::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .browser-tab {
@@ -1776,10 +1927,12 @@ p,
 .topbar .el-button.is-circle,
 .browser-chrome .el-button.is-circle,
 .xftp-add-tab.el-button.is-circle {
-  color: #1e3a4c;
-  border-color: rgba(14, 116, 144, 0.32);
-  background: linear-gradient(180deg, #ffffff 0%, #f0f7fa 100%);
-  box-shadow: 0 2px 6px rgba(14, 116, 144, 0.1), 0 1px 2px rgba(24, 39, 54, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  width: 32px;
+  height: 32px;
+  border: 1.5px solid rgba(94, 111, 126, 0.2);
+  background: linear-gradient(135deg, #ffffff 0%, #f5f9fb 100%);
+  color: #2d3e4f;
+  box-shadow: 0 2px 6px rgba(24, 39, 54, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
 .topbar .el-button.is-circle:hover,
@@ -1788,18 +1941,25 @@ p,
 .browser-chrome .el-button.is-circle:focus-visible,
 .xftp-add-tab.el-button.is-circle:hover,
 .xftp-add-tab.el-button.is-circle:focus-visible {
-  color: #ffffff;
-  border-color: var(--accent);
-  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
-  box-shadow: 0 4px 14px rgba(14, 116, 144, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transform: translateY(-2px) scale(1.05);
+  border-color: rgba(14, 116, 144, 0.4);
+  background: linear-gradient(135deg, #ffffff 0%, #e8f4f7 100%);
+  box-shadow: 0 4px 12px rgba(14, 116, 144, 0.2), inset 0 1px 0 rgba(255, 255, 255, 1);
+  color: var(--accent);
+}
+
+.topbar .el-button.is-circle:active,
+.browser-chrome .el-button.is-circle:active,
+.xftp-add-tab.el-button.is-circle:active {
+  transform: translateY(0) scale(1);
+  box-shadow: 0 2px 4px rgba(24, 39, 54, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .topbar .el-button.is-circle.is-disabled,
 .browser-chrome .el-button.is-circle.is-disabled {
-  color: #8a98a6;
-  border-color: rgba(148, 163, 184, 0.22);
-  background: rgba(248, 251, 253, 0.62);
-  box-shadow: none;
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .address-form {
@@ -1856,7 +2016,6 @@ p,
   inset: 0;
   z-index: 1000;
   background: rgba(15, 23, 42, 0.12);
-  backdrop-filter: blur(8px);
 }
 
 .el-button {

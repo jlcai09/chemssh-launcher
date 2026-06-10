@@ -17,6 +17,9 @@ Windows 常见可执行文件：
 
 WebView2 版本要求运行机器安装 Microsoft Edge WebView2 Runtime。Windows 10/11 通常已经预装。
 
+<details>
+<summary>源码构建（开发者）</summary>
+
 源码构建需要：
 
 - Go 1.23 或更新版本。
@@ -26,6 +29,8 @@ WebView2 版本要求运行机器安装 Microsoft Edge WebView2 Runtime。Window
 ```bash
 go install github.com/tc-hib/go-winres@v0.3.3
 ```
+
+</details>
 
 ## 启动
 
@@ -247,7 +252,10 @@ ChemSSH Launcher 依赖 SSH 完成认证、加密、host key 校验和本地端�
 
 如果把 `Local Host` 绑定到非 loopback 地址，例如 `0.0.0.0`，可能会把 tunnel 或本地 ChemSSH 目标暴露给其他机器。Launcher 会记录警告，但这个设置仍由使用者负责。
 
-## 架构概览
+---
+
+<details>
+<summary>架构概览（开发者）</summary>
 
 项目由 Go 后端、嵌入式 Vue 前端、SSH/SFTP 客户端和可选 WebView2 宿主组成：
 
@@ -272,7 +280,10 @@ chemssh-launcher executable
 
 前端使用 Vue 3、TypeScript、Vite 和 Element Plus。生产构建输出到 `internal/gui/static/vue/`，再嵌入到 Go 可执行文件中。
 
-## 目录结构
+</details>
+
+<details>
+<summary>目录结构（开发者）</summary>
 
 ```text
 cmd/chemssh-launcher/      CLI 入口和 Windows resource object
@@ -295,7 +306,10 @@ winres/                   Windows 图标和版本资源元数据
 idea/                     开发任务说明和设计记录
 ```
 
-## 开发
+</details>
+
+<details>
+<summary>开发指南（开发者）</summary>
 
 首次安装前端依赖：
 
@@ -342,7 +356,10 @@ npm run dev
 
 生产可执行文件使用嵌入资源，因此测试打包后的 Go server 前，需要先运行 `npm run build` 或 `go run ./tools/build`。
 
-## CLI 辅助命令
+</details>
+
+<details>
+<summary>CLI 辅助命令（开发者）</summary>
 
 GUI 是主要入口，CLI 保留用于调试和自动化：
 
@@ -355,7 +372,10 @@ chemssh-launcher profile test <name-or-id>
 chemssh-launcher start <name-or-id>
 ```
 
-## 版本管理
+</details>
+
+<details>
+<summary>版本管理（开发者）</summary>
 
 版本号只需要修改：
 
@@ -369,7 +389,10 @@ internal/version/VERSION
 chemssh-launcher --version
 ```
 
-## 已知限制和注意事项
+</details>
+
+<details>
+<summary>已知限制和注意事项</summary>
 
 - 运行时是单文件程序，但源码构建需要 Node/npm，因为当前前端是 Vue/Vite 应用。
 - SFTP 只适用于远程 profile。本地 profile 用于本地 ChemSSH 调试，不提供 SSH/SFTP。
@@ -378,3 +401,5 @@ chemssh-launcher --version
 - 远程和本地递归删除由后端支持，删除确认需要仔细阅读。
 - 临时 SFTP open cache 清理可能被 Windows 文件锁阻塞；这属于环境清理问题，不一定表示测试或代码失败。
 - `go.sum` 应提交到仓库。它用于锁定 Go 依赖校验和，保证构建可复现，并降低依赖被篡改的风险。
+
+</details>

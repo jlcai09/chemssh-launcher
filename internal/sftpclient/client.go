@@ -37,19 +37,34 @@ func listDirectory(client *sftp.Client, remotePath string) (ListResult, error) {
 	if err != nil {
 		return ListResult{}, err
 	}
-	entries := make([]RemoteEntry, 0, len(infos))
+	type sortableRemoteEntry struct {
+		isFile   bool
+		sortName string
+		entry    RemoteEntry
+	}
+	sortable := make([]sortableRemoteEntry, 0, len(infos))
 	for _, info := range infos {
-		if info.Name() == "." || info.Name() == ".." {
+		name := info.Name()
+		if name == "." || name == ".." {
 			continue
 		}
-		entries = append(entries, entryFromInfo(cleanPath, info))
+		isDir := info.IsDir()
+		sortable = append(sortable, sortableRemoteEntry{
+			isFile:   !isDir,
+			sortName: strings.ToLower(name),
+			entry:    entryFromInfo(cleanPath, info, name, isDir),
+		})
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir != entries[j].IsDir {
-			return entries[i].IsDir
+	sort.Slice(sortable, func(i, j int) bool {
+		if sortable[i].isFile != sortable[j].isFile {
+			return !sortable[i].isFile
 		}
-		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		return sortable[i].sortName < sortable[j].sortName
 	})
+	entries := make([]RemoteEntry, len(sortable))
+	for index, item := range sortable {
+		entries[index] = item.entry
+	}
 	return ListResult{Path: cleanPath, Entries: entries}, nil
 }
 
@@ -174,11 +189,11 @@ func deletePathRecursive(client *sftp.Client, cleanPath string) error {
 	return client.RemoveDirectory(cleanPath)
 }
 
-func entryFromInfo(parent string, info os.FileInfo) RemoteEntry {
+func entryFromInfo(parent string, info os.FileInfo, name string, isDir bool) RemoteEntry {
 	return RemoteEntry{
-		Name:    info.Name(),
-		Path:    joinRemotePath(parent, info.Name()),
-		IsDir:   info.IsDir(),
+		Name:    name,
+		Path:    joinRemotePath(parent, name),
+		IsDir:   isDir,
 		Size:    info.Size(),
 		Mode:    info.Mode().String(),
 		ModTime: info.ModTime(),

@@ -8,7 +8,7 @@
             <p>{{ t('backend.runningState') }}</p>
           </div>
           <div class="header-actions">
-            <el-tooltip :content="t('backend.refresh')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+            <el-tooltip :content="t('backend.refresh')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="Refresh" circle @click="refreshAll" />
             </el-tooltip>
           </div>
@@ -17,20 +17,20 @@
           <div class="backend-row">
             <span>{{ t('backend.configDir') }}</span>
             <code :title="info.config_dir || '-'">{{ info.config_dir || '-' }}</code>
-            <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+            <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="CopyDocument" circle @click="copyPath(info.config_dir)" />
             </el-tooltip>
-            <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+            <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="FolderOpened" circle @click="openConfigDir" />
             </el-tooltip>
           </div>
           <div class="backend-row">
             <span>{{ t('backend.fileCacheDir') }}</span>
             <code :title="info.sftp_open_cache_dir || '-'">{{ info.sftp_open_cache_dir || '-' }}</code>
-            <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+            <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="CopyDocument" circle @click="copyPath(info.sftp_open_cache_dir)" />
             </el-tooltip>
-            <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+            <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="FolderOpened" circle @click="openSftpCacheDir" />
             </el-tooltip>
           </div>
@@ -61,7 +61,7 @@
       <section class="log-panel backend-log">
         <div class="logs-title">
           <h2>{{ t('backend.logTitle') }}</h2>
-          <el-tooltip :content="t('backend.refreshLogs')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="t('backend.refreshLogs')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Refresh" circle @click="refreshLogs" />
           </el-tooltip>
         </div>

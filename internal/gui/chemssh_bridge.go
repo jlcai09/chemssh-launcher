@@ -86,6 +86,24 @@ func (s *Server) handleChemSSHBridgeCapabilities(w http.ResponseWriter, r *http.
 	writeJSON(w, newChemSSHBridgeCapabilities(true, true, !profile.IsLocal(), profile.ID, workspaceRoot, profile.IsLocal()), nil)
 }
 
+func (s *Server) handleChemSSHBridgeClientIdentity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	identity, err := s.ensureLauncherClientIdentity()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, chemSSHBridgeClientIdentity{
+		Enabled:  true,
+		Version:  identity.Version,
+		ClientID: identity.ClientID,
+		Source:   "launcher",
+	}, nil)
+}
+
 func (s *Server) handleChemSSHBridgeOpen(w http.ResponseWriter, r *http.Request) {
 	s.handleChemSSHBridgeOpenMode(w, r, false)
 }
@@ -250,28 +268,64 @@ func (s *Server) ensureChemSSHBridgeSFTPSessionForProfile(profile config.Profile
 	if strings.TrimSpace(workspaceRoot) == "" {
 		return "", "", newChemSSHBridgeHTTPError(http.StatusServiceUnavailable, "ChemSSH identity did not include workspace_root")
 	}
-	s.mu.Lock()
-	current := s.bridge
-	if current.sftpSessionID != "" && current.profileID == profile.ID && current.workspaceRoot == workspaceRoot {
-		s.mu.Unlock()
-		if s.sftp.IsConnected(current.sftpSessionID) {
-			return current.sftpSessionID, current.workspaceRoot, nil
+	for {
+		connect, stateToClear, wait := s.reserveChemSSHBridgeSFTPConnect(profile.ID, workspaceRoot)
+		if wait {
+			<-connect.done
+			if connect.err != nil {
+				return "", "", connect.err
+			}
+			return connect.sessionID, connect.workspaceRoot, nil
 		}
-		s.clearChemSSHBridgeState(current)
-		s.mu.Lock()
-		if s.bridge == current {
-			s.bridge = chemSSHBridgeState{}
+		if connect == nil {
+			return stateToClear.sftpSessionID, workspaceRoot, nil
 		}
-		s.mu.Unlock()
-	} else {
-		s.bridge = chemSSHBridgeState{}
-		s.mu.Unlock()
-		s.clearChemSSHBridgeState(current)
+		s.clearChemSSHBridgeState(stateToClear)
+		sessionID, err := s.connectChemSSHBridgeSFTP(connect, profile, workspaceRoot)
+		if err != nil {
+			return "", "", err
+		}
+		return sessionID, workspaceRoot, nil
 	}
+}
 
+func (s *Server) reserveChemSSHBridgeSFTPConnect(profileID, workspaceRoot string) (*chemSSHBridgeConnect, chemSSHBridgeState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := s.bridge
+	if current.sftpSessionID != "" && current.profileID == profileID && current.workspaceRoot == workspaceRoot {
+		if s.sftp.IsConnected(current.sftpSessionID) {
+			return nil, current, false
+		}
+		connect := &chemSSHBridgeConnect{profileID: profileID, workspaceRoot: workspaceRoot, done: make(chan struct{})}
+		s.bridge = chemSSHBridgeState{
+			profileID:     profileID,
+			workspaceRoot: workspaceRoot,
+			connecting:    connect,
+		}
+		return connect, current, false
+	}
+	if current.connecting != nil && current.connecting.profileID == profileID && current.connecting.workspaceRoot == workspaceRoot {
+		return current.connecting, chemSSHBridgeState{}, true
+	}
+	if current.sftpSessionID != "" || current.connecting != nil {
+		s.bridge = chemSSHBridgeState{}
+	}
+	connect := &chemSSHBridgeConnect{profileID: profileID, workspaceRoot: workspaceRoot, done: make(chan struct{})}
+	s.bridge = chemSSHBridgeState{
+		profileID:     profileID,
+		workspaceRoot: workspaceRoot,
+		connecting:    connect,
+	}
+	return connect, current, false
+}
+
+func (s *Server) connectChemSSHBridgeSFTP(connect *chemSSHBridgeConnect, profile config.Profile, workspaceRoot string) (string, error) {
 	session, err := s.sftp.ConnectDedicated(profile, s.rt.Secrets, sshclient.HostKeyStrict)
 	if err != nil {
-		return "", "", err
+		s.finishChemSSHBridgeSFTPConnect(connect, "", err)
+		return "", err
 	}
 
 	s.mu.Lock()
@@ -279,29 +333,53 @@ func (s *Server) ensureChemSSHBridgeSFTPSessionForProfile(profile config.Profile
 	if active == nil || !active.forwarding || active.profile.ID != profile.ID {
 		s.mu.Unlock()
 		_ = s.sftp.Disconnect(session.ID)
-		return "", "", newChemSSHBridgeHTTPError(http.StatusServiceUnavailable, "active ChemSSH session changed while opening bridge SFTP session")
-	}
-	if s.bridge.sftpSessionID != "" && s.bridge.profileID == profile.ID && s.bridge.workspaceRoot == workspaceRoot {
-		existingID := s.bridge.sftpSessionID
-		s.mu.Unlock()
-		_ = s.sftp.Disconnect(session.ID)
-		return existingID, workspaceRoot, nil
-	}
-	s.bridge = chemSSHBridgeState{
-		sftpSessionID: session.ID,
-		profileID:     profile.ID,
-		workspaceRoot: workspaceRoot,
+		err := newChemSSHBridgeHTTPError(http.StatusServiceUnavailable, "active ChemSSH session changed while opening bridge SFTP session")
+		s.finishChemSSHBridgeSFTPConnect(connect, "", err)
+		return "", err
 	}
 	s.mu.Unlock()
 
+	if err := s.finishChemSSHBridgeSFTPConnect(connect, session.ID, nil); err != nil {
+		_ = s.sftp.Disconnect(session.ID)
+		return "", err
+	}
 	s.profileLog(profile.ID, "ChemSSH bridge SFTP connection OK for "+profile.Name)
-	return session.ID, workspaceRoot, nil
+	return session.ID, nil
+}
+
+func (s *Server) finishChemSSHBridgeSFTPConnect(connect *chemSSHBridgeConnect, sessionID string, err error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.bridge.connecting != connect {
+		if err == nil {
+			err = newChemSSHBridgeHTTPError(http.StatusServiceUnavailable, "active ChemSSH bridge changed while opening SFTP session")
+		}
+		connect.err = err
+		close(connect.done)
+		return err
+	}
+	if err != nil {
+		s.bridge = chemSSHBridgeState{}
+		connect.err = err
+		close(connect.done)
+		return err
+	}
+	s.bridge = chemSSHBridgeState{
+		sftpSessionID: sessionID,
+		profileID:     connect.profileID,
+		workspaceRoot: connect.workspaceRoot,
+	}
+	connect.sessionID = sessionID
+	close(connect.done)
+	return nil
 }
 
 func (s *Server) warmChemSSHBridgeSFTP(session *activeSession, profile config.Profile, workspaceRoot string) {
 	if profile.IsLocal() || strings.TrimSpace(workspaceRoot) == "" {
 		return
 	}
+	time.Sleep(chemsshBridgeSFTPWarmDelay)
 	s.mu.Lock()
 	active := s.sessionStillActiveLocked(session) && session.forwarding
 	s.mu.Unlock()

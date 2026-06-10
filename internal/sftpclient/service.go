@@ -1,6 +1,7 @@
 package sftpclient
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -9,9 +10,6 @@ import (
 	"chemssh-launcher/internal/config"
 	"chemssh-launcher/internal/secret"
 	"chemssh-launcher/internal/sshclient"
-
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
 )
 
 var ErrSessionNotFound = errors.New("SFTP session is not connected")
@@ -32,8 +30,7 @@ type Manager struct {
 
 type activeSession struct {
 	info       Session
-	sshClient  *ssh.Client
-	sftpClient *sftp.Client
+	pool       *connectionPool  // 使用连接池替代单个连接
 	refs       int
 }
 
@@ -60,21 +57,18 @@ func (m *Manager) ConnectDedicated(profile config.Profile, secrets secret.Store,
 }
 
 func (m *Manager) connect(profile config.Profile, secrets secret.Store, policy sshclient.HostKeyPolicy, reuseByProfile bool) (Session, error) {
-	sshClient, err := sshclient.DialWithHostKeyPolicy(profile, secrets, policy)
+	// 创建连接池
+	pool, err := newConnectionPool(profile, secrets, policy)
 	if err != nil {
 		return Session{}, err
 	}
-	sftpClient, err := sftp.NewClient(sshClient)
-	if err != nil {
-		_ = sshClient.Close()
-		return Session{}, err
-	}
+
 	id, err := config.NewID()
 	if err != nil {
-		_ = sftpClient.Close()
-		_ = sshClient.Close()
+		pool.closeAll()
 		return Session{}, err
 	}
+
 	info := Session{
 		ID:        id,
 		ProfileID: profile.ID,
@@ -84,10 +78,9 @@ func (m *Manager) connect(profile config.Profile, secrets secret.Store, policy s
 	}
 	m.mu.Lock()
 	session := &activeSession{
-		info:       info,
-		sshClient:  sshClient,
-		sftpClient: sftpClient,
-		refs:       1,
+		info: info,
+		pool: pool,
+		refs: 1,
 	}
 	m.sessions[id] = session
 	if reuseByProfile {
@@ -121,7 +114,21 @@ func (m *Manager) List(id, remotePath string) (ListResult, error) {
 	if err != nil {
 		return ListResult{}, err
 	}
-	return listDirectory(session.sftpClient, remotePath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return ListResult{}, err
+	}
+	defer session.pool.release(conn)
+
+	result, err := listDirectory(conn.client, remotePath)
+	if err != nil {
+		conn.failed = true
+	}
+	return result, err
 }
 
 func (m *Manager) Upload(id, remoteDir, fileName string, src io.Reader) error {
@@ -129,7 +136,21 @@ func (m *Manager) Upload(id, remoteDir, fileName string, src io.Reader) error {
 	if err != nil {
 		return err
 	}
-	return uploadFile(session.sftpClient, remoteDir, fileName, src)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.pool.release(conn)
+
+	err = uploadFile(conn.client, remoteDir, fileName, src)
+	if err != nil {
+		conn.failed = true
+	}
+	return err
 }
 
 func (m *Manager) UploadFile(id, remotePath string, src io.Reader) error {
@@ -137,7 +158,21 @@ func (m *Manager) UploadFile(id, remotePath string, src io.Reader) error {
 	if err != nil {
 		return err
 	}
-	return uploadFilePath(session.sftpClient, remotePath, src)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.pool.release(conn)
+
+	err = uploadFilePath(conn.client, remotePath, src)
+	if err != nil {
+		conn.failed = true
+	}
+	return err
 }
 
 func (m *Manager) Download(id, remotePath string) (io.ReadCloser, FileInfo, error) {
@@ -145,7 +180,21 @@ func (m *Manager) Download(id, remotePath string) (io.ReadCloser, FileInfo, erro
 	if err != nil {
 		return nil, FileInfo{}, err
 	}
-	return downloadFile(session.sftpClient, remotePath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return nil, FileInfo{}, err
+	}
+	defer session.pool.release(conn)
+
+	reader, info, err := downloadFile(conn.client, remotePath)
+	if err != nil {
+		conn.failed = true
+	}
+	return reader, info, err
 }
 
 func (m *Manager) Mkdir(id, remotePath string) error {
@@ -153,7 +202,21 @@ func (m *Manager) Mkdir(id, remotePath string) error {
 	if err != nil {
 		return err
 	}
-	return makeDirectory(session.sftpClient, remotePath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.pool.release(conn)
+
+	err = makeDirectory(conn.client, remotePath)
+	if err != nil {
+		conn.failed = true
+	}
+	return err
 }
 
 func (m *Manager) CreateFile(id, remotePath string) error {
@@ -161,7 +224,21 @@ func (m *Manager) CreateFile(id, remotePath string) error {
 	if err != nil {
 		return err
 	}
-	return createFile(session.sftpClient, remotePath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.pool.release(conn)
+
+	err = createFile(conn.client, remotePath)
+	if err != nil {
+		conn.failed = true
+	}
+	return err
 }
 
 func (m *Manager) Rename(id, oldPath, newPath string) error {
@@ -169,7 +246,21 @@ func (m *Manager) Rename(id, oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	return renamePath(session.sftpClient, oldPath, newPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.pool.release(conn)
+
+	err = renamePath(conn.client, oldPath, newPath)
+	if err != nil {
+		conn.failed = true
+	}
+	return err
 }
 
 func (m *Manager) Delete(id, remotePath string) error {
@@ -177,7 +268,21 @@ func (m *Manager) Delete(id, remotePath string) error {
 	if err != nil {
 		return err
 	}
-	return deletePath(session.sftpClient, remotePath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.pool.release(conn)
+
+	err = deletePath(conn.client, remotePath)
+	if err != nil {
+		conn.failed = true
+	}
+	return err
 }
 
 func (m *Manager) get(id string) (*activeSession, error) {
@@ -215,16 +320,8 @@ func (m *Manager) release(id string) (*activeSession, bool, error) {
 }
 
 func (s *activeSession) close() error {
-	var firstErr error
-	if s.sftpClient != nil {
-		if err := s.sftpClient.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+	if s.pool != nil {
+		s.pool.closeAll()
 	}
-	if s.sshClient != nil {
-		if err := s.sshClient.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return nil
 }

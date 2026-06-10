@@ -17,24 +17,24 @@
           <span>{{ tab.title }}</span>
           <el-icon v-if="!tab.pinned" class="browser-tab-close" @click.stop="closeTab(tab.id)"><Close /></el-icon>
         </button>
-        <el-tooltip content="新建标签页" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+        <el-tooltip content="新建标签页" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="Plus" circle @click="createTab('新标签页', 'about:blank')" />
         </el-tooltip>
       </div>
       <div class="browser-tools">
-        <el-tooltip content="后退" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+        <el-tooltip content="后退" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="ArrowLeft" circle :disabled="!canBack" @click="goBack" />
         </el-tooltip>
-        <el-tooltip content="前进" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+        <el-tooltip content="前进" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="ArrowRight" circle :disabled="!canForward" @click="goForward" />
         </el-tooltip>
-        <el-tooltip content="刷新" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+        <el-tooltip content="刷新" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="Refresh" circle @click="reloadActive" />
         </el-tooltip>
         <form class="address-form" @submit.prevent="navigateActive(address)">
           <el-input v-model="address" placeholder="输入地址或本地路径" />
         </form>
-        <el-tooltip content="下载历史" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+        <el-tooltip content="下载历史" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="Download" circle @click="openDownloadsPanel" />
         </el-tooltip>
       </div>

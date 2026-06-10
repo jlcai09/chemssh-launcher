@@ -70,11 +70,11 @@
         </div>
 
         <div class="file-toolbar">
-          <el-tooltip content="刷新" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip content="刷新" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Refresh" circle @click="loadTab(paneName)" />
           </el-tooltip>
           <div class="toolbar-history-control">
-            <el-tooltip content="返回" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+            <el-tooltip content="返回" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="Back" circle :disabled="!canGoBack(paneName)" @click="goBack(paneName)" />
             </el-tooltip>
             <el-dropdown trigger="click" :disabled="historyEntries(paneName).length === 0" @command="handleHistoryCommand(paneName, $event)">
@@ -98,19 +98,19 @@
           <div class="toolbar-menu">
             <el-button :icon="Plus" circle aria-haspopup="menu" @click.prevent />
             <div class="toolbar-submenu" role="menu">
-              <el-tooltip content="新建文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+              <el-tooltip content="新建文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
                 <button class="toolbar-submenu-button" type="button" role="menuitem" aria-label="新建文件" @click="createFile(paneName)">
                   <el-icon><DocumentAdd /></el-icon>
                 </button>
               </el-tooltip>
-              <el-tooltip content="新建文件夹" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+              <el-tooltip content="新建文件夹" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
                 <button class="toolbar-submenu-button" type="button" role="menuitem" aria-label="新建文件夹" @click="createFolder(paneName)">
                   <el-icon><FolderAdd /></el-icon>
                 </button>
               </el-tooltip>
             </div>
           </div>
-          <el-tooltip :content="activeTab(paneName)?.showHidden ? '隐藏点开头文件' : '显示点开头文件'" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="activeTab(paneName)?.showHidden ? '隐藏点开头文件' : '显示点开头文件'" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button
               :icon="activeTab(paneName)?.showHidden ? View : Hide"
               circle
@@ -123,25 +123,25 @@
           <div class="toolbar-menu">
             <el-button :icon="Upload" circle :disabled="activeTab(paneName)?.kind !== 'remote'" aria-haspopup="menu" @click.prevent />
             <div class="toolbar-submenu" role="menu">
-              <el-tooltip content="上传文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+              <el-tooltip content="上传文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
                 <button class="toolbar-submenu-button" type="button" role="menuitem" :disabled="activeTab(paneName)?.kind !== 'remote'" @click="pickUpload(paneName, 'file')">
                   <el-icon><Upload /></el-icon>
                 </button>
               </el-tooltip>
-              <el-tooltip content="上传文件夹" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+              <el-tooltip content="上传文件夹" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
                 <button class="toolbar-submenu-button" type="button" role="menuitem" :disabled="activeTab(paneName)?.kind !== 'remote'" @click="pickUpload(paneName, 'folder')">
                   <el-icon><FolderOpened /></el-icon>
                 </button>
               </el-tooltip>
             </div>
           </div>
-          <el-tooltip content="下载远程文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip content="下载远程文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Download" circle :disabled="!canDownload(paneName)" @click="downloadSelected(paneName)" />
           </el-tooltip>
-          <el-tooltip content="重命名" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip content="重命名" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Edit" circle :disabled="selectedEntries(paneName).length !== 1" @click="renameSelected(paneName)" />
           </el-tooltip>
-          <el-tooltip content="删除选中项" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip content="删除选中项" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Delete" circle type="danger" :disabled="selectedEntries(paneName).length === 0" @click="deleteSelected(paneName)" />
           </el-tooltip>
           <input :ref="el => setUploadInput(paneName, 'file', el)" class="hidden-input" type="file" multiple @change="handleUploadInput(paneName, $event)" />
@@ -220,7 +220,7 @@
             :ref="el => setBodyRef(paneName, el)"
             class="file-list-body"
             role="rowgroup"
-            @scroll="updateScrollbars(paneName)"
+            @scroll="handleBodyScroll(paneName)"
             @mousedown.left="beginBlankSelect(paneName, $event)"
           >
             <div v-if="activeTab(paneName)?.loading" class="empty-state compact">正在读取目录...</div>
@@ -256,10 +256,10 @@
                 <span class="file-cell file-time-cell" />
               </div>
               <div v-if="visibleEntries(paneName).length === 0" class="empty-state compact">目录为空。</div>
+              <div class="file-list-virtual-spacer" :style="{ height: `${topSpacerHeight(paneName)}px` }" aria-hidden="true" />
               <div
-                v-for="(entry, index) in visibleEntries(paneName)"
+                v-for="{ entry, index } in virtualRows(paneName)"
                 :key="entry.path"
-                :ref="el => setRowRef(paneName, index, el)"
                 class="file-row"
                 :class="{
                   'is-directory': entry.is_dir,
@@ -302,6 +302,7 @@
                 <span class="file-column-divider file-column-divider-size-time" aria-hidden="true" />
                 <span class="file-cell file-time-cell">{{ formatDate(entry.mod_time) }}</span>
               </div>
+              <div class="file-list-virtual-spacer" :style="{ height: `${bottomSpacerHeight(paneName)}px` }" aria-hidden="true" />
             </template>
           </div>
           <div
@@ -368,10 +369,10 @@
         </div>
         <div class="header-actions">
           <el-segmented v-model="transferPanelMode" :options="transferPanelOptions" />
-          <el-tooltip :content="t('sftp.refreshBoth')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="t('sftp.refreshBoth')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Refresh" circle @click="refreshAll" />
           </el-tooltip>
-          <el-tooltip :content="t('sftp.clearLogs')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="t('sftp.clearLogs')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Delete" circle @click="clearTransferPanel" />
           </el-tooltip>
         </div>
@@ -502,7 +503,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
@@ -540,7 +541,7 @@ import {
   type UploadConflictResolution,
   type UploadEntry
 } from '../uploadEntries'
-import { t } from '../i18n'
+import { locale, t } from '../i18n'
 
 type PaneName = 'left' | 'right'
 type TabKind = 'local' | 'remote'
@@ -575,7 +576,8 @@ interface PaneState {
   dropActive: boolean
   treeRef: HTMLElement | null
   bodyRef: HTMLElement | null
-  rowRefs: (HTMLElement | null)[]
+  bodyScrollTop: number
+  bodyViewportHeight: number
   sizeColumnWidth: number
   timeColumnWidth: number
   sortKey: SortKey
@@ -596,6 +598,11 @@ interface ScrollState {
   verticalThumbOffset: number
   horizontalThumbSize: number
   horizontalThumbOffset: number
+}
+
+interface VirtualFileRow {
+  entry: FileEntry
+  index: number
 }
 
 interface DragPayload {
@@ -708,6 +715,9 @@ const MAX_TIME_COLUMN_WIDTH = 260
 const FILE_ICON_COLUMN_WIDTH = 34
 const FILE_COLUMN_RESIZER_WIDTH = 10
 const FLOATING_SCROLLBAR_MIN_THUMB = 36
+const FILE_ROW_SLOT_HEIGHT = 40
+const FILE_BODY_VERTICAL_PADDING = 4
+const VIRTUAL_ROW_OVERSCAN = 10
 const TRANSFER_PROGRESS_POLL_MS = 80
 const DIRECTORY_HISTORY_LIMIT = 20
 const newTabOptions = computed(() => [
@@ -832,6 +842,16 @@ const visibleTransferItems = computed(() => {
   return visible
 })
 
+const visibleEntriesByPane = computed<Record<PaneName, FileEntry[]>>(() => ({
+  left: visibleEntriesForPane('left'),
+  right: visibleEntriesForPane('right')
+}))
+
+const fileNameCollator = computed(() => new Intl.Collator(locale.value === 'zh' ? 'zh-CN' : 'en-US', {
+  numeric: true,
+  sensitivity: 'base'
+}))
+
 function makePane(): PaneState {
   return {
     tabs: [],
@@ -840,7 +860,8 @@ function makePane(): PaneState {
     dropActive: false,
     treeRef: null,
     bodyRef: null,
-    rowRefs: [],
+    bodyScrollTop: 0,
+    bodyViewportHeight: 0,
     sizeColumnWidth: DEFAULT_SIZE_COLUMN_WIDTH,
     timeColumnWidth: DEFAULT_TIME_COLUMN_WIDTH,
     sortKey: 'name',
@@ -872,7 +893,7 @@ function tabByID(paneName: PaneName, tabID: string) {
 
 function activateTab(paneName: PaneName, tabID: string) {
   panes[paneName].active = tabID
-  nextTick(() => updateScrollbars(paneName))
+  nextTick(() => updateVirtualMetrics(paneName))
 }
 
 function localTab(path: string): FileTab {
@@ -956,7 +977,7 @@ function setBodyRef(paneName: PaneName, el: unknown) {
   if (panes[paneName].bodyRef === nextEl) return
   panes[paneName].bodyRef = nextEl
   observeScrollElement(nextEl)
-  nextTick(() => updateScrollbars(paneName))
+  nextTick(() => updateVirtualMetrics(paneName))
 }
 
 function setTransferListRef(el: unknown) {
@@ -1192,10 +1213,57 @@ async function withHostKey<T>(path: string, payload: Record<string, unknown>) {
 }
 
 function visibleEntries(paneName: PaneName) {
+  return visibleEntriesByPane.value[paneName]
+}
+
+function visibleEntriesForPane(paneName: PaneName) {
   const tab = activeTab(paneName)
   if (!tab) return []
   const entries = tab.showHidden ? tab.entries : tab.entries.filter(entry => !entry.name.startsWith('.'))
   return sortEntries(paneName, entries)
+}
+
+function rawFileEntries(entries: FileEntry[] | undefined): FileEntry[] {
+  return markRaw(Array.isArray(entries) ? entries : [])
+}
+
+function parentSlotHeight(paneName: PaneName) {
+  return parentDirectoryEntry(paneName) ? FILE_ROW_SLOT_HEIGHT : 0
+}
+
+function virtualRange(paneName: PaneName) {
+  const count = visibleEntries(paneName).length
+  if (count === 0) return { start: 0, end: 0 }
+
+  const pane = panes[paneName]
+  const viewportHeight = pane.bodyViewportHeight || pane.bodyRef?.clientHeight || 0
+  const itemScrollTop = Math.max(0, pane.bodyScrollTop - parentSlotHeight(paneName))
+  const visibleSlots = Math.max(1, Math.ceil(viewportHeight / FILE_ROW_SLOT_HEIGHT))
+  const firstVisible = clamp(Math.floor(itemScrollTop / FILE_ROW_SLOT_HEIGHT), 0, Math.max(0, count - 1))
+  const lastVisible = Math.min(count, firstVisible + visibleSlots)
+
+  return {
+    start: clamp(firstVisible - VIRTUAL_ROW_OVERSCAN, 0, count),
+    end: clamp(lastVisible + VIRTUAL_ROW_OVERSCAN, 0, count)
+  }
+}
+
+function virtualRows(paneName: PaneName): VirtualFileRow[] {
+  const entries = visibleEntries(paneName)
+  const range = virtualRange(paneName)
+  return entries.slice(range.start, range.end).map((entry, offset) => ({
+    entry,
+    index: range.start + offset
+  }))
+}
+
+function topSpacerHeight(paneName: PaneName) {
+  return virtualRange(paneName).start * FILE_ROW_SLOT_HEIGHT
+}
+
+function bottomSpacerHeight(paneName: PaneName) {
+  const range = virtualRange(paneName)
+  return Math.max(0, (visibleEntries(paneName).length - range.end) * FILE_ROW_SLOT_HEIGHT)
 }
 
 function sortEntries(paneName: PaneName, entries: FileEntry[]) {
@@ -1291,7 +1359,7 @@ function compareEntries(paneName: PaneName, a: FileEntry, b: FileEntry) {
 }
 
 function nameCompare(a: string, b: string) {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+  return fileNameCollator.value.compare(a, b)
 }
 
 function timestamp(value: string) {
@@ -1320,7 +1388,7 @@ function toggleSort(paneName: PaneName, key: SortKey) {
     pane.sortKey = key
     pane.sortDirection = 'asc'
   }
-  nextTick(() => updateScrollbars(paneName))
+  nextTick(() => updateVirtualMetrics(paneName))
 }
 
 function selectedEntries(paneName: PaneName) {
@@ -1350,8 +1418,17 @@ function isColumnResizing(paneName: PaneName) {
   return activeColumnResize.value?.pane === paneName
 }
 
-function setRowRef(paneName: PaneName, index: number, el: unknown) {
-  panes[paneName].rowRefs[index] = el instanceof HTMLElement ? el : null
+function updateVirtualMetrics(paneName: PaneName) {
+  const pane = panes[paneName]
+  const body = pane.bodyRef
+  if (!body) return
+  pane.bodyScrollTop = body.scrollTop
+  pane.bodyViewportHeight = body.clientHeight
+  updateScrollbars(paneName)
+}
+
+function handleBodyScroll(paneName: PaneName) {
+  updateVirtualMetrics(paneName)
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1449,7 +1526,7 @@ function handleScrollbarThumbMove(event: PointerEvent) {
   const scrollDelta = drag.maxThumbOffset <= 0 ? 0 : (delta / drag.maxThumbOffset) * drag.maxScroll
   if (drag.axis === 'vertical') body.scrollTop = drag.startScroll + scrollDelta
   else body.scrollLeft = drag.startScroll + scrollDelta
-  updateScrollbars(drag.pane)
+  updateVirtualMetrics(drag.pane)
 }
 
 function stopScrollbarThumbDrag() {
@@ -1472,7 +1549,7 @@ function handleScrollbarTrackPointerDown(paneName: PaneName, axis: ScrollbarAxis
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1)
     body.scrollLeft = ratio * Math.max(0, body.scrollWidth - body.clientWidth)
   }
-  updateScrollbars(paneName)
+  updateVirtualMetrics(paneName)
 }
 
 function startTransferScrollbarThumbDrag(axis: ScrollbarAxis, event: PointerEvent) {
@@ -1537,7 +1614,7 @@ function handleTransferScrollbarTrackPointerDown(axis: ScrollbarAxis, event: Poi
 
 function maxSizeColumnWidth(paneName: PaneName) {
   const pane = panes[paneName]
-  const width = pane.rowRefs[0]?.closest('.file-tree')?.getBoundingClientRect().width ?? 0
+  const width = pane.treeRef?.getBoundingClientRect().width ?? 0
   if (width <= 0) return MAX_SIZE_COLUMN_WIDTH
   const reserved = FILE_ICON_COLUMN_WIDTH + FILE_COLUMN_RESIZER_WIDTH * 2 + MIN_NAME_COLUMN_WIDTH + pane.timeColumnWidth
   return Math.min(MAX_SIZE_COLUMN_WIDTH, Math.max(MIN_SIZE_COLUMN_WIDTH, width - reserved))
@@ -1602,7 +1679,7 @@ function toggleHidden(paneName: PaneName) {
     tab.selected = tab.selected.filter(entry => !entry.name.startsWith('.'))
     if (tab.anchorPath && !visibleEntries(paneName).some(entry => entry.path === tab.anchorPath)) tab.anchorPath = ''
   }
-  nextTick(() => updateScrollbars(paneName))
+  nextTick(() => updateVirtualMetrics(paneName))
 }
 
 async function openDraftTab(paneName: PaneName) {
@@ -1682,9 +1759,8 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
     const nextPath = data.path || tab.path
     tab.path = nextPath
     tab.loadedPath = nextPath
-    tab.entries = Array.isArray(data.entries) ? data.entries : []
+    tab.entries = rawFileEntries(data.entries)
     if (options.recordHistory) recordDirectoryHistory(tab, previousPath, nextPath)
-    panes[paneName].rowRefs = []
     tab.title = tabLabel(tab)
     clearSystemIconFailure('dir')
   } catch (error) {
@@ -1692,7 +1768,7 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
     log(`失败：${(error as Error).message}`)
   } finally {
     tab.loading = false
-    nextTick(() => updateScrollbars(paneName))
+    nextTick(() => updateVirtualMetrics(paneName))
   }
 }
 
@@ -1903,19 +1979,31 @@ function updateBlankDragSelection() {
   const top = Math.min(blankDragStartY, blankDragCurrentY)
   const bottom = Math.max(blankDragStartY, blankDragCurrentY)
   const selectedPaths = new Set<string>()
+  const selectedItems: FileEntry[] = []
   const items = visibleEntries(paneName)
 
-  panes[paneName].rowRefs.forEach((row, index) => {
-    const entry = items[index]
-    if (!row || !entry) return
-    const rect = row.getBoundingClientRect()
-    if (rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom) {
-      selectedPaths.add(entry.path)
+  const body = panes[paneName].bodyRef
+  if (body && items.length > 0) {
+    const bodyRect = body.getBoundingClientRect()
+    const contentTop = bodyRect.top + FILE_BODY_VERTICAL_PADDING + parentSlotHeight(paneName) - body.scrollTop
+    const contentBottom = contentTop + items.length * FILE_ROW_SLOT_HEIGHT
+    const intersectsHorizontally = right >= bodyRect.left && left <= bodyRect.right
+
+    if (intersectsHorizontally && bottom >= contentTop && top <= contentBottom) {
+      const firstIndex = clamp(Math.floor((top - contentTop) / FILE_ROW_SLOT_HEIGHT), 0, items.length - 1)
+      const lastIndex = clamp(Math.floor((bottom - contentTop) / FILE_ROW_SLOT_HEIGHT), 0, items.length - 1)
+
+      for (let index = firstIndex; index <= lastIndex; index += 1) {
+        const entry = items[index]
+        if (!entry) continue
+        selectedPaths.add(entry.path)
+        selectedItems.push(entry)
+      }
     }
-  })
+  }
 
   blankDragPathSet.value = selectedPaths
-  tab.selected = items.filter(entry => selectedPaths.has(entry.path))
+  tab.selected = selectedItems
   tab.anchorPath = tab.selected[0]?.path || ''
 }
 
@@ -3055,7 +3143,7 @@ function handleContextMenuKeydown(event: KeyboardEvent) {
 onMounted(async () => {
   if (typeof ResizeObserver !== 'undefined') {
     scrollResizeObserver = new ResizeObserver(() => {
-      paneNames.forEach(paneName => updateScrollbars(paneName))
+      paneNames.forEach(paneName => updateVirtualMetrics(paneName))
       updateTransferScrollbars()
     })
     paneNames.forEach(paneName => {
@@ -3086,7 +3174,7 @@ onMounted(async () => {
   })
   await refreshAll()
   await nextTick()
-  paneNames.forEach(paneName => updateScrollbars(paneName))
+  paneNames.forEach(paneName => updateVirtualMetrics(paneName))
   updateTransferScrollbars()
 })
 

@@ -58,6 +58,14 @@ func DefaultWebViewDataDir() (string, error) {
 	return filepath.Join(dir, "webview2"), nil
 }
 
+func DefaultClientIdentityPath() (string, error) {
+	dir, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "client_identity.json"), nil
+}
+
 func DefaultWebViewClearMarkerPath() (string, error) {
 	dir, err := DefaultDir()
 	if err != nil {

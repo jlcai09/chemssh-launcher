@@ -17,6 +17,9 @@ Typical Windows executables are:
 
 The WebView2 build requires the Microsoft Edge WebView2 Runtime on the machine that runs it. Windows 10/11 usually already includes it.
 
+<details>
+<summary>Building from Source (Developers)</summary>
+
 To build from source, install:
 
 - Go 1.23 or newer.
@@ -26,6 +29,8 @@ To build from source, install:
 ```bash
 go install github.com/tc-hib/go-winres@v0.3.3
 ```
+
+</details>
 
 ## Start
 
@@ -247,7 +252,10 @@ On the first connection to a server, the GUI/CLI shows the host key type and SHA
 
 Binding `Local Host` to anything other than loopback, such as `0.0.0.0`, can expose the tunnel or local ChemSSH target to other machines. The launcher logs a warning, but the setting is still your responsibility.
 
-## Architecture
+---
+
+<details>
+<summary>Architecture (Developers)</summary>
 
 The project combines a Go backend, embedded Vue frontend, SSH/SFTP clients, and optional WebView2 host:
 
@@ -272,7 +280,10 @@ chemssh-launcher executable
 
 The frontend is built with Vue 3, TypeScript, Vite, and Element Plus. The production build is generated into `internal/gui/static/vue/` and embedded into the Go executable.
 
-## Directory Structure
+</details>
+
+<details>
+<summary>Directory Structure (Developers)</summary>
 
 ```text
 cmd/chemssh-launcher/      CLI entrypoint and Windows resource object
@@ -295,7 +306,10 @@ winres/                   Windows icon and version resource metadata
 idea/                     Development task notes and design notes
 ```
 
-## Development
+</details>
+
+<details>
+<summary>Development Guide (Developers)</summary>
 
 Install frontend dependencies once:
 
@@ -342,7 +356,10 @@ npm run dev
 
 The production executable serves embedded assets, so remember to run `npm run build` or `go run ./tools/build` before testing the packaged Go server.
 
-## CLI Commands
+</details>
+
+<details>
+<summary>CLI Commands (Developers)</summary>
 
 The GUI is the primary interface. CLI commands remain useful for debugging and automation:
 
@@ -355,7 +372,10 @@ chemssh-launcher profile test <name-or-id>
 chemssh-launcher start <name-or-id>
 ```
 
-## Version
+</details>
+
+<details>
+<summary>Version Management (Developers)</summary>
 
 Only edit this file when bumping the app version:
 
@@ -369,7 +389,10 @@ internal/version/VERSION
 chemssh-launcher --version
 ```
 
-## Known Limits And Notes
+</details>
+
+<details>
+<summary>Known Limits And Notes</summary>
 
 - Runtime is a single executable, but source builds require Node/npm because the frontend is now a Vue/Vite app.
 - SFTP works only for remote profiles. Local profiles are for local ChemSSH debugging and do not provide SSH/SFTP.
@@ -378,3 +401,5 @@ chemssh-launcher --version
 - Remote and local recursive deletion is supported by the backend, so delete confirmations should be read carefully.
 - Temporary SFTP-open cache cleanup can be blocked by Windows file locks; this is an environment cleanup issue, not necessarily a test or code failure.
 - `go.sum` is intentionally committed. It locks Go module checksums for reproducible and tamper-resistant builds.
+
+</details>

@@ -108,3 +108,61 @@ func TestRewriteChemSSHProxyRequestStripsLauncherQuery(t *testing.T) {
 		t.Fatalf("expected keep query to survive, got %q", got)
 	}
 }
+
+func TestRewriteChemSSHProxyRequestAppliesLauncherClientIdentity(t *testing.T) {
+	profile := config.NewProfileDefaults()
+	profile.ID = "remote-1"
+	profile.Name = "remote"
+	session := &activeSession{id: profile.ID, name: profile.Name, profile: profile}
+	server := &Server{
+		clientIdentity: launcherClientIdentity{
+			Version:   launcherClientIdentityVersion,
+			ClientID:  "client_launcher_stable",
+			CreatedAt: "2026-06-09T10:00:00Z",
+		},
+	}
+	target, err := url.Parse("http://127.0.0.1:8888")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/remote/chemssh/api/client-cache", nil)
+	req.Header.Set("X-ChemSSH-Client-Id", "client_random")
+
+	rewritten := server.rewriteChemSSHProxyRequest(req, target, session)
+
+	if got := rewritten.Header.Get("X-ChemSSH-Client-Id"); got != "client_launcher_stable" {
+		t.Fatalf("client id header = %q, want stable launcher id", got)
+	}
+}
+
+func TestRewriteChemSSHProxyRequestAppliesLauncherClientIdentityToTerminalWebSocket(t *testing.T) {
+	profile := config.NewProfileDefaults()
+	profile.ID = "remote-1"
+	profile.Name = "remote"
+	session := &activeSession{id: profile.ID, name: profile.Name, profile: profile}
+	server := &Server{
+		clientIdentity: launcherClientIdentity{
+			Version:   launcherClientIdentityVersion,
+			ClientID:  "client_launcher_stable",
+			CreatedAt: "2026-06-09T10:00:00Z",
+		},
+	}
+	target, err := url.Parse("http://127.0.0.1:8888")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/remote/chemssh/api/terminal/ws/session-1?client_id=client_random&keep=1", nil)
+
+	rewritten := server.rewriteChemSSHProxyRequest(req, target, session)
+
+	query := rewritten.URL.Query()
+	if got := query.Get("client_id"); got != "client_launcher_stable" {
+		t.Fatalf("client_id query = %q, want stable launcher id", got)
+	}
+	if got := query.Get("keep"); got != "1" {
+		t.Fatalf("expected keep query to survive, got %q", got)
+	}
+	if got := rewritten.Header.Get("X-ChemSSH-Client-Id"); got != "client_launcher_stable" {
+		t.Fatalf("client id header = %q, want stable launcher id", got)
+	}
+}

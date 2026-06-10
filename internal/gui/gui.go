@@ -57,6 +57,7 @@ type Server struct {
 	proxyProfileID string
 	sessionOpenSeq uint64
 	bridge         chemSSHBridgeState
+	clientIdentity launcherClientIdentity
 	shutdown       context.CancelFunc
 	// activeTransferCount is updated by the frontend via /api/transfer-count.
 	// It tracks how many transfer tasks are currently running.
@@ -90,11 +91,21 @@ type chemSSHBridgeState struct {
 	sftpSessionID string
 	profileID     string
 	workspaceRoot string
+	connecting    *chemSSHBridgeConnect
+}
+
+type chemSSHBridgeConnect struct {
+	profileID     string
+	workspaceRoot string
+	done          chan struct{}
+	sessionID     string
+	err           error
 }
 
 type safeLog struct {
-	mu    sync.Mutex
-	lines []string
+	mu        sync.Mutex
+	lines     []string
+	listeners []chan string // SSE listeners for real-time log streaming
 }
 
 type profileLogStore struct {
@@ -118,6 +129,11 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	}
 	server := NewServer(rt)
 	server.options = options
+	clientIdentity, err := loadOrCreateDefaultLauncherClientIdentity()
+	if err != nil {
+		return err
+	}
+	server.clientIdentity = clientIdentity
 	defer cleanupSFTPOpenCache(server.localLog)
 	defer server.sftp.CloseAll()
 	defer server.sftpSync.CloseAll()
@@ -217,56 +233,83 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/chemssh", s.handleChemSSHProxy)
 	s.mux.HandleFunc("/chemssh/", s.handleChemSSHProxy)
 	s.mux.HandleFunc("/assets/", s.handleChemSSHProxy)
-	s.mux.Handle("/static/", http.FileServer(http.FS(assets)))
-	s.mux.HandleFunc("/api/profiles", s.handleProfiles)
-	s.mux.HandleFunc("/api/profiles/", s.handleProfileByID)
-	s.mux.HandleFunc("/api/profile-test", s.handleProfileTest)
-	s.mux.HandleFunc("/api/session/start", s.handleStart)
-	s.mux.HandleFunc("/api/session/stop", s.handleStop)
-	s.mux.HandleFunc("/api/session/stop-service", s.handleStopService)
-	s.mux.HandleFunc("/api/session/status", s.handleStatus)
-	s.mux.HandleFunc("/api/logs", s.handleLogs)
-	s.mux.HandleFunc("/api/sftp/connect", s.handleSFTPConnect)
-	s.mux.HandleFunc("/api/sftp/disconnect", s.handleSFTPDisconnect)
-	s.mux.HandleFunc("/api/sftp/list", s.handleSFTPList)
-	s.mux.HandleFunc("/api/sftp/mkdir", s.handleSFTPMkdir)
-	s.mux.HandleFunc("/api/sftp/create-file", s.handleSFTPCreateFile)
-	s.mux.HandleFunc("/api/sftp/rename", s.handleSFTPRename)
-	s.mux.HandleFunc("/api/sftp/delete", s.handleSFTPDelete)
+
+	// Static files with gzip compression
+	s.mux.Handle("/static/", staticGzipHandler(http.FileServer(http.FS(assets))))
+
+	// Launcher API endpoints with gzip compression (for JSON responses)
+	s.mux.HandleFunc("/api/profiles", gzipHandler(s.handleProfiles))
+	s.mux.HandleFunc("/api/profiles/", gzipHandler(s.handleProfileByID))
+	s.mux.HandleFunc("/api/profile-test", gzipHandler(s.handleProfileTest))
+	s.mux.HandleFunc("/api/session/start", gzipHandler(s.handleStart))
+	s.mux.HandleFunc("/api/session/stop", gzipHandler(s.handleStop))
+	s.mux.HandleFunc("/api/session/stop-service", gzipHandler(s.handleStopService))
+	s.mux.HandleFunc("/api/session/status", gzipHandler(s.handleStatus))
+	s.mux.HandleFunc("/api/logs", s.handleLogs) // No gzip: small payload, high frequency
+	s.mux.HandleFunc("/api/logs/stream", s.handleLogsStream) // SSE endpoint for real-time logs
+
+	// SFTP API - list operations benefit from compression
+	s.mux.HandleFunc("/api/sftp/connect", gzipHandler(s.handleSFTPConnect))
+	s.mux.HandleFunc("/api/sftp/disconnect", gzipHandler(s.handleSFTPDisconnect))
+	s.mux.HandleFunc("/api/sftp/list", gzipHandler(s.handleSFTPList))
+	s.mux.HandleFunc("/api/sftp/mkdir", gzipHandler(s.handleSFTPMkdir))
+	s.mux.HandleFunc("/api/sftp/create-file", gzipHandler(s.handleSFTPCreateFile))
+	s.mux.HandleFunc("/api/sftp/rename", gzipHandler(s.handleSFTPRename))
+	s.mux.HandleFunc("/api/sftp/delete", gzipHandler(s.handleSFTPDelete))
+
+	// SFTP upload/download - no compression (binary data)
 	s.mux.HandleFunc("/api/sftp/upload", s.handleSFTPUpload)
 	s.mux.HandleFunc("/api/sftp/download", s.handleSFTPDownload)
-	s.mux.HandleFunc("/api/sftp/open", s.handleSFTPOpen)
-	s.mux.HandleFunc("/api/sftp/open-text", s.handleSFTPOpenText)
-	s.mux.HandleFunc("/api/sftp/open-sync-events", s.handleSFTPOpenSyncEvents)
-	s.mux.HandleFunc("/api/chemssh-bridge/capabilities", s.handleChemSSHBridgeCapabilities)
-	s.mux.HandleFunc("/api/chemssh-bridge/open", s.handleChemSSHBridgeOpen)
-	s.mux.HandleFunc("/api/chemssh-bridge/open-text", s.handleChemSSHBridgeOpenText)
-	s.mux.HandleFunc("/api/chemssh-bridge/open-sync-events", s.handleChemSSHBridgeOpenSyncEvents)
+
+	s.mux.HandleFunc("/api/sftp/open", gzipHandler(s.handleSFTPOpen))
+	s.mux.HandleFunc("/api/sftp/open-text", gzipHandler(s.handleSFTPOpenText))
+	s.mux.HandleFunc("/api/sftp/open-sync-events", gzipHandler(s.handleSFTPOpenSyncEvents))
+
+	// ChemSSH Bridge API
+	s.mux.HandleFunc("/api/chemssh-bridge/capabilities", gzipHandler(s.handleChemSSHBridgeCapabilities))
+	s.mux.HandleFunc("/api/chemssh-bridge/client-identity", gzipHandler(s.handleChemSSHBridgeClientIdentity))
+	s.mux.HandleFunc("/api/chemssh-bridge/open", gzipHandler(s.handleChemSSHBridgeOpen))
+	s.mux.HandleFunc("/api/chemssh-bridge/open-text", gzipHandler(s.handleChemSSHBridgeOpenText))
+	s.mux.HandleFunc("/api/chemssh-bridge/open-sync-events", gzipHandler(s.handleChemSSHBridgeOpenSyncEvents))
+
+	// SFTP local operations
 	s.mux.HandleFunc("/api/sftp/upload-local", s.handleSFTPUploadLocal)
 	s.mux.HandleFunc("/api/sftp/download-local", s.handleSFTPDownloadLocal)
-	s.mux.HandleFunc("/api/sftp/copy-remote", s.handleSFTPCopyRemote)
-	s.mux.HandleFunc("/api/local/home", s.handleLocalHome)
-	s.mux.HandleFunc("/api/local/list", s.handleLocalList)
-	s.mux.HandleFunc("/api/local/mkdir", s.handleLocalMkdir)
-	s.mux.HandleFunc("/api/local/create-file", s.handleLocalCreateFile)
-	s.mux.HandleFunc("/api/local/rename", s.handleLocalRename)
-	s.mux.HandleFunc("/api/local/delete", s.handleLocalDelete)
-	s.mux.HandleFunc("/api/local/copy", s.handleLocalCopy)
-	s.mux.HandleFunc("/api/local/open", s.handleLocalOpen)
-	s.mux.HandleFunc("/api/local/open-text", s.handleLocalOpenText)
+	s.mux.HandleFunc("/api/sftp/copy-remote", gzipHandler(s.handleSFTPCopyRemote))
+
+	// Local file API
+	s.mux.HandleFunc("/api/local/home", gzipHandler(s.handleLocalHome))
+	s.mux.HandleFunc("/api/local/list", gzipHandler(s.handleLocalList))
+	s.mux.HandleFunc("/api/local/mkdir", gzipHandler(s.handleLocalMkdir))
+	s.mux.HandleFunc("/api/local/create-file", gzipHandler(s.handleLocalCreateFile))
+	s.mux.HandleFunc("/api/local/rename", gzipHandler(s.handleLocalRename))
+	s.mux.HandleFunc("/api/local/delete", gzipHandler(s.handleLocalDelete))
+	s.mux.HandleFunc("/api/local/copy", gzipHandler(s.handleLocalCopy))
+	s.mux.HandleFunc("/api/local/open", gzipHandler(s.handleLocalOpen))
+	s.mux.HandleFunc("/api/local/open-text", gzipHandler(s.handleLocalOpenText))
+
+	// File icon - PNG already compressed, no gzip needed
 	s.mux.HandleFunc("/api/file-icon", s.handleFileIcon)
-	s.mux.HandleFunc("/api/transfer-progress", s.handleTransferProgress)
-	s.mux.HandleFunc("/api/transfer-control", s.handleTransferControl)
-	s.mux.HandleFunc("/api/launcher-logs", s.handleLauncherLogs)
-	s.mux.HandleFunc("/api/backend", s.handleBackendInfo)
-	s.mux.HandleFunc("/api/backend/open-config-dir", s.handleOpenConfigDir)
-	s.mux.HandleFunc("/api/backend/open-sftp-cache-dir", s.handleOpenSFTPCacheDir)
-	s.mux.HandleFunc("/api/backend/export", s.handleExportProfiles)
-	s.mux.HandleFunc("/api/backend/import", s.handleImportProfiles)
-	s.mux.HandleFunc("/api/backend/clear-cache", s.handleClearCache)
-	s.mux.HandleFunc("/api/version", s.handleVersion)
-	s.mux.HandleFunc("/api/defaults", s.handleDefaults)
-	s.mux.HandleFunc("/api/transfer-count", s.handleTransferCount)
+
+	// Transfer operations
+	s.mux.HandleFunc("/api/transfer-progress", gzipHandler(s.handleTransferProgress))
+	s.mux.HandleFunc("/api/transfer-control", gzipHandler(s.handleTransferControl))
+
+	// Backend operations
+	s.mux.HandleFunc("/api/launcher-logs", gzipHandler(s.handleLauncherLogs))
+	s.mux.HandleFunc("/api/backend", gzipHandler(s.handleBackendInfo))
+	s.mux.HandleFunc("/api/backend/open-config-dir", gzipHandler(s.handleOpenConfigDir))
+	s.mux.HandleFunc("/api/backend/open-sftp-cache-dir", gzipHandler(s.handleOpenSFTPCacheDir))
+	s.mux.HandleFunc("/api/backend/export", s.handleExportProfiles) // JSON download, no gzip
+	s.mux.HandleFunc("/api/backend/import", gzipHandler(s.handleImportProfiles))
+	s.mux.HandleFunc("/api/backend/clear-cache", gzipHandler(s.handleClearCache))
+
+	// Misc API
+	s.mux.HandleFunc("/api/version", gzipHandler(s.handleVersion))
+	s.mux.HandleFunc("/api/defaults", gzipHandler(s.handleDefaults))
+	s.mux.HandleFunc("/api/transfer-count", gzipHandler(s.handleTransferCount))
+
+	// ChemSSH proxy - keep transparent, no compression
 	s.mux.HandleFunc("/api/", s.handleChemSSHProxy)
 }
 
@@ -430,22 +473,30 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true}, nil)
 		return
 	}
+
+	// Start the remote session asynchronously to avoid blocking the HTTP response
+	// This allows the frontend to immediately start polling for logs
 	policy := sshclient.HostKeyStrict
 	if req.AcceptHostKey {
 		policy = sshclient.HostKeyAcceptNew
 	}
+
+	go s.startRemoteSessionAsync(p, policy, sessionLog)
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) startRemoteSessionAsync(p config.Profile, policy sshclient.HostKeyPolicy, sessionLog io.Writer) {
 	client, err := sshclient.DialWithHostKeyPolicy(p, s.rt.Secrets, policy)
 	if err != nil {
 		s.profileLog(p.ID, "SSH connection failed for "+p.Name+": "+err.Error())
-		writeSSHError(w, err)
 		return
 	}
 	s.profileLog(p.ID, "SSH connection OK for "+p.Name)
+
 	check, err := sshclient.RunCheckPortCommand(client, p, sessionLog, sessionLog)
 	if err != nil {
 		_ = client.Close()
 		s.profileLog(p.ID, "ChemSSH port check failed for "+p.Name+": "+err.Error())
-		writeError(w, http.StatusConflict, err)
 		return
 	}
 	if check.Reusable {
@@ -458,7 +509,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if s.sessionForProfileLocked(p.ID) != nil {
 		s.mu.Unlock()
 		_ = client.Close()
-		writeError(w, http.StatusConflict, errors.New("a session is already running"))
+		s.profileLog(p.ID, "a session is already running")
 		return
 	}
 
@@ -468,7 +519,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.mu.Unlock()
 			_ = client.Close()
-			writeError(w, http.StatusBadGateway, err)
+			s.profileLog(p.ID, "failed to start remote command: "+err.Error())
 			return
 		}
 	}
@@ -479,7 +530,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		_ = client.Close()
-		writeError(w, http.StatusConflict, err)
+		s.profileLog(p.ID, "failed to start tunnel: "+err.Error())
 		return
 	}
 
@@ -505,7 +556,6 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		go s.watchRemoteProcess(session)
 	}
 	go s.waitForRemoteHealth(session, p, healthCtx)
-	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
 func (s *Server) startLocalSession(w http.ResponseWriter, p config.Profile) {
@@ -624,7 +674,7 @@ func (s *Server) localHealthReady(p config.Profile, timeout time.Duration) bool 
 }
 
 func startLocalCommand(p config.Profile, stdout, stderr io.Writer) (*exec.Cmd, error) {
-	command := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(p.PreStartCommands)+"\n"+strings.TrimSpace(p.StartCommand), "\r\n"))
+	command := sshclient.AssembleLocalCommand(p)
 	if command == "" {
 		return nil, errors.New("local ChemSSH is not reachable and no local start command is configured")
 	}
@@ -1042,8 +1092,9 @@ func profileProxySlug(p config.Profile) string {
 	return p.ID
 }
 
-const chemsshProxyMaxRetries = 5
+const chemsshProxyMaxRetries = 3 // 从 5 次减少到 3 次，减少等待时间
 const chemsshProxyRetryBase = 200 * time.Millisecond
+const chemsshBridgeSFTPWarmDelay = 2 * time.Second
 
 func (s *Server) handleChemSSHProxy(w http.ResponseWriter, r *http.Request) {
 	target, session := s.activeChemSSHTarget(r)
@@ -1057,8 +1108,14 @@ func (s *Server) handleChemSSHProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 智能重试：API 请求使用更少的重试次数
+	maxRetries := chemsshProxyMaxRetries
+	if !wantsHTML(r) {
+		maxRetries = 2 // API 请求只重试 2 次，减少延迟
+	}
+
 	var lastErr error
-	for attempt := range chemsshProxyMaxRetries {
+	for attempt := range maxRetries {
 		if attempt > 0 {
 			delay := chemsshProxyRetryBase * time.Duration(1<<(attempt-1))
 			select {
@@ -1086,7 +1143,7 @@ func (s *Server) handleChemSSHProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.writeProxyError(w, r, http.StatusBadGateway, fmt.Errorf("proxy ChemSSH request failed after %d retries: %w", chemsshProxyMaxRetries, lastErr))
+	s.writeProxyError(w, r, http.StatusBadGateway, fmt.Errorf("proxy ChemSSH request failed after %d retries: %w", maxRetries, lastErr))
 }
 
 func (s *Server) writeProxyError(w http.ResponseWriter, r *http.Request, status int, err error) {
@@ -1177,7 +1234,25 @@ func (s *Server) rewriteChemSSHProxyRequest(r *http.Request, target *url.URL, se
 	query.Del("profile_id")
 	query.Del("launcher_open_seq")
 	req.URL.RawQuery = query.Encode()
+	s.applyLauncherClientIdentity(req)
 	return req
+}
+
+func (s *Server) applyLauncherClientIdentity(req *http.Request) {
+	clientID := s.launcherClientID()
+	if clientID == "" {
+		return
+	}
+	req.Header.Set("X-ChemSSH-Client-Id", clientID)
+	if isTerminalWebSocketPath(req.URL.Path) {
+		query := req.URL.Query()
+		query.Set("client_id", clientID)
+		req.URL.RawQuery = query.Encode()
+	}
+}
+
+func isTerminalWebSocketPath(path string) bool {
+	return path == "/api/terminal/ws" || strings.HasPrefix(path, "/api/terminal/ws/")
 }
 
 func chemsshProxyTargetPath(path string, session *activeSession) string {
@@ -1653,6 +1728,55 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string][]string{"lines": s.logs.snapshot()}, nil)
 }
 
+func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	profileID := strings.TrimSpace(r.URL.Query().Get("profile_id"))
+
+	// Get the appropriate log
+	var log *safeLog
+	if profileID != "" && s.profileLogs != nil {
+		log = s.profileLogs.forProfile(profileID)
+	} else {
+		log = s.logs
+	}
+
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Send existing logs first
+	existingLines := log.snapshot()
+	for _, line := range existingLines {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+	}
+	flusher.Flush()
+
+	// Create channel for new log lines
+	ch := make(chan string, 10)
+	log.addListener(ch)
+	defer log.removeListener(ch)
+	defer close(ch)
+
+	// Stream new logs
+	ctx := r.Context()
+	for {
+		select {
+		case line := <-ch:
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (s *Server) handleLauncherLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string][]string{"lines": s.localLog.snapshot()}, nil)
 }
@@ -1862,9 +1986,17 @@ func (l *safeLog) Write(p []byte) (int, error) {
 func (l *safeLog) add(line string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lines = append(l.lines, time.Now().Format("15:04:05")+"  "+line)
+	formattedLine := time.Now().Format("15:04:05") + "  " + line
+	l.lines = append(l.lines, formattedLine)
 	if len(l.lines) > 500 {
 		l.lines = l.lines[len(l.lines)-500:]
+	}
+	// Broadcast to all SSE listeners
+	for _, ch := range l.listeners {
+		select {
+		case ch <- formattedLine:
+		default: // Skip if channel is full (slow consumer)
+		}
 	}
 }
 
@@ -1872,6 +2004,23 @@ func (l *safeLog) snapshot() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.lines...)
+}
+
+func (l *safeLog) addListener(ch chan string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners = append(l.listeners, ch)
+}
+
+func (l *safeLog) removeListener(ch chan string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i, listener := range l.listeners {
+		if listener == ch {
+			l.listeners = append(l.listeners[:i], l.listeners[i+1:]...)
+			break
+		}
+	}
 }
 
 func newProfileLogStore() *profileLogStore {

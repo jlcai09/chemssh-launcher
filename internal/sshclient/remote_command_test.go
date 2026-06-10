@@ -103,3 +103,37 @@ func TestEffectiveDefaultStartCommandAppendsFlagsToChemSSHLine(t *testing.T) {
 		t.Fatalf("default command did not append host/port to chemssh line\n%s", got)
 	}
 }
+
+func TestEffectiveLocalStartCommandAppendsLocalAddress(t *testing.T) {
+	profile := config.NewLocalProfileDefaults()
+	profile.LocalHost = "127.0.0.1"
+	profile.LocalPort = 8890
+	profile.RemoteHost = "10.0.0.9"
+	profile.RemotePort = 9999
+	profile.StartCommand = "chemssh --config local.yaml"
+
+	got := EffectiveLocalStartCommand(profile)
+	want := "chemssh --config local.yaml --host 127.0.0.1 --port 8890"
+	if got != want {
+		t.Fatalf("local command = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "10.0.0.9") || strings.Contains(got, "9999") {
+		t.Fatalf("local command used remote address: %q", got)
+	}
+}
+
+func TestAssembleLocalCommandPreservesPreStartAndDoesNotDuplicateFlags(t *testing.T) {
+	profile := config.NewLocalProfileDefaults()
+	profile.LocalHost = "localhost"
+	profile.LocalPort = 8890
+	profile.PreStartCommands = "cd C:/chemssh\n$env:FOO='1'"
+	profile.StartCommand = "chemssh --config local.yaml --host localhost --port 8890"
+
+	got := AssembleLocalCommand(profile)
+	if !strings.Contains(got, "cd C:/chemssh\n$env:FOO='1'\nchemssh --config local.yaml") {
+		t.Fatalf("local command did not preserve pre-start commands\n%s", got)
+	}
+	if strings.Count(got, "--host") != 1 || strings.Count(got, "--port") != 1 {
+		t.Fatalf("duplicated local flags: %q", got)
+	}
+}

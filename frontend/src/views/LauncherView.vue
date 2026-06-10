@@ -7,10 +7,10 @@
           <p>{{ t('launcher.profileCount', { count: profiles.length }) }}</p>
         </div>
         <div class="header-actions">
-          <el-tooltip :content="t('launcher.newProfile')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="t('launcher.newProfile')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Plus" circle type="primary" @click="newProfile" />
           </el-tooltip>
-          <el-tooltip :content="t('launcher.refresh')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="t('launcher.refresh')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Refresh" circle @click="loadProfiles" />
           </el-tooltip>
         </div>
@@ -41,17 +41,17 @@
           <p>{{ current.id ? profileSummary(current) : t('launcher.noProfileHint') }}</p>
         </div>
         <div class="toolbar-actions">
-          <el-tooltip :content="t('launcher.sshTest')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="t('launcher.sshTest')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Connection" circle :disabled="!current.id" @click="testProfile" />
           </el-tooltip>
-          <el-tooltip :content="t('launcher.start')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
-            <el-button :icon="VideoPlay" circle type="primary" :disabled="!current.id" @click="startSession" />
+          <el-tooltip :content="t('launcher.start')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+            <el-button :icon="CaretRight" circle type="primary" :disabled="!current.id" @click="startSession" />
           </el-tooltip>
-          <el-tooltip :content="t('launcher.stopForwarding')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+          <el-tooltip :content="t('launcher.stopForwarding')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="SwitchButton" circle @click="stopForwarding" />
           </el-tooltip>
-          <el-tooltip :content="t('launcher.stopService')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
-            <el-button :icon="CircleClose" circle type="danger" @click="stopService" />
+          <el-tooltip :content="t('launcher.stopService')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+            <el-button :icon="CloseBold" circle type="danger" @click="stopService" />
           </el-tooltip>
         </div>
       </div>
@@ -141,7 +141,7 @@
         <section class="log-panel">
           <div class="logs-title">
             <h2>{{ t('launcher.logs') }}</h2>
-            <el-tooltip :content="t('launcher.refreshLogs')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false">
+            <el-tooltip :content="t('launcher.refreshLogs')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="Refresh" circle @click="refreshLogs" />
             </el-tooltip>
           </div>
@@ -153,9 +153,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, CircleClose, Connection, Delete, Plus, Refresh, SwitchButton, VideoPlay } from '@element-plus/icons-vue'
+import { Check, CloseBold, Connection, Delete, Plus, Refresh, SwitchButton, CaretRight } from '@element-plus/icons-vue'
 import { api, APIError, postJSON, putJSON, type HostKeyInfo, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
 import { t } from '../i18n'
@@ -221,7 +221,7 @@ function newProfile() {
 
 function selectProfile(profile: Profile) {
   applyProfile(profile)
-  void refreshLogs(true)
+  // Log stream will auto-reconnect via watch on current.id
 }
 
 async function loadProfiles() {
@@ -281,7 +281,6 @@ async function withHostKey<T>(path: string, payload: Record<string, unknown>) {
 async function testProfile() {
   if (!current.id) return ElMessage.warning(t('launcher.warnSaveFirst'))
   await withHostKey('/api/profile-test', { id: current.id })
-  await refreshLogs()
   ElMessage.success(t('launcher.sshTestPassed'))
 }
 
@@ -289,21 +288,18 @@ async function startSession() {
   if (!current.id) return ElMessage.warning(t('launcher.warnSaveFirst'))
   await withHostKey('/api/session/start', { id: current.id })
   await refreshStatus()
-  await refreshLogs()
   ElMessage.success(t('launcher.requestedStart'))
 }
 
 async function stopForwarding() {
   await postJSON('/api/session/stop', { id: current.id })
   await refreshStatus()
-  await refreshLogs()
 }
 
 async function stopService() {
   await ElMessageBox.confirm(t('launcher.confirmStop'), t('launcher.confirmTitle'), { type: 'warning' })
   await postJSON('/api/session/stop-service', { id: current.id })
   await refreshStatus()
-  await refreshLogs()
 }
 
 async function refreshStatus() {
@@ -325,14 +321,12 @@ async function refreshStatus() {
 }
 
 async function refreshLogs(forceScroll = false) {
-  if (!current.id) {
-    logs.value = []
-    return
+  // Reconnect log stream to get fresh logs
+  connectLogStream()
+  if (forceScroll) {
+    await nextTick()
+    logScroller.scrollToBottom(true)
   }
-  const data = await api<{ lines: string[] }>(`/api/logs?profile_id=${encodeURIComponent(current.id)}`)
-  logs.value = data.lines || []
-  await nextTick()
-  logScroller.scrollToBottom(forceScroll)
 }
 
 watch(passwordInput, value => {
@@ -343,13 +337,113 @@ watch(passphraseInput, value => {
   if (value) passphraseAction.value = 'replace'
 })
 
+// SSE for real-time log streaming
+let logEventSource: EventSource | null = null
+
+function connectLogStream() {
+  if (logEventSource) {
+    logEventSource.close()
+  }
+
+  if (!current.id) {
+    logs.value = []
+    return
+  }
+
+  const url = `/api/logs/stream?profile_id=${encodeURIComponent(current.id)}`
+  logEventSource = new EventSource(url)
+
+  // Clear logs and prepare for new stream
+  logs.value = []
+
+  logEventSource.onmessage = (event) => {
+    logs.value.push(event.data)
+    // Keep only last 500 lines
+    if (logs.value.length > 500) {
+      logs.value = logs.value.slice(-500)
+    }
+    nextTick(() => {
+      logScroller.scrollToBottom(false)
+    })
+  }
+
+  logEventSource.onerror = () => {
+    // Auto-reconnect on error
+    if (logEventSource) {
+      logEventSource.close()
+      logEventSource = null
+    }
+    // Reconnect after 2 seconds
+    setTimeout(() => {
+      if (current.id) connectLogStream()
+    }, 2000)
+  }
+}
+
+function disconnectLogStream() {
+  if (logEventSource) {
+    logEventSource.close()
+    logEventSource = null
+  }
+}
+
+// Watch for profile changes to reconnect log stream
+watch(() => current.id, (newId) => {
+  if (newId) {
+    connectLogStream()
+  } else {
+    disconnectLogStream()
+    logs.value = []
+  }
+})
+
+// Status polling (still needed for session status)
+let statusTimerId: number | null = null
+const pollStatus = () => {
+  const doPoll = async () => {
+    if (!document.hidden) {
+      await refreshStatus()
+    }
+    const interval = runningProfileIds.value.size > 0 ? 2000 : 10000
+    statusTimerId = window.setTimeout(doPoll, interval)
+  }
+  doPoll()
+}
+
+// 页面可见性控制
+const handleVisibilityChange = () => {
+  if (document.hidden) {
+    if (statusTimerId) {
+      clearTimeout(statusTimerId)
+      statusTimerId = null
+    }
+    disconnectLogStream()
+  } else {
+    pollStatus()
+    if (current.id) connectLogStream()
+  }
+}
+
 onMounted(async () => {
   defaults.value = await api<Profile>('/api/defaults')
   applyProfile({})
   await loadProfiles()
   await refreshStatus()
-  await refreshLogs()
-  window.setInterval(refreshStatus, 2000)
-  window.setInterval(refreshLogs, 2000)
+
+  // 启动状态轮询和日志流
+  pollStatus()
+  if (current.id) connectLogStream()
+
+  // 监听页面可见性变化
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+})
+
+// 清理定时器和连接
+onBeforeUnmount(() => {
+  if (statusTimerId) {
+    clearTimeout(statusTimerId)
+  }
+  disconnectLogStream()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>

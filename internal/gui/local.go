@@ -249,27 +249,42 @@ func listLocalDirectory(value string) (localListResult, error) {
 	if err != nil {
 		return localListResult{}, err
 	}
-	items := make([]localEntry, 0, len(entries))
+	type sortableLocalEntry struct {
+		isFile   bool
+		sortName string
+		entry    localEntry
+	}
+	sortable := make([]sortableLocalEntry, 0, len(entries))
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		items = append(items, localEntry{
-			Name:    entry.Name(),
-			Path:    filepath.Join(clean, entry.Name()),
-			IsDir:   info.IsDir(),
-			Size:    info.Size(),
-			Mode:    info.Mode().String(),
-			ModTime: info.ModTime(),
+		name := entry.Name()
+		isDir := info.IsDir()
+		sortable = append(sortable, sortableLocalEntry{
+			isFile:   !isDir,
+			sortName: strings.ToLower(name),
+			entry: localEntry{
+				Name:    name,
+				Path:    filepath.Join(clean, name),
+				IsDir:   isDir,
+				Size:    info.Size(),
+				Mode:    info.Mode().String(),
+				ModTime: info.ModTime(),
+			},
 		})
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].IsDir != items[j].IsDir {
-			return items[i].IsDir
+	sort.Slice(sortable, func(i, j int) bool {
+		if sortable[i].isFile != sortable[j].isFile {
+			return !sortable[i].isFile
 		}
-		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+		return sortable[i].sortName < sortable[j].sortName
 	})
+	items := make([]localEntry, len(sortable))
+	for index, item := range sortable {
+		items[index] = item.entry
+	}
 	return localListResult{Path: clean, Entries: items}, nil
 }
 

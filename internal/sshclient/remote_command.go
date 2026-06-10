@@ -94,7 +94,33 @@ func EffectiveStartCommand(profile config.Profile) string {
 	if strings.TrimSpace(command) == "" {
 		command = config.DefaultStartCommand
 	}
+	return appendStartCommandAddress(command, profile.RemoteHost, profile.RemotePort)
+}
 
+func EffectiveLocalStartCommand(profile config.Profile) string {
+	command := strings.TrimRight(profile.StartCommand, "\r\n")
+	if strings.TrimSpace(command) == "" {
+		return command
+	}
+	return appendStartCommandAddress(command, profile.LocalHost, profile.LocalPort)
+}
+
+func AssembleLocalCommand(profile config.Profile) string {
+	var b strings.Builder
+	if strings.TrimSpace(profile.PreStartCommands) != "" {
+		b.WriteString(strings.TrimRight(profile.PreStartCommands, "\r\n"))
+	}
+	command := EffectiveLocalStartCommand(profile)
+	if strings.TrimSpace(command) != "" {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(command)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func appendStartCommandAddress(command, host string, port int) string {
 	lines := strings.Split(command, "\n")
 	last := -1
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -109,10 +135,10 @@ func EffectiveStartCommand(profile config.Profile) string {
 
 	line := lines[last]
 	if !hasFlag(line, "host") {
-		line += " --host " + shellQuote(profile.RemoteHost)
+		line += " --host " + shellQuote(host)
 	}
 	if !hasFlag(line, "port") {
-		line += " --port " + strconv.Itoa(profile.RemotePort)
+		line += " --port " + strconv.Itoa(port)
 	}
 	lines[last] = line
 	return strings.Join(lines, "\n")

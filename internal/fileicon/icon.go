@@ -1,6 +1,7 @@
 package fileicon
 
 import (
+	"container/list"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -9,31 +10,63 @@ import (
 
 var ErrUnsupported = errors.New("system file icons are not supported on this platform")
 
+const (
+	defaultCacheSize = 500 // 缓存 500 个图标，约 5-10MB
+)
+
+type cacheEntry struct {
+	key  string
+	data []byte
+}
+
 type Service struct {
-	mu     sync.RWMutex
-	cache  map[string][]byte
-	failed map[string]bool // negative cache: keys that failed to load
-	loadMu sync.Mutex      // serialises Windows SHGetFileInfoW calls for thread safety
+	mu       sync.RWMutex
+	cache    map[string]*list.Element
+	lruList  *list.List
+	maxSize  int
+	failed   map[string]bool // negative cache: keys that failed to load
+	loadMu   sync.Mutex      // serialises Windows SHGetFileInfoW calls for thread safety
+	hits     int64           // cache hit counter
+	misses   int64           // cache miss counter
 }
 
 func NewService() *Service {
 	return &Service{
-		cache:  make(map[string][]byte),
-		failed: make(map[string]bool),
+		cache:   make(map[string]*list.Element),
+		lruList: list.New(),
+		maxSize: defaultCacheSize,
+		failed:  make(map[string]bool),
 	}
+}
+
+// CacheStats returns cache hit rate for monitoring
+func (s *Service) CacheStats() (hits, misses int64, size int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hits, s.misses, s.lruList.Len()
 }
 
 func (s *Service) IconPNG(name string, isDir bool, size int) ([]byte, error) {
 	size = normalizeSize(size)
 	key := cacheKey(name, isDir, size)
 
+	// Try to get from cache
 	s.mu.RLock()
-	data, ok := s.cache[key]
-	wasFailed := s.failed[key]
-	s.mu.RUnlock()
-	if ok {
+	if elem, ok := s.cache[key]; ok {
+		s.hits++
+		s.lruList.MoveToFront(elem)
+		data := elem.Value.(*cacheEntry).data
+		s.mu.RUnlock()
 		return data, nil
 	}
+	wasFailed := s.failed[key]
+	s.mu.RUnlock()
+
+	// Cache miss
+	s.mu.Lock()
+	s.misses++
+	s.mu.Unlock()
+
 	// If this key previously failed to load from the system, go straight to fallback.
 	if wasFailed {
 		return fallbackIconPNG(isDir, size)
@@ -62,10 +95,37 @@ func (s *Service) IconPNG(name string, isDir bool, size int) ([]byte, error) {
 		}
 	}
 
-	s.mu.Lock()
-	s.cache[key] = data
-	s.mu.Unlock()
+	// Add to LRU cache
+	s.addToCache(key, data)
 	return data, nil
+}
+
+// addToCache adds an entry to the LRU cache
+func (s *Service) addToCache(key string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If key already exists, move to front
+	if elem, ok := s.cache[key]; ok {
+		s.lruList.MoveToFront(elem)
+		elem.Value.(*cacheEntry).data = data
+		return
+	}
+
+	// Add new entry
+	entry := &cacheEntry{key: key, data: data}
+	elem := s.lruList.PushFront(entry)
+	s.cache[key] = elem
+
+	// Evict oldest if cache is full
+	if s.lruList.Len() > s.maxSize {
+		oldest := s.lruList.Back()
+		if oldest != nil {
+			s.lruList.Remove(oldest)
+			oldEntry := oldest.Value.(*cacheEntry)
+			delete(s.cache, oldEntry.key)
+		}
+	}
 }
 
 func normalizeSize(size int) int {
