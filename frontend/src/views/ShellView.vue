@@ -53,7 +53,6 @@
         <iframe v-else :src="tab.url" :title="tab.title" @load="syncLoadedURL(tab.id)" />
       </section>
     </main>
-    <div v-if="downloadsBackdrop" class="downloads-backdrop" @pointerdown="closeDownloadsPanel" @contextmenu.prevent="closeDownloadsPanel" />
   </section>
 </template>
 
@@ -82,9 +81,22 @@ const tabOrder = ref<string[]>([])
 const activeID = ref('')
 const address = ref('')
 const draggingID = ref('')
+const currentSessionURL = ref('')
+const currentSessionOpenSeq = ref(0)
 const lastSessionURL = ref('')
 const lastSessionOpenSeq = ref(0)
-const downloadsBackdrop = ref(false)
+const dismissedSessionURL = ref('')
+const dismissedSessionOpenSeq = ref(0)
+// Highest open_seq the shell has ever observed. open_seq is a process-wide
+// monotonic counter that only advances on an explicit Start (including a
+// restart-while-running); switching the launcher's active profile merely
+// re-promotes an already-running session and does not change its open_seq.
+// Gating auto-open on "open_seq advanced past the high-water mark" therefore
+// opens a tab only for a genuine Start, never because the user selected
+// another running profile.
+let maxSeenOpenSeq = 0
+let suppressAutoOpenUntil = 0
+let sessionStatusPrimed = false
 let nextID = 1
 
 const activeTab = computed(() => tabs.find(tab => tab.id === activeID.value))
@@ -171,6 +183,7 @@ function closeTab(id: string) {
   const index = tabs.findIndex(tab => tab.id === id)
   const tab = tabs[index]
   if (!tab || tab.pinned) return
+  rememberClosedSessionTab(tab.url)
   const orderIndex = tabOrder.value.indexOf(id)
   const nextActiveID = orderIndex >= 0
     ? (tabOrder.value[orderIndex - 1] || tabOrder.value[orderIndex + 1] || '')
@@ -244,6 +257,21 @@ function findTabByURL(url: string) {
   return tabs.find(tab => tab.url === finalURL)
 }
 
+function rememberClosedSessionTab(url: string) {
+  const finalURL = absoluteURL(url)
+  if (!currentSessionURL.value || finalURL !== currentSessionURL.value) return
+  dismissedSessionURL.value = currentSessionURL.value
+  dismissedSessionOpenSeq.value = currentSessionOpenSeq.value
+  lastSessionURL.value = currentSessionURL.value
+  lastSessionOpenSeq.value = currentSessionOpenSeq.value
+}
+
+function isDismissedSession(url: string, openSeq: number) {
+  if (!url) return false
+  if (openSeq > 0) return openSeq === dismissedSessionOpenSeq.value
+  return url === dismissedSessionURL.value
+}
+
 function openOrFocus(title: string, url: string) {
   const existing = findTabByURL(url)
   if (existing) {
@@ -257,11 +285,9 @@ function openOrFocus(title: string, url: string) {
 async function openDownloadsPanel() {
   if (typeof window.chemsshOpenDownloads !== 'function') return
   await window.chemsshOpenDownloads()
-  downloadsBackdrop.value = true
 }
 
 async function closeDownloadsPanel() {
-  downloadsBackdrop.value = false
   if (typeof window.chemsshCloseDownloads === 'function') await window.chemsshCloseDownloads()
 }
 
@@ -271,14 +297,34 @@ async function pollSession() {
     const status = await res.json()
     const url = status.forwarding && status.url ? status.url : ''
     const openSeq = Number(status.open_seq || 0)
-    const shouldOpen = openSeq > 0
-      ? openSeq !== lastSessionOpenSeq.value
-      : url !== lastSessionURL.value
-    if (url && status.open_browser !== false && shouldOpen) {
+    currentSessionURL.value = url
+    currentSessionOpenSeq.value = openSeq
+    if (!sessionStatusPrimed) {
+      sessionStatusPrimed = true
+      lastSessionURL.value = url
+      lastSessionOpenSeq.value = openSeq
+      if (openSeq > maxSeenOpenSeq) maxSeenOpenSeq = openSeq
+      return
+    }
+    // Only a genuine Start advances open_seq past the high-water mark.
+    // Re-promoting an already-running session (selecting another profile in the
+    // launcher, or another session being promoted after a stop) keeps its
+    // open_seq, so this never re-opens a tab just because the user switched
+    // which running profile they are viewing or stopped one.
+    const shouldOpen = openSeq > maxSeenOpenSeq
+    const autoOpenSuppressed = Date.now() < suppressAutoOpenUntil
+    // Suppression (set after a stop action) blocks re-opening of an already-
+    // seen session, but must NEVER block a genuine Start, whose open_seq has
+    // advanced past the high-water mark.
+    if (url && autoOpenSuppressed && !shouldOpen) {
+      return
+    }
+    if (url && status.open_browser !== false && shouldOpen && !isDismissedSession(url, openSeq)) {
       lastSessionURL.value = url
       lastSessionOpenSeq.value = openSeq
       openOrFocus(status.name || 'ChemSSH', url)
     }
+    if (openSeq > maxSeenOpenSeq) maxSeenOpenSeq = openSeq
     if (!url) {
       lastSessionURL.value = ''
       lastSessionOpenSeq.value = 0
@@ -296,6 +342,7 @@ onMounted(() => {
     const data = event.data || {}
     if (data.type === 'chemssh-launcher:new-tab' && data.url) openOrFocus(shortTitle(data.url), data.url)
     if (data.type === 'chemssh-launcher:close-downloads') closeDownloadsPanel()
+    if (data.type === 'chemssh-launcher:suppress-auto-open') suppressAutoOpenUntil = Date.now() + 10000
   })
 })
 </script>

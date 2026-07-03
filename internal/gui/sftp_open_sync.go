@@ -231,24 +231,39 @@ func (m *sftpOpenSyncManager) pollingLoop() {
 func (m *sftpOpenSyncManager) handleFileChange(path string) {
 	now := time.Now()
 
+	// Quick lock to check if the item exists and is not syncing.
+	// We must read item.syncing under the lock because completeUpload
+	// writes to it from a different goroutine.
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	item := m.items[path]
+	if item == nil || item.syncing {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	// Perform disk I/O outside the lock to avoid blocking other operations
+	// (Register, UnregisterSession, checkAllFiles, completeUpload, etc.)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return
+	}
+
+	// Re-acquire lock to update item state.
+	// Re-check item existence and syncing flag because the state may have
+	// changed while we were doing I/O.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.closed {
 		return
 	}
-
-	item := m.items[path]
+	item = m.items[path]
 	if item == nil || item.syncing {
-		return
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return
-	}
-
-	if info.IsDir() {
 		return
 	}
 

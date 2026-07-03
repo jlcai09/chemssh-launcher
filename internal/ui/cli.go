@@ -151,6 +151,7 @@ func deleteProfile(idOrName string, out io.Writer, profiles config.ProfileStore,
 	}
 	_ = secrets.Delete(p.ID, secret.KeyPassword)
 	_ = secrets.Delete(p.ID, secret.KeyPrivatePassphrase)
+	_ = secrets.Delete(p.ID, secret.KeySecurityToken)
 	fmt.Fprintf(out, "Deleted profile %q (%s)\n", p.Name, p.ID)
 	return nil
 }

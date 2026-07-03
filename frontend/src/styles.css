@@ -2011,12 +2011,6 @@ p,
   gap: 8px;
 }
 
-.downloads-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgba(15, 23, 42, 0.12);
-}
 
 .el-button {
   border-radius: var(--radius-control);
@@ -2065,6 +2059,20 @@ p,
   transition: box-shadow 0.16s ease, background-color 0.16s ease;
 }
 
+.el-input-number .el-input-number__decrease,
+.el-input-number .el-input-number__increase {
+  border-radius: var(--radius-control);
+  background: transparent;
+}
+
+.el-input-number .el-input-number__decrease {
+  border-radius: var(--radius-control) 0 0 var(--radius-control);
+}
+
+.el-input-number .el-input-number__increase {
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+}
+
 .el-input__wrapper:hover,
 .el-select__wrapper:hover {
   background: rgba(255, 255, 255, 0.82);
@@ -2109,6 +2117,550 @@ p,
 .chemssh-passive-tooltip {
   pointer-events: none;
   user-select: none;
+}
+
+/* Low effects mode: solid surfaces and explicit control states without
+   backdrop blur, fixed backgrounds, or large soft shadows. This keeps WebView2
+   GPU memory lower while preserving clear affordances for forms and buttons. */
+:root {
+  --app-bg: #e8eef3;
+  --panel-border: #ccd7df;
+  --panel-bg: #f8fbfd;
+  --panel-solid: #f7fafc;
+  --panel-raised: #ffffff;
+  --glass-bg: #f8fbfd;
+  --glass-strong: #f8fbfd;
+  --glass-border: #c5d0d9;
+  --soft-bg: #edf4f7;
+  --accent: #0e7490;
+  --accent-hover: #0b6078;
+  --accent-weak: #dceff4;
+  --row-selected-bg: #a8d4e3;
+  --row-selected-text: #073647;
+  --text-muted: #566777;
+  --shadow-sm: none;
+  --shadow-glass: none;
+  --ring: 0 0 0 2px rgba(14, 116, 144, 0.22);
+  --control-bg: #ffffff;
+  --control-bg-hover: #f1f7fa;
+  --control-border: #aebdc8;
+  --control-border-hover: #7f98a8;
+  --control-active: #e0f1f6;
+  --danger-bg: #fff5f4;
+  --danger-border: #e3a39d;
+}
+
+body,
+.browser-shell {
+  background: var(--app-bg);
+  background-attachment: scroll;
+}
+
+.topbar,
+.browser-chrome,
+.profile-sidebar,
+.launcher-main,
+.settings-section,
+.log-panel,
+.xftp-pane,
+.transfer-log,
+.transfer-panel,
+.toolbar-submenu,
+.sftp-context-menu,
+.canvas-file-drop-overlay,
+.upload-conflict-backdrop,
+.upload-conflict-dialog,
+.el-popper,
+.el-popover,
+.el-dropdown__popper .el-dropdown-menu {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.topbar,
+.browser-chrome,
+.panel-header,
+.launcher-toolbar,
+.logs-title,
+.xftp-tabs,
+.file-toolbar,
+.path-bar,
+.blank-page {
+  background: var(--panel-bg);
+}
+
+.profile-sidebar,
+.launcher-main,
+.settings-section,
+.log-panel,
+.xftp-pane,
+.transfer-log,
+.transfer-panel,
+.form-section,
+.cache-entry,
+.toolbar-submenu,
+.sftp-context-menu,
+.canvas-file-drop-overlay,
+.upload-conflict-dialog,
+.language-toggle,
+.brand-mark,
+.backend-row code,
+.path-button,
+.el-popper,
+.el-popover,
+.el-dropdown__popper .el-dropdown-menu {
+  box-shadow: none !important;
+}
+
+.header-actions .el-button.is-circle,
+.toolbar-actions .el-button.is-circle,
+.file-toolbar .el-button.is-circle,
+.topbar .el-button.is-circle,
+.browser-chrome .el-button.is-circle,
+.xftp-add-tab.el-button.is-circle,
+.el-button {
+  border-color: var(--control-border);
+  background: var(--control-bg);
+  color: #24313d;
+  box-shadow: none !important;
+}
+
+.header-actions .el-button.is-circle:hover,
+.header-actions .el-button.is-circle:focus-visible,
+.toolbar-actions .el-button.is-circle:not(.is-disabled):hover,
+.toolbar-actions .el-button.is-circle:not(.is-disabled):focus-visible,
+.file-toolbar .el-button.is-circle:not(.is-disabled):hover,
+.file-toolbar .el-button.is-circle:not(.is-disabled):focus-visible,
+.topbar .el-button.is-circle:hover,
+.topbar .el-button.is-circle:focus-visible,
+.browser-chrome .el-button.is-circle:hover,
+.browser-chrome .el-button.is-circle:focus-visible,
+.xftp-add-tab.el-button.is-circle:hover,
+.xftp-add-tab.el-button.is-circle:focus-visible,
+.el-button:not(.is-disabled):hover,
+.el-button:not(.is-disabled):focus-visible {
+  border-color: var(--control-border-hover);
+  background: var(--control-bg-hover);
+  color: var(--accent);
+  box-shadow: none !important;
+  transform: none;
+}
+
+.header-actions .el-button.is-circle:active,
+.toolbar-actions .el-button.is-circle:not(.is-disabled):active,
+.file-toolbar .el-button.is-circle:not(.is-disabled):active,
+.topbar .el-button.is-circle:active,
+.browser-chrome .el-button.is-circle:active,
+.xftp-add-tab.el-button.is-circle:active,
+.el-button:not(.is-disabled):active {
+  background: var(--control-active);
+  transform: none;
+}
+
+.header-actions .el-button--primary.is-circle,
+.toolbar-actions .el-button--primary.is-circle,
+.el-button--primary {
+  border-color: var(--accent);
+  background: var(--accent) !important;
+  color: #ffffff;
+}
+
+.header-actions .el-button--primary.is-circle:hover,
+.header-actions .el-button--primary.is-circle:focus-visible,
+.toolbar-actions .el-button--primary.is-circle:not(.is-disabled):hover,
+.toolbar-actions .el-button--primary.is-circle:not(.is-disabled):focus-visible,
+.el-button--primary:not(.is-disabled):hover,
+.el-button--primary:not(.is-disabled):focus-visible {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover) !important;
+  color: #ffffff;
+}
+
+.header-actions .el-button--danger.is-circle,
+.toolbar-actions .el-button--danger.is-circle,
+.el-button--danger {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.header-actions .el-button--danger.is-circle:hover,
+.header-actions .el-button--danger.is-circle:focus-visible,
+.toolbar-actions .el-button--danger.is-circle:not(.is-disabled):hover,
+.toolbar-actions .el-button--danger.is-circle:not(.is-disabled):focus-visible,
+.el-button--danger:not(.is-disabled):hover,
+.el-button--danger:not(.is-disabled):focus-visible {
+  border-color: var(--danger);
+  background: #ffeceb;
+  color: #8f1d15;
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-input-number .el-input__wrapper {
+  border: 1px solid var(--control-border);
+  background: var(--control-bg);
+  box-shadow: none !important;
+}
+
+.el-input-number .el-input-number__decrease,
+.el-input-number .el-input-number__increase {
+  border-radius: var(--radius-control);
+  background: transparent;
+}
+
+.el-input-number .el-input-number__decrease {
+  border-radius: var(--radius-control) 0 0 var(--radius-control);
+}
+
+.el-input-number .el-input-number__increase {
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+}
+
+.el-input__wrapper:hover,
+.el-select__wrapper:hover,
+.el-input-number .el-input__wrapper:hover {
+  border-color: var(--control-border-hover);
+  background: #ffffff;
+  box-shadow: none !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-input-number .el-input__wrapper.is-focus {
+  border-color: var(--accent);
+  outline: var(--ring);
+  box-shadow: none !important;
+}
+
+.el-segmented {
+  border: 1px solid var(--control-border);
+  background: #eaf2f6;
+  box-shadow: none !important;
+}
+
+.el-segmented .el-segmented__item {
+  color: #435565;
+}
+
+.el-segmented .el-segmented__item:not(.is-selected):hover {
+  color: var(--accent);
+  background: #f8fbfd;
+}
+
+.el-segmented .el-segmented__item.is-selected {
+  background: var(--accent) !important;
+  color: #ffffff;
+  box-shadow: none !important;
+}
+
+.language-toggle {
+  background: #eaf2f6;
+}
+
+.language-toggle button.is-active {
+  background: #ffffff;
+  color: #0f3d4b;
+  box-shadow: none;
+}
+
+.profile-card,
+.xftp-tab,
+.browser-tab,
+.cache-entry {
+  border-color: var(--panel-border);
+  background: #ffffff;
+  box-shadow: none !important;
+}
+
+.profile-card:hover,
+.profile-card:focus-visible,
+.xftp-tab:hover,
+.browser-tab:hover {
+  border-color: var(--control-border-hover);
+  background: var(--control-bg-hover);
+  box-shadow: none !important;
+  transform: none;
+}
+
+.profile-card.is-active,
+.xftp-tab.active,
+.browser-tab.active {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: #073647;
+  box-shadow: none !important;
+}
+
+.file-row:hover,
+.transfer-row:not(.transfer-row-header):hover {
+  background: #f0f6f9;
+}
+
+.file-row:focus-visible {
+  outline: var(--ring);
+  outline-offset: -2px;
+  box-shadow: none !important;
+}
+
+.file-row.is-selected,
+.transfer-row.is-selected {
+  border-left: 3px solid var(--accent);
+  background: var(--row-selected-bg);
+  color: var(--row-selected-text);
+  box-shadow: none !important;
+}
+
+.file-row.is-drag-export,
+.file-row.is-move-drop-target,
+.file-row.is-context-target,
+.file-row.is-drop-target {
+  outline: 2px solid var(--accent-2);
+  outline-offset: -2px;
+  box-shadow: none !important;
+}
+
+.state-dot.running {
+  outline: 3px solid rgba(22, 138, 69, 0.14);
+  box-shadow: none;
+}
+
+.upload-conflict-backdrop {
+  background: rgba(15, 23, 42, 0.24);
+}
+
+/* Visual polish for LauncherView / SftpView / BackendView (kept inside the
+   Low effects mode: solid surfaces, no backdrop-filter, no decorative
+   shadows, only transform/opacity animations). Higher specificity win for
+   rules that the low-effects section sets via !important. */
+.Launcherview-section.section-boundary,
+.form-section {
+  border-top: 3px solid var(--control-border);
+  padding-top: 14px;
+}
+.form-section > h3 {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 8px 0;
+}
+
+.dirty-label {
+  margin-right: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent-2);
+}
+.dirty-label::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.state-dot.running {
+  animation: state-dot-pulse 1.8s ease-in-out infinite;
+}
+@keyframes state-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .state-dot.running {
+    animation: none !important;
+  }
+}
+
+.empty-state {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+.empty-state.compact {
+  padding: 16px 12px;
+  border: 1px dashed var(--control-border);
+  border-radius: 8px;
+  background: var(--soft-bg);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+.transfer-empty {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.xftp-pane .xftp-tab {
+  border-left: 3px solid transparent;
+}
+.xftp-pane .xftp-tab.active {
+  border-bottom: 2px solid var(--accent);
+  border-bottom-color: var(--accent) !important;
+  border-left-color: var(--accent);
+  font-weight: 650;
+}
+
+.transfer-row-header {
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border-bottom-width: 2px;
+  border-bottom-color: var(--panel-border);
+  color: var(--text-muted);
+}
+.transfer-row-header > span:not(:last-child),
+.transfer-row-header > div:not(:last-child) {
+  border-right: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  margin-right: 6px;
+  background: var(--text-muted);
+  vertical-align: middle;
+}
+.status-dot.is-running { background: var(--accent); }
+.status-dot.is-done { background: var(--success); }
+.status-dot.is-error { background: var(--danger); }
+.status-dot.is-paused { background: var(--accent-2); }
+
+.backend-grid {
+  gap: 0;
+}
+.settings-section {
+  margin-right: 12px;
+  border-right: 1px solid var(--panel-border);
+  padding-right: 12px;
+}
+
+.settings-section .cache-entry {
+  border: 0;
+  border-left: 3px solid var(--control-border);
+  background: transparent;
+  border-radius: 0;
+  padding: 10px 0 10px 12px;
+}
+.settings-section .cache-entry-head strong {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.settings-section .path-button {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  background: var(--soft-bg);
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.action-group.danger {
+  margin-left: auto;
+}
+.backend-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+}
+.backend-actions > .el-button {
+  min-width: 0;
+  width: auto;
+  margin-left: 0;
+}
+
+:root {
+  --radius-panel: 16px;
+  --radius-control: 10px;
+  --surface-outer: #ecf1f5;
+  --surface-strip: #f3f8fa;
+  --rim-light: rgba(255, 255, 255, 0.55);
+  --rim-hairline: rgba(94, 111, 126, 0.18);
+  --row-hairline: rgba(20, 33, 43, 0.04);
+}
+
+/* Liquid-glass polish (low-cost variant): wider panes (16px), unified
+   controls (10px), single hairline rim-light as a substitute for
+   drop-shadow + backdrop-filter. No hover transforms, no extra
+   gradients. Borders + solid surfaces + typography only. */
+body,
+.browser-shell {
+  background: var(--surface-outer);
+}
+
+.panel-header,
+.launcher-toolbar,
+.logs-title,
+.xftp-tabs,
+.file-toolbar,
+.path-bar,
+.blank-page {
+  background: var(--surface-strip);
+}
+
+.profile-sidebar,
+.launcher-main,
+.settings-section,
+.log-panel,
+.xftp-pane,
+.transfer-log,
+.transfer-panel {
+  background: #ffffff;
+  border-top: 1px solid var(--rim-light);
+}
+
+.profile-card,
+.cache-entry,
+.form-section,
+.empty-state.compact {
+  border-radius: 12px;
+}
+
+.file-list-header {
+  background: var(--surface-strip);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.file-row {
+  border-bottom: 1px solid var(--row-hairline);
+}
+
+@media (max-width: 980px) {
+  .profile-sidebar,
+  .launcher-main,
+  .settings-section,
+  .log-panel,
+  .xftp-pane,
+  .transfer-panel {
+    border-radius: 12px;
+  }
 }
 
 @media (prefers-contrast: more) {

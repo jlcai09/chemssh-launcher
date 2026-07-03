@@ -47,6 +47,7 @@ type Profile struct {
 	StartCommand            string `json:"start_command"`
 	HealthCheckURL          string `json:"health_check_url"`
 	OpenBrowser             bool   `json:"open_browser"`
+	HasSecurityToken        bool   `json:"has_security_token"`
 }
 
 func NewProfileDefaults() Profile {

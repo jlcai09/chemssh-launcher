@@ -414,7 +414,7 @@ func (s *Server) chemSSHBridgeContext(r *http.Request, requireWorkspace bool) (c
 	if profile.IsLocal() {
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
-		identity, err := chemssh.FetchLocalIdentity(ctx, profile)
+		identity, err := chemssh.FetchLocalIdentity(ctx, profile, s.rt.Secrets)
 		if err != nil {
 			s.profileLog(profile.ID, "warning: could not read local ChemSSH identity for bridge: "+err.Error())
 			if !requireWorkspace {
@@ -446,7 +446,7 @@ func (s *Server) chemSSHBridgeContext(r *http.Request, requireWorkspace bool) (c
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	identity, err := chemssh.FetchIdentity(ctx, client, profile)
+	identity, err := chemssh.FetchIdentity(ctx, client, profile, s.rt.Secrets)
 	if err != nil {
 		s.profileLog(profile.ID, "warning: could not read ChemSSH identity for bridge: "+err.Error())
 		return config.Profile{}, "", err

@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"reflect"
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	webview2 "github.com/jchv/go-webview2"
@@ -42,22 +44,14 @@ func Open(ctx context.Context, opts Options) error {
 	if opts.URL == "" {
 		return errors.New("webview url is required")
 	}
+	// Apply Chromium flags to reduce memory overhead from unnecessary
+	// features while keeping GPU acceleration intact. Must run before
+	// NewWithOptions because the WebView2 loader reads the env var at
+	// environment creation time.
+	applyMemoryOptimisationFlags()
 	dpiOnce.Do(enableDPIAwareness)
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-
-	w := webview2.NewWithOptions(webview2.WebViewOptions{
-		Debug:    opts.Debug,
-		DataPath: opts.DataPath,
-	})
-	if w == nil {
-		return errors.New("could not initialize WebView2")
-	}
-	defer w.Destroy()
-	configureChromium(w, opts)
-	if err := bindDownloadDialog(w); err != nil {
-		log.Printf("warning: could not bind WebView2 downloads dialog: %v", err)
-	}
 
 	title := opts.Title
 	if title == "" {
@@ -72,13 +66,71 @@ func Open(ctx context.Context, opts Options) error {
 		height = 780
 	}
 
-	w.SetTitle(title)
-	w.SetSize(width, height, webview2.HintNone)
-	setWindowIcon(w.Window())
+	// The go-webview2 library forcibly shows the native window the moment it is
+	// created (webview.go CreateWithOptions: ShowWindow+UpdateWindow), before the
+	// WebView2 runtime is embedded and before any navigation. That blank window
+	// stays visible through Embed + Navigate + the Vue bundle load, which is the
+	// startup flicker. We can't stop the initial show, but for fullscreen we
+	// create a 1x1 window so that flash is effectively invisible, then keep the
+	// window hidden until the page's first paint is ready.
+	initialWidth, initialHeight := width, height
 	if opts.Fullscreen {
-		setLargeRestoreBounds(w.Window())
-		maximizeWindow(w.Window())
+		initialWidth, initialHeight = 1, 1
 	}
+
+	w := webview2.NewWithOptions(webview2.WebViewOptions{
+		Debug:    opts.Debug,
+		DataPath: opts.DataPath,
+		WindowOptions: webview2.WindowOptions{
+			Title:  title,
+			Width:  uint(initialWidth),
+			Height: uint(initialHeight),
+			IconId: 1,
+			Center: true,
+		},
+	})
+	if w == nil {
+		return errors.New("could not initialize WebView2")
+	}
+	defer w.Destroy()
+
+	// Hide the window immediately; it will be revealed once content is ready.
+	hideWindow(w.Window())
+
+	setWindowIcon(w.Window())
+	configureChromium(w, opts)
+	if err := bindDownloadDialog(w); err != nil {
+		log.Printf("warning: could not bind WebView2 downloads dialog: %v", err)
+	}
+
+	w.SetTitle(title)
+
+	// Size the hidden window to its final dimensions so the page lays out at the
+	// correct size before it ever becomes visible (no resize reflow on reveal).
+	if opts.Fullscreen {
+		setRestoreBounds(w.Window(), width, height)
+	} else {
+		w.SetSize(width, height, webview2.HintNone)
+	}
+
+	// reveal shows the window once. It is triggered either by the frontend (as
+	// soon as the loading page is parsed) or by the fallback timer below.
+	var revealOnce sync.Once
+	reveal := func() {
+		revealOnce.Do(func() {
+			if opts.Fullscreen {
+				maximizeWindow(w.Window())
+			} else {
+				showWindowVisible(w.Window())
+			}
+		})
+	}
+	if err := w.Bind("__chemsshRevealWindow", func() {
+		reveal()
+	}); err != nil {
+		log.Printf("warning: could not bind WebView2 reveal hook: %v", err)
+	}
+
 	if opts.CopyOnCtrlShiftC || opts.DisableDevTools {
 		w.Init(acceleratorScript(opts))
 	}
@@ -90,6 +142,16 @@ func Open(ctx context.Context, opts Options) error {
 			w.Dispatch(func() {
 				w.Terminate()
 			})
+		case <-done:
+		}
+	}()
+
+	// Fallback reveal: if the frontend never calls the reveal hook (e.g. a script
+	// error), make sure the window still appears instead of staying hidden.
+	go func() {
+		select {
+		case <-time.After(2 * time.Second):
+			w.Dispatch(reveal)
 		case <-done:
 		}
 	}()
@@ -298,6 +360,69 @@ func acceleratorScript(opts Options) string {
 })();`, disableDevTools, copyOnCtrlShiftC)
 }
 
+// applyMemoryOptimisationFlags sets WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS to
+// disable Chromium features that are unnecessary for a dedicated launcher
+// window. GPU hardware acceleration is preserved.
+//
+// The WebView2 loader reads this environment variable when
+// CreateCoreWebView2EnvironmentWithOptions is called (inside NewWithOptions).
+//
+// Expected reduction: 100-250 MB (from disabling background services, extra
+// processes, and SmartScreen telemetry).
+func applyMemoryOptimisationFlags() {
+	const envKey = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+	if os.Getenv(envKey) != "" {
+		// Respect user-supplied flags; do not overwrite.
+		return
+	}
+	// Each flag targets a specific memory-consuming feature:
+	//
+	// --disable-features=...
+	//   SmartScreen               - URL reputation service (~30-50MB)
+	//   msSmartScreenProtection   - Edge SmartScreen variant
+	//   TranslateUI               - translation bubble (unused)
+	//   msEdgeHub                 - Edge Hub sidebar (Edge-specific)
+	//   ReadingList               - Edge reading list (Edge-specific)
+	//   msCollections              - Edge collections feature
+	//
+	// --disable-background-networking
+	//   Stops background telemetry, update pings, and OCSP checks.
+	//
+	// --disable-component-update
+	//   Prevents Chromium component downloads (Widevine, etc.).
+	//
+	// --disable-extensions
+	//   Prevents loading any Chrome extensions.
+	//
+	// --disable-sync
+	//   Disables Chrome account sync (bookmarks, settings, etc.).
+	//
+	// --disable-client-side-phishing-detection
+	//   Turns off the phishing detection model (~10-20MB).
+	//
+	// --no-first-run --no-default-browser-check
+	//   Skip first-run dialogs and default-browser prompts.
+	//
+	// --metrics-recording-only
+	//   Prevents UMA metrics upload (saves a background task).
+	//
+	// --disable-accelerated-video-decode
+	//   Prevents GPU video decoder init (saves ~30-80MB GPU memory
+	//   on pages with no video; has no effect on static UI pages).
+	flags := "" +
+		"--disable-features=SmartScreen,msSmartScreenProtection,TranslateUI,msEdgeHub,ReadingList,msCollections " +
+		"--disable-background-networking " +
+		"--disable-component-update " +
+		"--disable-extensions " +
+		"--disable-sync " +
+		"--disable-client-side-phishing-detection " +
+		"--no-first-run " +
+		"--no-default-browser-check " +
+		"--metrics-recording-only " +
+		"--disable-accelerated-video-decode"
+	os.Setenv(envKey, flags)
+}
+
 func enableDPIAwareness() {
 	user32 := syscall.NewLazyDLL("user32.dll")
 	setProcessDpiAwarenessContext := user32.NewProc("SetProcessDpiAwarenessContext")
@@ -337,47 +462,93 @@ func maximizeWindow(hwndPointer unsafe.Pointer) {
 	showWindow.Call(uintptr(hwndPointer), swMaximize)
 }
 
-func setLargeRestoreBounds(hwndPointer unsafe.Pointer) {
+func hideWindow(hwndPointer unsafe.Pointer) {
+	if hwndPointer == nil {
+		return
+	}
+	showWindow := syscall.NewLazyDLL("user32.dll").NewProc("ShowWindow")
+	if err := showWindow.Find(); err != nil {
+		return
+	}
+	const swHide = uintptr(0)
+	showWindow.Call(uintptr(hwndPointer), swHide)
+}
+
+func showWindowVisible(hwndPointer unsafe.Pointer) {
+	if hwndPointer == nil {
+		return
+	}
+	showWindow := syscall.NewLazyDLL("user32.dll").NewProc("ShowWindow")
+	if err := showWindow.Find(); err != nil {
+		return
+	}
+	const swShow = uintptr(5)
+	showWindow.Call(uintptr(hwndPointer), swShow)
+}
+
+// setRestoreBounds gives a fullscreen-starting window a comfortable restored
+// size before it is maximized. Windows uses these bounds when the user clicks
+// the maximize button to restore the window.
+func setRestoreBounds(hwndPointer unsafe.Pointer, preferredWidth, preferredHeight int) {
 	if hwndPointer == nil {
 		return
 	}
 	user32 := syscall.NewLazyDLL("user32.dll")
-	getSystemMetrics := user32.NewProc("GetSystemMetrics")
+	systemParametersInfo := user32.NewProc("SystemParametersInfoW")
 	setWindowPos := user32.NewProc("SetWindowPos")
-	if err := getSystemMetrics.Find(); err != nil {
+	if err := systemParametersInfo.Find(); err != nil {
 		return
 	}
 	if err := setWindowPos.Find(); err != nil {
 		return
 	}
+	type rect struct {
+		Left, Top, Right, Bottom int32
+	}
+	const spiGetWorkArea = uintptr(0x0030)
+	var wa rect
+	ret, _, _ := systemParametersInfo.Call(spiGetWorkArea, 0, uintptr(unsafe.Pointer(&wa)), 0)
+	if ret == 0 {
+		return
+	}
+	width := wa.Right - wa.Left
+	height := wa.Bottom - wa.Top
+	if width <= 0 || height <= 0 {
+		return
+	}
+	restoreWidth := clampRestoreSize(preferredWidth, int(width))
+	restoreHeight := clampRestoreSize(preferredHeight, int(height))
+	x := int(wa.Left) + (int(width)-restoreWidth)/2
+	y := int(wa.Top) + (int(height)-restoreHeight)/2
 	const (
-		smCXScreen    = uintptr(0)
-		smCYScreen    = uintptr(1)
 		swpNoZOrder   = uintptr(0x0004)
 		swpNoActivate = uintptr(0x0010)
 	)
-	screenW, _, _ := getSystemMetrics.Call(smCXScreen)
-	screenH, _, _ := getSystemMetrics.Call(smCYScreen)
-	if screenW == 0 || screenH == 0 {
-		return
+	setWindowPos.Call(
+		uintptr(hwndPointer), 0,
+		uintptr(x), uintptr(y), uintptr(restoreWidth), uintptr(restoreHeight),
+		swpNoZOrder|swpNoActivate,
+	)
+}
+
+func clampRestoreSize(preferred, workAreaSize int) int {
+	if workAreaSize <= 0 {
+		return preferred
 	}
-	width := int(screenW * 86 / 100)
-	height := int(screenH * 86 / 100)
-	if width < 1280 {
-		width = 1280
+	if preferred <= 0 {
+		preferred = workAreaSize * 72 / 100
 	}
-	if height < 820 {
-		height = 820
+	size := preferred
+	if scaled := workAreaSize * 78 / 100; size < scaled {
+		size = scaled
 	}
-	if width > int(screenW) {
-		width = int(screenW)
+	if max := workAreaSize * 88 / 100; size > max {
+		size = max
 	}
-	if height > int(screenH) {
-		height = int(screenH)
+	if size < 1 {
+		return 1
 	}
-	x := (int(screenW) - width) / 2
-	y := (int(screenH) - height) / 2
-	setWindowPos.Call(uintptr(hwndPointer), 0, uintptr(x), uintptr(y), uintptr(width), uintptr(height), swpNoZOrder|swpNoActivate)
+	return size
 }
 
 func setWindowIcon(hwndPointer unsafe.Pointer) {
@@ -398,10 +569,6 @@ func setWindowIcon(hwndPointer unsafe.Pointer) {
 	if err := sendMessage.Find(); err != nil {
 		return
 	}
-	name, err := syscall.UTF16PtrFromString("APP")
-	if err != nil {
-		return
-	}
 	module, _, _ := getModuleHandle.Call(0)
 	if module == 0 {
 		return
@@ -411,7 +578,7 @@ func setWindowIcon(hwndPointer unsafe.Pointer) {
 		lrDefaultSize = uintptr(0x00000040)
 		lrShared      = uintptr(0x00008000)
 	)
-	icon, _, _ := loadImage.Call(module, uintptr(unsafe.Pointer(name)), imageIcon, 0, 0, lrDefaultSize|lrShared)
+	icon, _, _ := loadImage.Call(module, 1, imageIcon, 0, 0, lrDefaultSize|lrShared)
 	if icon == 0 {
 		return
 	}

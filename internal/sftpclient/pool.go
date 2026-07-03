@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -16,10 +17,10 @@ import (
 )
 
 const (
-	poolMinSize         = 2                 // 最小连接数
-	poolMaxSize         = 3                 // 最大连接数
-	healthCheckInterval = 30 * time.Second  // 健康检查间隔
-	idleTimeout         = 5 * time.Minute   // 空闲超时
+	poolMinSize         = 2                // 最小连接数
+	poolMaxSize         = 3                // 最大连接数
+	healthCheckInterval = 30 * time.Second // 健康检查间隔
+	idleTimeout         = 5 * time.Minute  // 空闲超时
 )
 
 // connectionPool manages a pool of SFTP connections for a single profile
@@ -28,20 +29,40 @@ type connectionPool struct {
 	secrets    secret.Store
 	policy     sshclient.HostKeyPolicy
 	mu         sync.Mutex
-	sshClient  *ssh.Client        // 共享的 SSH 连接
-	conns      []*pooledConn      // 连接池
-	available  chan *pooledConn   // 可用连接队列
-	refs       int                // 引用计数
+	sshClient  *ssh.Client      // 共享的 SSH 连接
+	conns      []*pooledConn    // 连接池
+	available  chan *pooledConn // 可用连接队列
+	refs       int              // 引用计数
 	closed     bool
 	healthStop context.CancelFunc
 }
 
 // pooledConn represents a single SFTP connection in the pool
 type pooledConn struct {
-	client     *sftp.Client
-	lastUsed   time.Time
-	inUse      bool
-	failed     bool
+	client   *sftp.Client
+	lastUsed time.Time
+	inUse    bool
+	failed   bool
+}
+
+// pooledReadCloser wraps an io.ReadCloser and releases the pool connection when closed.
+// This is necessary because Download() returns a streaming reader that outlives the
+// function call; releasing the connection too early would allow another goroutine to
+// reuse the same SFTP client concurrently, causing protocol-level data corruption.
+type pooledReadCloser struct {
+	io.ReadCloser
+	pool *connectionPool
+	conn *pooledConn
+	once sync.Once
+}
+
+func (p *pooledReadCloser) Close() error {
+	err := p.ReadCloser.Close()
+	p.once.Do(func() {
+		p.conn.lastUsed = time.Now()
+		p.pool.release(p.conn)
+	})
+	return err
 }
 
 // newConnectionPool creates a new connection pool for the given profile
@@ -213,33 +234,41 @@ func (p *connectionPool) healthCheck() {
 
 	now := time.Now()
 
-	// 检查所有连接
+	// Collect connections to remove in a first pass to avoid mutating the slice
+	// while iterating over it. Modifying p.conns during a range loop causes
+	// elements to shift and be skipped.
+	var toRemove []*pooledConn
 	for _, conn := range p.conns {
-		// 跳过正在使用的连接
 		if conn.inUse {
 			continue
 		}
 
 		// 关闭空闲超时的连接
-		if now.Sub(conn.lastUsed) > idleTimeout && len(p.conns) > poolMinSize {
-			p.removeConnection(conn)
+		if now.Sub(conn.lastUsed) > idleTimeout && len(p.conns)-len(toRemove) > poolMinSize {
+			toRemove = append(toRemove, conn)
 			continue
 		}
 
 		// 健康检查
 		if !p.isConnectionAlive(conn) {
 			conn.failed = true
-			p.removeConnection(conn)
-
-			// 如果低于最小连接数，尝试重新创建
-			if len(p.conns) < poolMinSize {
-				newConn, err := p.createConnection()
-				if err == nil {
-					p.conns = append(p.conns, newConn)
-					p.available <- newConn
-				}
-			}
+			toRemove = append(toRemove, conn)
 		}
+	}
+
+	// Remove all unhealthy/idle connections after the iteration completes.
+	for _, conn := range toRemove {
+		p.removeConnection(conn)
+	}
+
+	// Replenish if the pool dropped below the minimum size.
+	for len(p.conns) < poolMinSize {
+		newConn, err := p.createConnection()
+		if err != nil {
+			break
+		}
+		p.conns = append(p.conns, newConn)
+		p.available <- newConn
 	}
 }
 

@@ -1,8 +1,14 @@
 package gui
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,29 +46,43 @@ import (
 var assets embed.FS
 
 type Server struct {
-	rt             *runtime.Runtime
-	mux            *http.ServeMux
-	logs           *safeLog
-	profileLogs    *profileLogStore
-	localLog       *safeLog
-	sftp           *sftpclient.Manager
-	sftpSync       *sftpOpenSyncManager
-	icons          *fileicon.Service
-	transfers      *transferProgressStore
-	options        Options
-	baseURL        string
-	mu             sync.Mutex
-	session        *activeSession
-	sessions       map[string]*activeSession
-	proxyProfileID string
-	sessionOpenSeq uint64
-	bridge         chemSSHBridgeState
-	clientIdentity launcherClientIdentity
-	shutdown       context.CancelFunc
+	rt                       *runtime.Runtime
+	mux                      *http.ServeMux
+	logs                     *safeLog
+	profileLogs              *profileLogStore
+	localLog                 *safeLog
+	sftp                     *sftpclient.Manager
+	sftpSync                 *sftpOpenSyncManager
+	icons                    *fileicon.Service
+	iconsOnce                sync.Once
+	transfers                *transferProgressStore
+	apiToken                 string
+	options                  Options
+	baseURL                  string
+	mu                       sync.Mutex
+	session                  *activeSession
+	sessions                 map[string]*activeSession
+	proxyProfileID           string
+	sessionOpenSeq           uint64
+	bridge                   chemSSHBridgeState
+	clientIdentity           launcherClientIdentity
+	shutdown                 context.CancelFunc
+	browserShutdownOnce      sync.Once
+	browserClients           map[string]time.Time
+	browserClientSeen        bool
+	browserClientsEmptySince time.Time
 	// activeTransferCount is updated by the frontend via /api/transfer-count.
 	// It tracks how many transfer tasks are currently running.
 	activeTransferCount atomic.Int32
 }
+
+const (
+	browserClientCheckInterval = time.Second
+	browserClientStaleAfter    = 75 * time.Second
+	browserClientGoneGrace     = 10 * time.Second
+	launcherAPITokenCookie     = "chemssh_launcher_token"
+	launcherAPITokenHeader     = "X-ChemSSH-Launcher-Token"
+)
 
 type Options struct {
 	UseWebView   bool
@@ -129,6 +149,9 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	}
 	server := NewServer(rt)
 	server.options = options
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	server.shutdown = serverCancel
+	defer serverCancel()
 	clientIdentity, err := loadOrCreateDefaultLauncherClientIdentity()
 	if err != nil {
 		return err
@@ -201,7 +224,16 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 		fmt.Fprintln(stderr, "warning: could not open browser:", err)
 	}
 
-	err = <-errCh
+	server.startBrowserClientWatchdog(serverCtx)
+
+	select {
+	case err = <-errCh:
+	case <-serverCtx.Done():
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = httpServer.Shutdown(ctx)
+		cancel()
+		err = <-errCh
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -210,15 +242,16 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 
 func NewServer(rt *runtime.Runtime) *Server {
 	s := &Server{
-		rt:          rt,
-		mux:         http.NewServeMux(),
-		logs:        &safeLog{},
-		profileLogs: newProfileLogStore(),
-		localLog:    &safeLog{},
-		sftp:        sftpclient.NewManager(),
-		icons:       fileicon.NewService(),
-		transfers:   newTransferProgressStore(),
-		sessions:    map[string]*activeSession{},
+		rt:             rt,
+		mux:            http.NewServeMux(),
+		logs:           &safeLog{},
+		profileLogs:    newProfileLogStore(),
+		localLog:       &safeLog{},
+		sftp:           sftpclient.NewManager(),
+		transfers:      newTransferProgressStore(),
+		apiToken:       newLauncherAPIToken(),
+		sessions:       map[string]*activeSession{},
+		browserClients: map[string]time.Time{},
 	}
 	s.sftpSync = newSFTPOpenSyncManager(s.sftp, s.logs)
 	s.routes()
@@ -238,79 +271,160 @@ func (s *Server) routes() {
 	s.mux.Handle("/static/", staticGzipHandler(http.FileServer(http.FS(assets))))
 
 	// Launcher API endpoints with gzip compression (for JSON responses)
-	s.mux.HandleFunc("/api/profiles", gzipHandler(s.handleProfiles))
-	s.mux.HandleFunc("/api/profiles/", gzipHandler(s.handleProfileByID))
-	s.mux.HandleFunc("/api/profile-test", gzipHandler(s.handleProfileTest))
-	s.mux.HandleFunc("/api/session/start", gzipHandler(s.handleStart))
-	s.mux.HandleFunc("/api/session/stop", gzipHandler(s.handleStop))
-	s.mux.HandleFunc("/api/session/stop-service", gzipHandler(s.handleStopService))
-	s.mux.HandleFunc("/api/session/status", gzipHandler(s.handleStatus))
-	s.mux.HandleFunc("/api/logs", s.handleLogs) // No gzip: small payload, high frequency
-	s.mux.HandleFunc("/api/logs/stream", s.handleLogsStream) // SSE endpoint for real-time logs
+	s.mux.HandleFunc("/api/profiles", s.apiHandler(gzipHandler(s.handleProfiles)))
+	s.mux.HandleFunc("/api/profiles/", s.apiHandler(gzipHandler(s.handleProfileByID)))
+	s.mux.HandleFunc("/api/profile-test", s.apiHandler(gzipHandler(s.handleProfileTest)))
+	s.mux.HandleFunc("/api/session/start", s.apiHandler(gzipHandler(s.handleStart)))
+	s.mux.HandleFunc("/api/session/stop", s.apiHandler(gzipHandler(s.handleStop)))
+	s.mux.HandleFunc("/api/session/stop-service", s.apiHandler(gzipHandler(s.handleStopService)))
+	s.mux.HandleFunc("/api/session/status", s.apiHandler(gzipHandler(s.handleStatus)))
+	s.mux.HandleFunc("/api/logs", s.apiHandler(s.handleLogs))              // No gzip: small payload, high frequency
+	s.mux.HandleFunc("/api/logs/stream", s.apiHandler(s.handleLogsStream)) // SSE endpoint for real-time log streaming
 
 	// SFTP API - list operations benefit from compression
-	s.mux.HandleFunc("/api/sftp/connect", gzipHandler(s.handleSFTPConnect))
-	s.mux.HandleFunc("/api/sftp/disconnect", gzipHandler(s.handleSFTPDisconnect))
-	s.mux.HandleFunc("/api/sftp/list", gzipHandler(s.handleSFTPList))
-	s.mux.HandleFunc("/api/sftp/mkdir", gzipHandler(s.handleSFTPMkdir))
-	s.mux.HandleFunc("/api/sftp/create-file", gzipHandler(s.handleSFTPCreateFile))
-	s.mux.HandleFunc("/api/sftp/rename", gzipHandler(s.handleSFTPRename))
-	s.mux.HandleFunc("/api/sftp/delete", gzipHandler(s.handleSFTPDelete))
+	s.mux.HandleFunc("/api/sftp/connect", s.apiHandler(gzipHandler(s.handleSFTPConnect)))
+	s.mux.HandleFunc("/api/sftp/disconnect", s.apiHandler(gzipHandler(s.handleSFTPDisconnect)))
+	s.mux.HandleFunc("/api/sftp/list", s.apiHandler(gzipHandler(s.handleSFTPList)))
+	s.mux.HandleFunc("/api/sftp/mkdir", s.apiHandler(gzipHandler(s.handleSFTPMkdir)))
+	s.mux.HandleFunc("/api/sftp/create-file", s.apiHandler(gzipHandler(s.handleSFTPCreateFile)))
+	s.mux.HandleFunc("/api/sftp/rename", s.apiHandler(gzipHandler(s.handleSFTPRename)))
+	s.mux.HandleFunc("/api/sftp/delete", s.apiHandler(gzipHandler(s.handleSFTPDelete)))
 
 	// SFTP upload/download - no compression (binary data)
-	s.mux.HandleFunc("/api/sftp/upload", s.handleSFTPUpload)
-	s.mux.HandleFunc("/api/sftp/download", s.handleSFTPDownload)
+	s.mux.HandleFunc("/api/sftp/upload", s.apiHandler(s.handleSFTPUpload))
+	s.mux.HandleFunc("/api/sftp/download", s.apiHandler(s.handleSFTPDownload))
 
-	s.mux.HandleFunc("/api/sftp/open", gzipHandler(s.handleSFTPOpen))
-	s.mux.HandleFunc("/api/sftp/open-text", gzipHandler(s.handleSFTPOpenText))
-	s.mux.HandleFunc("/api/sftp/open-sync-events", gzipHandler(s.handleSFTPOpenSyncEvents))
+	s.mux.HandleFunc("/api/sftp/open", s.apiHandler(gzipHandler(s.handleSFTPOpen)))
+	s.mux.HandleFunc("/api/sftp/open-text", s.apiHandler(gzipHandler(s.handleSFTPOpenText)))
+	s.mux.HandleFunc("/api/sftp/open-sync-events", s.apiHandler(gzipHandler(s.handleSFTPOpenSyncEvents)))
 
 	// ChemSSH Bridge API
-	s.mux.HandleFunc("/api/chemssh-bridge/capabilities", gzipHandler(s.handleChemSSHBridgeCapabilities))
-	s.mux.HandleFunc("/api/chemssh-bridge/client-identity", gzipHandler(s.handleChemSSHBridgeClientIdentity))
-	s.mux.HandleFunc("/api/chemssh-bridge/open", gzipHandler(s.handleChemSSHBridgeOpen))
-	s.mux.HandleFunc("/api/chemssh-bridge/open-text", gzipHandler(s.handleChemSSHBridgeOpenText))
-	s.mux.HandleFunc("/api/chemssh-bridge/open-sync-events", gzipHandler(s.handleChemSSHBridgeOpenSyncEvents))
+	s.mux.HandleFunc("/api/chemssh-bridge/capabilities", s.apiHandler(gzipHandler(s.handleChemSSHBridgeCapabilities)))
+	s.mux.HandleFunc("/api/chemssh-bridge/client-identity", s.apiHandler(gzipHandler(s.handleChemSSHBridgeClientIdentity)))
+	s.mux.HandleFunc("/api/chemssh-bridge/open", s.apiHandler(gzipHandler(s.handleChemSSHBridgeOpen)))
+	s.mux.HandleFunc("/api/chemssh-bridge/open-text", s.apiHandler(gzipHandler(s.handleChemSSHBridgeOpenText)))
+	s.mux.HandleFunc("/api/chemssh-bridge/open-sync-events", s.apiHandler(gzipHandler(s.handleChemSSHBridgeOpenSyncEvents)))
 
 	// SFTP local operations
-	s.mux.HandleFunc("/api/sftp/upload-local", s.handleSFTPUploadLocal)
-	s.mux.HandleFunc("/api/sftp/download-local", s.handleSFTPDownloadLocal)
-	s.mux.HandleFunc("/api/sftp/copy-remote", gzipHandler(s.handleSFTPCopyRemote))
+	s.mux.HandleFunc("/api/sftp/upload-local", s.apiHandler(s.handleSFTPUploadLocal))
+	s.mux.HandleFunc("/api/sftp/download-local", s.apiHandler(s.handleSFTPDownloadLocal))
+	s.mux.HandleFunc("/api/sftp/copy-remote", s.apiHandler(gzipHandler(s.handleSFTPCopyRemote)))
 
 	// Local file API
-	s.mux.HandleFunc("/api/local/home", gzipHandler(s.handleLocalHome))
-	s.mux.HandleFunc("/api/local/list", gzipHandler(s.handleLocalList))
-	s.mux.HandleFunc("/api/local/mkdir", gzipHandler(s.handleLocalMkdir))
-	s.mux.HandleFunc("/api/local/create-file", gzipHandler(s.handleLocalCreateFile))
-	s.mux.HandleFunc("/api/local/rename", gzipHandler(s.handleLocalRename))
-	s.mux.HandleFunc("/api/local/delete", gzipHandler(s.handleLocalDelete))
-	s.mux.HandleFunc("/api/local/copy", gzipHandler(s.handleLocalCopy))
-	s.mux.HandleFunc("/api/local/open", gzipHandler(s.handleLocalOpen))
-	s.mux.HandleFunc("/api/local/open-text", gzipHandler(s.handleLocalOpenText))
+	s.mux.HandleFunc("/api/local/home", s.apiHandler(gzipHandler(s.handleLocalHome)))
+	s.mux.HandleFunc("/api/local/list", s.apiHandler(gzipHandler(s.handleLocalList)))
+	s.mux.HandleFunc("/api/local/mkdir", s.apiHandler(gzipHandler(s.handleLocalMkdir)))
+	s.mux.HandleFunc("/api/local/create-file", s.apiHandler(gzipHandler(s.handleLocalCreateFile)))
+	s.mux.HandleFunc("/api/local/rename", s.apiHandler(gzipHandler(s.handleLocalRename)))
+	s.mux.HandleFunc("/api/local/delete", s.apiHandler(gzipHandler(s.handleLocalDelete)))
+	s.mux.HandleFunc("/api/local/copy", s.apiHandler(gzipHandler(s.handleLocalCopy)))
+	s.mux.HandleFunc("/api/local/open", s.apiHandler(gzipHandler(s.handleLocalOpen)))
+	s.mux.HandleFunc("/api/local/open-text", s.apiHandler(gzipHandler(s.handleLocalOpenText)))
 
-	// File icon - PNG already compressed, no gzip needed
-	s.mux.HandleFunc("/api/file-icon", s.handleFileIcon)
+	// File icon - PNG already compressed, no gzip needed (lazy init)
+	s.mux.HandleFunc("/api/file-icon", s.apiHandler(s.handleFileIcon))
 
 	// Transfer operations
-	s.mux.HandleFunc("/api/transfer-progress", gzipHandler(s.handleTransferProgress))
-	s.mux.HandleFunc("/api/transfer-control", gzipHandler(s.handleTransferControl))
+	s.mux.HandleFunc("/api/transfer-progress", s.apiHandler(gzipHandler(s.handleTransferProgress)))
+	s.mux.HandleFunc("/api/transfer-control", s.apiHandler(gzipHandler(s.handleTransferControl)))
 
 	// Backend operations
-	s.mux.HandleFunc("/api/launcher-logs", gzipHandler(s.handleLauncherLogs))
-	s.mux.HandleFunc("/api/backend", gzipHandler(s.handleBackendInfo))
-	s.mux.HandleFunc("/api/backend/open-config-dir", gzipHandler(s.handleOpenConfigDir))
-	s.mux.HandleFunc("/api/backend/open-sftp-cache-dir", gzipHandler(s.handleOpenSFTPCacheDir))
-	s.mux.HandleFunc("/api/backend/export", s.handleExportProfiles) // JSON download, no gzip
-	s.mux.HandleFunc("/api/backend/import", gzipHandler(s.handleImportProfiles))
-	s.mux.HandleFunc("/api/backend/clear-cache", gzipHandler(s.handleClearCache))
+	s.mux.HandleFunc("/api/launcher-logs", s.apiHandler(gzipHandler(s.handleLauncherLogs)))
+	s.mux.HandleFunc("/api/backend", s.apiHandler(gzipHandler(s.handleBackendInfo)))
+	s.mux.HandleFunc("/api/backend/open-config-dir", s.apiHandler(gzipHandler(s.handleOpenConfigDir)))
+	s.mux.HandleFunc("/api/backend/open-sftp-cache-dir", s.apiHandler(gzipHandler(s.handleOpenSFTPCacheDir)))
+	s.mux.HandleFunc("/api/backend/export", s.apiHandler(s.handleExportProfiles)) // JSON download, no gzip
+	s.mux.HandleFunc("/api/backend/import", s.apiHandler(gzipHandler(s.handleImportProfiles)))
+	s.mux.HandleFunc("/api/backend/clear-cache", s.apiHandler(gzipHandler(s.handleClearCache)))
 
 	// Misc API
-	s.mux.HandleFunc("/api/version", gzipHandler(s.handleVersion))
-	s.mux.HandleFunc("/api/defaults", gzipHandler(s.handleDefaults))
-	s.mux.HandleFunc("/api/transfer-count", gzipHandler(s.handleTransferCount))
+	s.mux.HandleFunc("/api/version", s.apiHandler(gzipHandler(s.handleVersion)))
+	s.mux.HandleFunc("/api/defaults", s.apiHandler(gzipHandler(s.handleDefaults)))
+	s.mux.HandleFunc("/api/transfer-count", s.apiHandler(gzipHandler(s.handleTransferCount)))
+	s.mux.HandleFunc("/api/browser-client/heartbeat", s.apiHandler(gzipHandler(s.handleBrowserClientHeartbeat)))
+	s.mux.HandleFunc("/api/browser-client/close", s.apiHandler(gzipHandler(s.handleBrowserClientClose)))
 
 	// ChemSSH proxy - keep transparent, no compression
 	s.mux.HandleFunc("/api/", s.handleChemSSHProxy)
+}
+
+func newLauncherAPIToken() string {
+	var data [32]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		panic("generate launcher API token: " + err.Error())
+	}
+	return hex.EncodeToString(data[:])
+}
+
+func (s *Server) apiHandler(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.setLauncherAPITokenCookie(w)
+		if launcherAPIMethodRequiresToken(r.Method) {
+			if err := s.validateLauncherAPIRequest(r); err != nil {
+				writeError(w, http.StatusForbidden, err)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+func launcherAPIMethodRequiresToken(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *Server) setLauncherAPITokenCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     launcherAPITokenCookie,
+		Value:    s.apiToken,
+		Path:     "/",
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (s *Server) validateLauncherAPIRequest(r *http.Request) error {
+	if err := validateLauncherAPIOrigin(r); err != nil {
+		return err
+	}
+	headerToken := r.Header.Get(launcherAPITokenHeader)
+	cookie, err := r.Cookie(launcherAPITokenCookie)
+	if err != nil || headerToken == "" || s.apiToken == "" {
+		return errors.New("missing launcher API token")
+	}
+	if !constantTimeTokenEqual(headerToken, s.apiToken) || !constantTimeTokenEqual(cookie.Value, s.apiToken) {
+		return errors.New("invalid launcher API token")
+	}
+	return nil
+}
+
+func validateLauncherAPIOrigin(r *http.Request) error {
+	// Browser requests normally include Origin/Sec-Fetch-Site. Empty Origin is
+	// allowed for desktop or non-browser clients; the cookie/header token pair
+	// remains the required write-authority proof.
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Host, r.Host) {
+			return errors.New("invalid launcher API origin")
+		}
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return nil
+	default:
+		return errors.New("cross-site launcher API request rejected")
+	}
+}
+
+func constantTimeTokenEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +464,7 @@ func (s *Server) handleLauncherLogsPage(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) serveVueApp(w http.ResponseWriter, r *http.Request) {
+	s.setLauncherAPITokenCookie(w)
 	if file, err := assets.Open("static/vue/index.html"); err == nil {
 		_ = file.Close()
 		http.ServeFileFS(w, r, assets, "static/vue/index.html")
@@ -419,6 +534,7 @@ func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.rt.Secrets.Delete(id, secret.KeyPassword)
 		_ = s.rt.Secrets.Delete(id, secret.KeyPrivatePassphrase)
+		_ = s.rt.Secrets.Delete(id, secret.KeySecurityToken)
 		writeJSON(w, map[string]bool{"ok": true}, nil)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -474,25 +590,26 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start the remote session asynchronously to avoid blocking the HTTP response
-	// This allows the frontend to immediately start polling for logs
 	policy := sshclient.HostKeyStrict
 	if req.AcceptHostKey {
 		policy = sshclient.HostKeyAcceptNew
 	}
 
-	go s.startRemoteSessionAsync(p, policy, sessionLog)
-	writeJSON(w, map[string]bool{"ok": true}, nil)
-}
-
-func (s *Server) startRemoteSessionAsync(p config.Profile, policy sshclient.HostKeyPolicy, sessionLog io.Writer) {
 	client, err := sshclient.DialWithHostKeyPolicy(p, s.rt.Secrets, policy)
 	if err != nil {
 		s.profileLog(p.ID, "SSH connection failed for "+p.Name+": "+err.Error())
+		writeSSHError(w, err)
 		return
 	}
 	s.profileLog(p.ID, "SSH connection OK for "+p.Name)
 
+	// Continue asynchronously after host-key verification so the frontend can
+	// receive and confirm unknown fingerprints before startup is queued.
+	go s.startRemoteSessionAsync(p, client, sessionLog)
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, sessionLog io.Writer) {
 	check, err := sshclient.RunCheckPortCommand(client, p, sessionLog, sessionLog)
 	if err != nil {
 		_ = client.Close()
@@ -549,9 +666,6 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, policy sshclient.Host
 	s.mu.Unlock()
 
 	s.profileLog(p.ID, "starting "+p.Name+" at "+p.BrowserURL())
-	if p.OpenBrowser {
-		s.openSessionURL(p)
-	}
 	if process != nil {
 		go s.watchRemoteProcess(session)
 	}
@@ -618,9 +732,6 @@ func (s *Server) startLocalSession(w http.ResponseWriter, p config.Profile) {
 	if cmd != nil {
 		go s.watchLocalProcess(session, cmd)
 	}
-	if p.OpenBrowser {
-		s.openSessionURL(p)
-	}
 	go s.waitForLocalHealth(session, p, healthCtx)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
@@ -646,15 +757,12 @@ func (s *Server) restartLocalSessionIfPaused(p config.Profile) (bool, error) {
 	s.mu.Unlock()
 
 	go s.waitForLocalHealth(session, p, healthCtx)
-	if p.OpenBrowser {
-		s.openSessionURL(p)
-	}
 	s.profileLog(p.ID, "local ChemSSH forwarding restored for "+p.BrowserURL())
 	return true, nil
 }
 
 func (s *Server) waitForLocalHealth(session *activeSession, p config.Profile, ctx context.Context) {
-	if err := netcheck.WaitForURL(ctx, p.HealthURL(), 90*time.Second, time.Second); err != nil {
+	if err := s.waitForProfileHealth(ctx, p, 90*time.Second, time.Second); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
 		}
@@ -665,12 +773,15 @@ func (s *Server) waitForLocalHealth(session *activeSession, p config.Profile, ct
 	s.profileLog(p.ID, "local health check OK: "+p.HealthURL())
 	s.markSessionReady(session)
 	s.refreshLocalIdentity(session, p)
+	if p.OpenBrowser {
+		s.openSessionURL(p)
+	}
 }
 
 func (s *Server) localHealthReady(p config.Profile, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return netcheck.WaitForURL(ctx, p.HealthURL(), timeout, timeout) == nil
+	return netcheck.WaitForURL(ctx, s.healthURLWithToken(p), timeout, timeout) == nil
 }
 
 func startLocalCommand(p config.Profile, stdout, stderr io.Writer) (*exec.Cmd, error) {
@@ -845,15 +956,12 @@ func (s *Server) restartForwardingIfPaused(p config.Profile) (bool, error) {
 	s.mu.Unlock()
 
 	go s.waitForRestartedForwardingHealth(session, p, healthCtx)
-	if p.OpenBrowser {
-		s.openSessionURL(p)
-	}
 	s.profileLog(p.ID, "forwarding restarted for "+p.BrowserURL())
 	return true, nil
 }
 
 func (s *Server) waitForRestartedForwardingHealth(session *activeSession, p config.Profile, ctx context.Context) {
-	if err := netcheck.WaitForURL(ctx, p.HealthURL(), 90*time.Second, time.Second); err != nil {
+	if err := s.waitForProfileHealth(ctx, p, 90*time.Second, time.Second); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
 		}
@@ -864,10 +972,13 @@ func (s *Server) waitForRestartedForwardingHealth(session *activeSession, p conf
 	s.profileLog(p.ID, "health check OK: "+p.HealthURL())
 	s.markSessionReady(session)
 	s.refreshRemoteIdentity(session, p)
+	if p.OpenBrowser {
+		s.openSessionURL(p)
+	}
 }
 
 func (s *Server) waitForRemoteHealth(session *activeSession, p config.Profile, ctx context.Context) {
-	if err := netcheck.WaitForURL(ctx, p.HealthURL(), 90*time.Second, time.Second); err != nil {
+	if err := s.waitForProfileHealth(ctx, p, 90*time.Second, time.Second); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
 		}
@@ -878,6 +989,9 @@ func (s *Server) waitForRemoteHealth(session *activeSession, p config.Profile, c
 	s.profileLog(p.ID, "health check OK: "+p.HealthURL())
 	s.markSessionReady(session)
 	s.refreshRemoteIdentity(session, p)
+	if p.OpenBrowser {
+		s.openSessionURL(p)
+	}
 }
 
 func (s *Server) markSessionReady(session *activeSession) {
@@ -907,7 +1021,7 @@ func (s *Server) refreshRemoteIdentity(session *activeSession, p config.Profile)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	identity, err := chemssh.FetchIdentity(ctx, client, p)
+	identity, err := chemssh.FetchIdentity(ctx, client, p, s.rt.Secrets)
 	if err != nil {
 		s.profileLog(p.ID, "warning: could not read ChemSSH identity: "+err.Error())
 		return
@@ -932,7 +1046,7 @@ func (s *Server) refreshLocalIdentity(session *activeSession, p config.Profile) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	identity, err := chemssh.FetchLocalIdentity(ctx, p)
+	identity, err := chemssh.FetchLocalIdentity(ctx, p, s.rt.Secrets)
 	if err != nil {
 		s.profileLog(p.ID, "warning: could not read local ChemSSH identity: "+err.Error())
 		return
@@ -1235,6 +1349,7 @@ func (s *Server) rewriteChemSSHProxyRequest(r *http.Request, target *url.URL, se
 	query.Del("launcher_open_seq")
 	req.URL.RawQuery = query.Encode()
 	s.applyLauncherClientIdentity(req)
+	s.applySecurityToken(req, session)
 	return req
 }
 
@@ -1249,6 +1364,49 @@ func (s *Server) applyLauncherClientIdentity(req *http.Request) {
 		query.Set("client_id", clientID)
 		req.URL.RawQuery = query.Encode()
 	}
+}
+
+func (s *Server) applySecurityToken(req *http.Request, session *activeSession) {
+	if session == nil || s.rt == nil || s.rt.Secrets == nil {
+		return
+	}
+	token, ok, err := s.rt.Secrets.Get(session.profile.ID, secret.KeySecurityToken)
+	if err != nil || !ok || token == "" {
+		return
+	}
+	req.Header.Set("X-ChemSSH-Token", token)
+	if isTerminalWebSocketPath(req.URL.Path) {
+		query := req.URL.Query()
+		query.Set("token", token)
+		req.URL.RawQuery = query.Encode()
+	}
+}
+
+func (s *Server) healthURLWithToken(p config.Profile) string {
+	baseURL := p.HealthURL()
+	if s.rt == nil || s.rt.Secrets == nil {
+		return baseURL
+	}
+	token, ok, err := s.rt.Secrets.Get(p.ID, secret.KeySecurityToken)
+	if err != nil || !ok || token == "" {
+		return baseURL
+	}
+	separator := "?"
+	if strings.Contains(baseURL, "?") {
+		separator = "&"
+	}
+	return baseURL + separator + "token=" + url.QueryEscape(token)
+}
+
+func (s *Server) waitForProfileHealth(ctx context.Context, p config.Profile, timeout, interval time.Duration) error {
+	options := netcheck.HealthOptions{}
+	if p.HasSecurityToken {
+		options.RejectStatuses = map[int]string{
+			http.StatusUnauthorized: "ChemSSH rejected the configured security token",
+			http.StatusForbidden:    "ChemSSH rejected the configured security token",
+		}
+	}
+	return netcheck.WaitForURLWithOptions(ctx, s.healthURLWithToken(p), timeout, interval, options)
 }
 
 func isTerminalWebSocketPath(path string) bool {
@@ -1301,16 +1459,108 @@ func (s *Server) newChemSSHReverseProxy(target *url.URL, session *activeSession)
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		location := resp.Header.Get("Location")
-		if location == "" {
-			return nil
+		if location != "" {
+			rewritten := rewriteChemSSHLocationHeader(location, target, session)
+			if rewritten != "" {
+				resp.Header.Set("Location", rewritten)
+			}
 		}
-		rewritten := rewriteChemSSHLocationHeader(location, target, session)
-		if rewritten != "" {
-			resp.Header.Set("Location", rewritten)
-		}
+		// Inject a self-healing guard into proxied HTML so that a transient
+		// failure to load a dynamically-imported module (which we cannot fully
+		// eliminate — ChemSSH may briefly drop an asset request right after the
+		// session becomes ready) automatically reloads the page once instead of
+		// leaving the SPA on a dead "Failed to fetch dynamically imported
+		// module" screen that needs a manual refresh.
+		injectChemSSHImportReloader(resp)
 		return nil
 	}
 	return proxy
+}
+
+// chemsshImportReloaderScript is injected into the <head> of proxied ChemSSH
+// HTML documents. It listens for window "error" events that indicate a failed
+// dynamic import() (Vite/ESM surfaces these as uncaught TypeErrors whose
+// message contains "Failed to fetch dynamically imported module") and reloads
+// the page exactly once, so a settling-upstream blip self-heals instead of
+// stranding the user on a blank page.
+const chemsshImportReloaderScript = `<script>(function(){if(sessionStorage.getItem('__chemsshReloaded')){sessionStorage.removeItem('__chemsshReloaded');return;}var reloaded=false;function isImportError(ev){var msg=(ev&&ev.message)||'';if(/Failed to fetch dynamically imported module/.test(msg))return true;if(ev&&ev.error&&/Failed to fetch dynamically imported module/.test(ev.error.message||''))return true;return false;}window.addEventListener('error',function(ev){if(reloaded)return;if(!isImportError(ev))return;reloaded=true;try{sessionStorage.setItem('__chemsshReloaded','1');}catch(e){}try{window.location.reload();}catch(e){}},{capture:true});window.addEventListener('unhandledrejection',function(ev){if(reloaded)return;var msg=(ev&&ev.reason&&(ev.reason.message||ev.reason))||'';if(/Failed to fetch dynamically imported module/.test(String(msg))){reloaded=true;try{sessionStorage.setItem('__chemsshReloaded','1');}catch(e){}try{window.location.reload();}catch(e){}}},{capture:true});})();</script>`
+
+// injectChemSSHImportReloader inserts chemsshImportReloaderScript right after
+// the opening <head> tag of an HTML response. Non-HTML responses, compressed
+// encodings we cannot safely decompress, and responses without a readable
+// body are passed through untouched. It recomputes Content-Length and strips
+// Content-Encoding so the browser does not see a truncated body (which would
+// itself look like a failed module load).
+func injectChemSSHImportReloader(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		return
+	}
+	raw, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(nil))
+		return
+	}
+
+	body, err := decodeBody(raw, resp.Header.Get("Content-Encoding"))
+	if err != nil {
+		// Cannot safely decompress — pass the original bytes through untouched.
+		resp.Body = io.NopCloser(bytes.NewReader(raw))
+		return
+	}
+
+	injected := injectAfterHeadOpen(body, chemsshImportReloaderScript)
+	resp.Body = io.NopCloser(bytes.NewReader(injected))
+	resp.ContentLength = int64(len(injected))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(injected)))
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Transfer-Encoding")
+}
+
+// decodeBody reverses common HTTP content encodings so the HTML can be
+// inspected and rewritten. Identity (or empty) and gzip/deflate are supported;
+// anything else (brotli, zstd, ...) returns an error so the caller leaves the
+// body untouched rather than corrupting it.
+func decodeBody(raw []byte, encoding string) ([]byte, error) {
+	encoding = strings.ToLower(strings.TrimSpace(encoding))
+	switch encoding {
+	case "", "identity":
+		return raw, nil
+	case "gzip":
+		r, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		defer r.Close()
+		return io.ReadAll(r)
+	case "deflate":
+		return io.ReadAll(flate.NewReader(bytes.NewReader(raw)))
+	default:
+		return nil, errors.New("unsupported content encoding: " + encoding)
+	}
+}
+
+// injectAfterHeadOpen inserts snippet immediately after the first <head ...>
+// opening tag in body. If no <head> tag is present, the snippet is prepended.
+func injectAfterHeadOpen(body []byte, snippet string) []byte {
+	headIdx := bytes.Index(bytes.ToLower(body), []byte("<head"))
+	if headIdx < 0 {
+		return append([]byte(snippet), body...)
+	}
+	closeIdx := bytes.IndexByte(body[headIdx:], '>')
+	if closeIdx < 0 {
+		return append([]byte(snippet), body...)
+	}
+	insertAt := headIdx + closeIdx + 1
+	out := make([]byte, 0, len(body)+len(snippet))
+	out = append(out, body[:insertAt]...)
+	out = append(out, []byte(snippet)...)
+	out = append(out, body[insertAt:]...)
+	return out
 }
 
 func rewriteChemSSHLocationHeader(location string, target *url.URL, session *activeSession) string {
@@ -1367,7 +1617,7 @@ func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, errors.New("local ChemSSH target host and port are required"))
 			return
 		}
-		if err := netcheck.WaitForURL(r.Context(), p.HealthURL(), 3*time.Second, 500*time.Millisecond); err != nil {
+		if err := s.waitForProfileHealth(r.Context(), p, 3*time.Second, 500*time.Millisecond); err != nil {
 			s.profileLog(p.ID, "local ChemSSH test failed for "+p.Name+": "+err.Error())
 			writeError(w, http.StatusBadGateway, err)
 			return
@@ -1531,7 +1781,7 @@ func (s *Server) stopForwarding(profileID string) {
 	}
 	if session.process == nil && session.remotePID <= 0 && client != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-		identity, err := chemssh.FetchIdentity(ctx, client, session.profile)
+		identity, err := chemssh.FetchIdentity(ctx, client, session.profile, s.rt.Secrets)
 		cancel()
 		if err == nil {
 			s.mu.Lock()
@@ -1602,7 +1852,7 @@ func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
 		pid := session.remotePID
 		if pid <= 0 && client != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-			identity, err := chemssh.FetchIdentity(ctx, client, profile)
+			identity, err := chemssh.FetchIdentity(ctx, client, profile, s.rt.Secrets)
 			cancel()
 			if err != nil {
 				s.profileLog(profile.ID, "warning: could not read ChemSSH identity before stopping: "+err.Error())
@@ -1630,6 +1880,67 @@ func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
 	} else {
 		s.profileLog(profile.ID, "session resources stopped")
 	}
+}
+
+func (s *Server) stopAllLocalLauncherResources() {
+	s.mu.Lock()
+	sessions := make([]*activeSession, 0, len(s.sessions))
+	seen := map[*activeSession]struct{}{}
+	for _, session := range s.sessions {
+		if session == nil {
+			continue
+		}
+		if _, ok := seen[session]; ok {
+			continue
+		}
+		seen[session] = struct{}{}
+		sessions = append(sessions, session)
+	}
+	if s.session != nil {
+		if _, ok := seen[s.session]; !ok {
+			sessions = append(sessions, s.session)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, session := range sessions {
+		s.stopLocalLauncherResources(session)
+	}
+}
+
+func (s *Server) stopLocalLauncherResources(session *activeSession) {
+	s.mu.Lock()
+	if !s.sessionStillActiveLocked(session) {
+		s.mu.Unlock()
+		return
+	}
+	s.removeSessionLocked(session)
+	session.stopping = true
+	tunnel := session.tunnel
+	localProcess := session.localProcess
+	healthStop := session.healthStop
+	profile := session.profile
+	session.tunnel = nil
+	session.process = nil
+	session.localProcess = nil
+	session.client = nil
+	session.healthStop = nil
+	session.forwarding = false
+	session.ready = false
+	s.mu.Unlock()
+
+	s.closeChemSSHBridgeSessionForProfile(profile.ID)
+	if healthStop != nil {
+		healthStop()
+	}
+	if tunnel != nil {
+		_ = tunnel.Close()
+	}
+	if profile.IsLocal() && localProcess != nil {
+		stopLocalProcess(localProcess)
+		s.profileLog(profile.ID, "local ChemSSH command stopped")
+	}
+	s.profileLog(profile.ID, "launcher resources stopped; remote ChemSSH service was left untouched")
 }
 
 func stopLocalProcess(cmd *exec.Cmd) {
@@ -1717,6 +2028,120 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		url = s.sessionProxyURL(profile, openSeq)
 	}
 	writeJSON(w, map[string]any{"running": running, "forwarding": forwarding, "id": id, "name": name, "url": url, "open_browser": openBrowser, "open_seq": openSeq}, nil)
+}
+
+type browserClientRequest struct {
+	ID string `json:"id"`
+}
+
+func (s *Server) handleBrowserClientHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	id := browserClientIDFromRequest(r)
+	if id == "" {
+		writeError(w, http.StatusBadRequest, errors.New("missing browser client id"))
+		return
+	}
+	s.noteBrowserClient(id, time.Now())
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) handleBrowserClientClose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	id := browserClientIDFromRequest(r)
+	if id != "" {
+		s.forgetBrowserClient(id, time.Now())
+	}
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
+func (s *Server) noteBrowserClient(id string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.browserClients == nil {
+		s.browserClients = map[string]time.Time{}
+	}
+	s.browserClients[id] = now
+	s.browserClientSeen = true
+	s.browserClientsEmptySince = time.Time{}
+}
+
+func (s *Server) forgetBrowserClient(id string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.browserClients, id)
+	if s.browserClientSeen && len(s.browserClients) == 0 && s.browserClientsEmptySince.IsZero() {
+		s.browserClientsEmptySince = now
+	}
+}
+
+func (s *Server) startBrowserClientWatchdog(ctx context.Context) {
+	ticker := time.NewTicker(browserClientCheckInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if s.browserClientsGoneLongEnough(now) {
+					s.shutdownAfterBrowserClientsGone()
+					return
+				}
+			}
+		}
+	}()
+}
+
+func (s *Server) browserClientsGoneLongEnough(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, seenAt := range s.browserClients {
+		if now.Sub(seenAt) > browserClientStaleAfter {
+			delete(s.browserClients, id)
+		}
+	}
+	if !s.browserClientSeen || len(s.browserClients) > 0 {
+		s.browserClientsEmptySince = time.Time{}
+		return false
+	}
+	if s.browserClientsEmptySince.IsZero() {
+		s.browserClientsEmptySince = now
+		return false
+	}
+	return now.Sub(s.browserClientsEmptySince) >= browserClientGoneGrace
+}
+
+func (s *Server) shutdownAfterBrowserClientsGone() {
+	s.browserShutdownOnce.Do(func() {
+		s.localLog.add("browser launcher page closed; stopping local launcher resources")
+		s.stopAllLocalLauncherResources()
+		s.sftp.CloseAll()
+		s.sftpSync.CloseAll()
+		s.closeChemSSHBridgeSession()
+		if s.shutdown != nil {
+			s.shutdown()
+		}
+	})
+}
+
+func browserClientIDFromRequest(r *http.Request) string {
+	if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+		return id
+	}
+	if r.Body == nil {
+		return ""
+	}
+	var req browserClientRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(req.ID)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -1864,6 +2289,7 @@ func (s *Server) handleImportProfiles(w http.ResponseWriter, r *http.Request) {
 	for _, profile := range profiles {
 		_ = s.rt.Secrets.Delete(profile.ID, secret.KeyPassword)
 		_ = s.rt.Secrets.Delete(profile.ID, secret.KeyPrivatePassphrase)
+		_ = s.rt.Secrets.Delete(profile.ID, secret.KeySecurityToken)
 		if err := s.rt.Profiles.Save(profile); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -1907,10 +2333,12 @@ type profileRequest struct {
 }
 
 type secretRequest struct {
-	PasswordAction   string `json:"password_action"`
-	Password         string `json:"password"`
-	PassphraseAction string `json:"passphrase_action"`
-	Passphrase       string `json:"passphrase"`
+	PasswordAction      string `json:"password_action"`
+	Password            string `json:"password"`
+	PassphraseAction    string `json:"passphrase_action"`
+	Passphrase          string `json:"passphrase"`
+	SecurityTokenAction string `json:"security_token_action"`
+	SecurityToken       string `json:"security_token"`
 }
 
 func (s *Server) saveProfileWithSecrets(p config.Profile, req secretRequest) error {
@@ -1924,52 +2352,67 @@ func (s *Server) saveProfileWithSecrets(p config.Profile, req secretRequest) err
 		p.HasPrivateKeyPassphrase = false
 		_ = s.rt.Secrets.Delete(p.ID, secret.KeyPassword)
 		_ = s.rt.Secrets.Delete(p.ID, secret.KeyPrivatePassphrase)
-		return s.rt.Profiles.Save(p)
-	}
-	if p.AuthMethod == config.AuthPassword {
-		switch req.PasswordAction {
-		case "replace":
-			started := time.Now()
-			if err := s.rt.Secrets.Set(p.ID, secret.KeyPassword, req.Password); err != nil {
-				return err
+	} else {
+		if p.AuthMethod == config.AuthPassword {
+			switch req.PasswordAction {
+			case "replace":
+				started := time.Now()
+				if err := s.rt.Secrets.Set(p.ID, secret.KeyPassword, req.Password); err != nil {
+					return err
+				}
+				s.profileLog(p.ID, "password saved to secret store in "+time.Since(started).Round(time.Millisecond).String())
+				p.HasPassword = true
+			case "clear":
+				started := time.Now()
+				if err := s.rt.Secrets.Delete(p.ID, secret.KeyPassword); err != nil {
+					return err
+				}
+				s.profileLog(p.ID, "password cleared from secret store in "+time.Since(started).Round(time.Millisecond).String())
+				p.HasPassword = false
+			case "keep":
 			}
-			s.profileLog(p.ID, "password saved to secret store in "+time.Since(started).Round(time.Millisecond).String())
-			p.HasPassword = true
-		case "clear":
-			started := time.Now()
-			if err := s.rt.Secrets.Delete(p.ID, secret.KeyPassword); err != nil {
-				return err
-			}
-			s.profileLog(p.ID, "password cleared from secret store in "+time.Since(started).Round(time.Millisecond).String())
-			p.HasPassword = false
-		case "keep":
-			p.HasPassword = p.HasPassword
-		}
-		_ = s.rt.Secrets.Delete(p.ID, secret.KeyPrivatePassphrase)
-		p.HasPrivateKeyPassphrase = false
-		p.PrivateKeyPath = ""
-	}
-	if p.AuthMethod == config.AuthPrivateKey {
-		switch req.PassphraseAction {
-		case "replace":
-			started := time.Now()
-			if err := s.rt.Secrets.Set(p.ID, secret.KeyPrivatePassphrase, req.Passphrase); err != nil {
-				return err
-			}
-			s.profileLog(p.ID, "private key passphrase saved to secret store in "+time.Since(started).Round(time.Millisecond).String())
-			p.HasPrivateKeyPassphrase = true
-		case "clear":
-			started := time.Now()
-			if err := s.rt.Secrets.Delete(p.ID, secret.KeyPrivatePassphrase); err != nil {
-				return err
-			}
-			s.profileLog(p.ID, "private key passphrase cleared from secret store in "+time.Since(started).Round(time.Millisecond).String())
+			_ = s.rt.Secrets.Delete(p.ID, secret.KeyPrivatePassphrase)
 			p.HasPrivateKeyPassphrase = false
-		case "keep":
-			p.HasPrivateKeyPassphrase = p.HasPrivateKeyPassphrase
+			p.PrivateKeyPath = ""
 		}
-		_ = s.rt.Secrets.Delete(p.ID, secret.KeyPassword)
-		p.HasPassword = false
+		if p.AuthMethod == config.AuthPrivateKey {
+			switch req.PassphraseAction {
+			case "replace":
+				started := time.Now()
+				if err := s.rt.Secrets.Set(p.ID, secret.KeyPrivatePassphrase, req.Passphrase); err != nil {
+					return err
+				}
+				s.profileLog(p.ID, "private key passphrase saved to secret store in "+time.Since(started).Round(time.Millisecond).String())
+				p.HasPrivateKeyPassphrase = true
+			case "clear":
+				started := time.Now()
+				if err := s.rt.Secrets.Delete(p.ID, secret.KeyPrivatePassphrase); err != nil {
+					return err
+				}
+				s.profileLog(p.ID, "private key passphrase cleared from secret store in "+time.Since(started).Round(time.Millisecond).String())
+				p.HasPrivateKeyPassphrase = false
+			case "keep":
+			}
+			_ = s.rt.Secrets.Delete(p.ID, secret.KeyPassword)
+			p.HasPassword = false
+		}
+	}
+	switch req.SecurityTokenAction {
+	case "replace":
+		started := time.Now()
+		if err := s.rt.Secrets.Set(p.ID, secret.KeySecurityToken, req.SecurityToken); err != nil {
+			return err
+		}
+		s.profileLog(p.ID, "security token saved to secret store in "+time.Since(started).Round(time.Millisecond).String())
+		p.HasSecurityToken = true
+	case "clear":
+		started := time.Now()
+		if err := s.rt.Secrets.Delete(p.ID, secret.KeySecurityToken); err != nil {
+			return err
+		}
+		s.profileLog(p.ID, "security token cleared from secret store in "+time.Since(started).Round(time.Millisecond).String())
+		p.HasSecurityToken = false
+	case "keep":
 	}
 	return s.rt.Profiles.Save(p)
 }

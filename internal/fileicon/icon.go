@@ -20,14 +20,14 @@ type cacheEntry struct {
 }
 
 type Service struct {
-	mu       sync.RWMutex
-	cache    map[string]*list.Element
-	lruList  *list.List
-	maxSize  int
-	failed   map[string]bool // negative cache: keys that failed to load
-	loadMu   sync.Mutex      // serialises Windows SHGetFileInfoW calls for thread safety
-	hits     int64           // cache hit counter
-	misses   int64           // cache miss counter
+	mu      sync.Mutex
+	cache   map[string]*list.Element
+	lruList *list.List
+	maxSize int
+	failed  map[string]bool // negative cache: keys that failed to load
+	loadMu  sync.Mutex      // serialises Windows SHGetFileInfoW calls for thread safety
+	hits    int64           // cache hit counter
+	misses  int64           // cache miss counter
 }
 
 func NewService() *Service {
@@ -41,8 +41,8 @@ func NewService() *Service {
 
 // CacheStats returns cache hit rate for monitoring
 func (s *Service) CacheStats() (hits, misses int64, size int) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.hits, s.misses, s.lruList.Len()
 }
 
@@ -50,17 +50,20 @@ func (s *Service) IconPNG(name string, isDir bool, size int) ([]byte, error) {
 	size = normalizeSize(size)
 	key := cacheKey(name, isDir, size)
 
-	// Try to get from cache
-	s.mu.RLock()
+	// Try to get from cache.
+	// NOTE: A plain read lock is not safe here because MoveToFront and hits++
+	// are both writes; using a full mutex avoids linked-list corruption when
+	// multiple goroutines hit the cache concurrently.
+	s.mu.Lock()
 	if elem, ok := s.cache[key]; ok {
 		s.hits++
 		s.lruList.MoveToFront(elem)
 		data := elem.Value.(*cacheEntry).data
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		return data, nil
 	}
 	wasFailed := s.failed[key]
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
 	// Cache miss
 	s.mu.Lock()

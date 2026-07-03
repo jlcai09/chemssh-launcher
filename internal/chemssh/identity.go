@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"chemssh-launcher/internal/config"
+	"chemssh-launcher/internal/secret"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -21,7 +22,7 @@ type Identity struct {
 	WorkspaceRoot  string `json:"workspace_root"`
 }
 
-func FetchIdentity(ctx context.Context, client *ssh.Client, profile config.Profile) (Identity, error) {
+func FetchIdentity(ctx context.Context, client *ssh.Client, profile config.Profile, secrets secret.Store) (Identity, error) {
 	if client == nil {
 		return Identity{}, fmt.Errorf("ssh client is not available")
 	}
@@ -34,6 +35,7 @@ func FetchIdentity(ctx context.Context, client *ssh.Client, profile config.Profi
 	if err != nil {
 		return Identity{}, err
 	}
+	applySecurityToken(req, profile.ID, secrets)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return Identity{}, fmt.Errorf("fetch ChemSSH identity: %w", err)
@@ -42,19 +44,28 @@ func FetchIdentity(ctx context.Context, client *ssh.Client, profile config.Profi
 	return decodeIdentity(resp, "remote")
 }
 
-func FetchLocalIdentity(ctx context.Context, profile config.Profile) (Identity, error) {
+func FetchLocalIdentity(ctx context.Context, profile config.Profile, secrets secret.Store) (Identity, error) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 	url := "http://" + profile.LocalAddress() + "/api/system/identity"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Identity{}, err
 	}
+	applySecurityToken(req, profile.ID, secrets)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return Identity{}, fmt.Errorf("fetch local ChemSSH identity: %w", err)
 	}
 	defer resp.Body.Close()
 	return decodeIdentity(resp, "local")
+}
+
+func applySecurityToken(req *http.Request, profileID string, secrets secret.Store) {
+	token, ok, err := secrets.Get(profileID, secret.KeySecurityToken)
+	if err != nil || !ok || token == "" {
+		return
+	}
+	req.Header.Set("X-ChemSSH-Token", token)
 }
 
 func decodeIdentity(resp *http.Response, scope string) (Identity, error) {

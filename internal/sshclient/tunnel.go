@@ -13,6 +13,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// tunnelBufferSize is the per-connection copy buffer for the tunnel.
+// 256 KB reduces syscall overhead on high-latency SSH links.
+const tunnelBufferSize = 256 * 1024
+
 type Tunnel struct {
 	listener net.Listener
 	client   *ssh.Client
@@ -125,7 +129,8 @@ func (t *Tunnel) closeActiveConnections() {
 }
 
 func copyAndClose(dst, src net.Conn, done chan<- struct{}) {
-	_, _ = io.Copy(dst, src)
+	buf := make([]byte, tunnelBufferSize)
+	_, _ = io.CopyBuffer(dst, src, buf)
 	_ = dst.Close()
 	_ = src.Close()
 	done <- struct{}{}

@@ -1,11 +1,15 @@
 package gui
 
 import (
+	"bytes"
+	"compress/gzip"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -164,5 +168,129 @@ func TestRewriteChemSSHProxyRequestAppliesLauncherClientIdentityToTerminalWebSoc
 	}
 	if got := rewritten.Header.Get("X-ChemSSH-Client-Id"); got != "client_launcher_stable" {
 		t.Fatalf("client id header = %q, want stable launcher id", got)
+	}
+}
+
+func TestInjectAfterHeadOpen(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"plain head", "<html><head><title>x</title></head><body></body></html>"},
+		{"head with attributes", `<!doctype html><html lang="en"><head data-x="1"><meta charset="utf-8">`},
+		{"no head", "<html><body></body></html>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := injectAfterHeadOpen([]byte(tt.body), "SNIPPET")
+			if !bytes.Contains(out, []byte("SNIPPET")) {
+				t.Fatalf("snippet not injected: %s", out)
+			}
+			// Removing the snippet must reconstruct the original body.
+			reconstructed := bytes.ReplaceAll(out, []byte("SNIPPET"), nil)
+			if !bytes.Equal(reconstructed, []byte(tt.body)) {
+				t.Fatalf("original body content lost: got %s", reconstructed)
+			}
+		})
+	}
+}
+
+func TestInjectChemSSHImportReloaderPlainHTML(t *testing.T) {
+	body := []byte("<html><head><title>x</title></head><body></body></html>")
+	resp := &http.Response{
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+
+	injectChemSSHImportReloader(resp)
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("__chemsshReloaded")) {
+		t.Fatalf("reloader script not injected: %s", got)
+	}
+	if resp.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("Content-Encoding should be stripped, got %q", resp.Header.Get("Content-Encoding"))
+	}
+	wantLen := strconv.Itoa(len(got))
+	if got := resp.Header.Get("Content-Length"); got != wantLen {
+		t.Fatalf("Content-Length = %q, want %s", got, wantLen)
+	}
+	if int64(len(got)) != resp.ContentLength {
+		t.Fatalf("ContentLength = %d, want %d", resp.ContentLength, len(got))
+	}
+}
+
+func TestInjectChemSSHImportReloaderGzip(t *testing.T) {
+	original := []byte("<html><head><title>g</title></head><body></body></html>")
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := &http.Response{
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(buf.Bytes())),
+		ContentLength: int64(buf.Len()),
+	}
+	resp.Header.Set("Content-Type", "text/html")
+	resp.Header.Set("Content-Encoding", "gzip")
+
+	injectChemSSHImportReloader(resp)
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("__chemsshReloaded")) {
+		t.Fatalf("reloader script not injected after gzip decode: %s", got)
+	}
+	if !bytes.Contains(got, []byte("<title>g</title>")) {
+		t.Fatalf("original content lost after gzip decode: %s", got)
+	}
+	if resp.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("Content-Encoding should be stripped for gzip, got %q", resp.Header.Get("Content-Encoding"))
+	}
+}
+
+func TestInjectChemSSHImportReloaderSkipsNonHTML(t *testing.T) {
+	body := []byte("function(){}")
+	resp := &http.Response{
+		Header: http.Header{},
+		Body:   io.NopCloser(bytes.NewReader(body)),
+	}
+	resp.Header.Set("Content-Type", "application/javascript")
+
+	injectChemSSHImportReloader(resp)
+
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, body) {
+		t.Fatalf("non-HTML body should be untouched, got %s", got)
+	}
+}
+
+func TestInjectChemSSHImportReloaderSkipsUnsupportedEncoding(t *testing.T) {
+	// A brotli-encoded body we cannot decode: original bytes must pass through.
+	body := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+	resp := &http.Response{
+		Header: http.Header{},
+		Body:   io.NopCloser(bytes.NewReader(body)),
+	}
+	resp.Header.Set("Content-Type", "text/html")
+	resp.Header.Set("Content-Encoding", "br")
+
+	injectChemSSHImportReloader(resp)
+
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, body) {
+		t.Fatalf("unsupported encoding body should be untouched, got %v", got)
 	}
 }

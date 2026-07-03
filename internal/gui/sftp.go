@@ -214,7 +214,8 @@ func (s *Server) handleSFTPDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": info.Name}))
-	if _, err := io.Copy(w, file); err != nil {
+	buf := make([]byte, copyBufferSize)
+	if _, err := io.CopyBuffer(w, file, buf); err != nil {
 		s.logs.add("SFTP download failed while streaming: " + err.Error())
 		return
 	}
@@ -251,7 +252,8 @@ func (s *Server) handleSFTPOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	if _, err := io.Copy(localFile, remote); err != nil {
+	buf := make([]byte, copyBufferSize)
+	if _, err := io.CopyBuffer(localFile, remote, buf); err != nil {
 		_ = localFile.Close()
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -338,7 +340,8 @@ func (s *Server) cacheSFTPFile(sessionID, remotePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(localFile, remote); err != nil {
+	buf := make([]byte, copyBufferSize)
+	if _, err := io.CopyBuffer(localFile, remote, buf); err != nil {
 		_ = localFile.Close()
 		return "", err
 	}
@@ -443,7 +446,8 @@ func (s *Server) handleSFTPDownloadLocal(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	src := s.progressReader(req.TransferID, info.Size, remote)
-	if _, err := io.Copy(localFile, src); err != nil {
+	buf := make([]byte, copyBufferSize)
+	if _, err := io.CopyBuffer(localFile, src, buf); err != nil {
 		_ = localFile.Close()
 		s.finishProgress(req.TransferID, err)
 		writeError(w, http.StatusBadGateway, err)

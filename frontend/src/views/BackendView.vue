@@ -50,9 +50,13 @@
           <p v-if="!(info.cache_entries || []).length" class="empty">{{ t('backend.noCacheEntries') }}</p>
         </div>
         <div class="editor-actions backend-actions">
-          <el-button :icon="Download" @click="exportProfiles">{{ t('backend.export') }}</el-button>
-          <el-button :icon="Upload" @click="pickImport">{{ t('backend.import') }}</el-button>
-          <el-button :icon="Delete" type="danger" @click="clearCache">{{ t('backend.clearCache') }}</el-button>
+          <div class="action-group">
+            <el-button :icon="Download" @click="exportProfiles">{{ t('backend.export') }}</el-button>
+            <el-button :icon="Upload" @click="pickImport">{{ t('backend.import') }}</el-button>
+          </div>
+          <div class="action-group danger">
+            <el-button :icon="Delete" type="danger" @click="clearCache">{{ t('backend.clearCache') }}</el-button>
+          </div>
           <input ref="importInput" class="hidden-input" type="file" accept="application/json,.json" @change="importProfiles" />
         </div>
         <el-alert v-if="notice" class="backend-notice" :title="notice" :type="noticeType" show-icon :closable="false" />

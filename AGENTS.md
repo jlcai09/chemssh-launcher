@@ -80,6 +80,7 @@ type Profile struct {
     StartCommand             string `json:"start_command"`
     HealthCheckURL           string `json:"health_check_url"`
     OpenBrowser              bool   `json:"open_browser"`
+    HasSecurityToken         bool   `json:"has_security_token"`
 }
 ```
 
@@ -97,6 +98,7 @@ Preferred implementation:
   - service: `chemssh-launcher`
   - username: `<profile-id>:password`
   - username: `<profile-id>:key-passphrase`
+  - username: `<profile-id>:security-token`
 
 Fallback if keyring is unavailable:
 
@@ -221,20 +223,23 @@ Prompt defaults:
 
 ## Build Configuration
 
-Default release builds (two versions):
+Default release builds (three recommended variants):
 
 ```bash
-go run ./tools/build                              # Standard CLI/console executable
-go run ./tools/build --webview2 --windowsgui      # WebView2 GUI executable (no console window)
+# Browser mode (opens in system browser)
+go run ./tools/build --windowsgui                 # Standard browser mode, no console
+
+# WebView2 mode (embedded browser window)
+go run ./tools/build --webview2 --windowsgui      # WebView2 mode, no console (best UX)
+go run ./tools/build --webview2                   # WebView2 mode with console (for debugging)
 ```
 
-Debug builds:
+The build tool enables size and startup speed optimizations by default. Use `--no-optimize` to disable for debugging.
 
-```bash
-go run ./tools/build --webview2                   # WebView2 executable (with console window, for debugging only)
-```
-
-The standard release consists of two executables: the CLI version and the WebView2 GUI version (no console).
+**Version comparison**:
+- **Browser mode**: Uses system browser, lighter weight, easier to debug network requests
+- **WebView2 mode**: Embedded window, better integration, smoother user experience
+- **`--windowsgui`**: Hides console window, cleaner for end users, harder to debug startup issues
 
 ## Code Organization
 

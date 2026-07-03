@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -116,8 +115,14 @@ func (s *VaultStore) save(values map[string]string) error {
 	if s.MasterPassword == "" {
 		return errors.New("vault master password is required")
 	}
-	salt := randomBytes(16)
-	nonce := randomBytes(12)
+	salt, err := randomBytes(16)
+	if err != nil {
+		return err
+	}
+	nonce, err := randomBytes(12)
+	if err != nil {
+		return err
+	}
 	gcm, err := s.gcm(salt)
 	if err != nil {
 		return err
@@ -152,15 +157,10 @@ func (s *VaultStore) gcm(salt []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func randomBytes(size int) []byte {
+func randomBytes(size int) ([]byte, error) {
 	b := make([]byte, size)
 	if _, err := rand.Read(b); err != nil {
-		panic(err)
+		return nil, fmt.Errorf("read secure random bytes: %w", err)
 	}
-	return b
-}
-
-func VaultPasswordFingerprint(masterPassword string) string {
-	sum := sha256.Sum256([]byte(masterPassword))
-	return base64.StdEncoding.EncodeToString(sum[:6])
+	return b, nil
 }

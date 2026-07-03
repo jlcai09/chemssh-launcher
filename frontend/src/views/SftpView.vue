@@ -45,7 +45,7 @@
                 <el-button :icon="Select" type="primary" @click="openDraftTab(paneName)">打开本地</el-button>
               </div>
               <div v-else class="xftp-new-form">
-                <el-select v-model="panes[paneName].draft.profileID" placeholder="选择已保存服务器">
+                <el-select v-model="panes[paneName].draft.profileID" placeholder="选择已保存服务器" :teleported="false" @click.stop>
                   <el-option
                     v-for="profile in remoteProfiles"
                     :key="profile.id"
@@ -419,7 +419,14 @@
               <strong :title="item.name">{{ item.name }}</strong>
               <span v-if="item.isGroup" class="transfer-group-summary">{{ transferGroupSummary(item) }}</span>
             </div>
-            <span class="transfer-status" :title="item.error || transferStatusLabel(item)">{{ transferStatusLabel(item) }}</span>
+            <span class="transfer-status" :title="item.error || transferStatusLabel(item)">
+              <i
+                class="status-dot"
+                :class="item.paused ? 'is-paused' : `is-${item.status}`"
+                aria-hidden="true"
+              />
+              {{ transferStatusLabel(item) }}
+            </span>
             <div class="transfer-progress-cell">
               <el-progress :percentage="transferPercent(item)" :show-text="false" :status="item.status === 'error' ? 'exception' : item.status === 'done' ? 'success' : undefined" />
               <span>{{ transferPercent(item) }}%</span>
@@ -528,7 +535,7 @@ import {
   Upload,
   View
 } from '@element-plus/icons-vue'
-import { api, APIError, baseName, formatBytes, formatDate, joinPath, parentPath, postJSON, type FileEntry, type HostKeyInfo, type Profile } from '../api'
+import { api, APIError, baseName, formatBytes, formatDate, joinPath, launcherToken, launcherTokenHeader, parentPath, postJSON, type FileEntry, type HostKeyInfo, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
 import {
   collectDropUploadEntries,
@@ -3059,6 +3066,8 @@ function uploadForm(form: FormData) {
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/sftp/upload')
+    const token = launcherToken()
+    if (token) xhr.setRequestHeader(launcherTokenHeader, token)
     xhr.onload = () => {
       const text = xhr.responseText || '{}'
       let data: any = {}

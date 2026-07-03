@@ -105,6 +105,10 @@ func (s *Server) handleLocalDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if strings.TrimSpace(req.Path) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("missing local path"))
+		return
+	}
 	clean := localCleanPath(req.Path)
 	if clean == "." || filepath.Dir(clean) == clean {
 		writeError(w, http.StatusBadRequest, errors.New("refusing to delete root or current directory"))
@@ -139,6 +143,10 @@ func (s *Server) handleLocalOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if strings.TrimSpace(req.Path) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("missing local path"))
+		return
+	}
 	clean := localCleanPath(req.Path)
 	if clean == "." || filepath.Dir(clean) == clean {
 		writeError(w, http.StatusBadRequest, errors.New("invalid local path"))
@@ -170,6 +178,10 @@ func (s *Server) handleLocalOpenText(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("missing local path"))
 		return
 	}
 	clean := localCleanPath(req.Path)
@@ -206,6 +218,10 @@ func (s *Server) handleLocalRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if strings.TrimSpace(req.Path) == "" || strings.TrimSpace(req.NewPath) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("missing local path"))
+		return
+	}
 	oldPath := localCleanPath(req.Path)
 	newPath := localCleanPath(req.NewPath)
 	if oldPath == "." || filepath.Dir(oldPath) == oldPath || newPath == "." || filepath.Dir(newPath) == newPath {
@@ -231,6 +247,12 @@ func (s *Server) handleLocalCopy(w http.ResponseWriter, r *http.Request) {
 		TransferID   string `json:"transfer_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(req.SourcePath) == "" || strings.TrimSpace(req.TargetPath) == "" {
+		err := errors.New("missing local path")
+		s.finishProgress(req.TransferID, err)
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -323,7 +345,8 @@ func (s *Server) copyLocalFile(sourcePath, targetDir, relativePath, transferID s
 		return err
 	}
 	src := s.progressReader(transferID, info.Size(), in)
-	if _, err := io.Copy(out, src); err != nil {
+	buf := make([]byte, copyBufferSize)
+	if _, err := io.CopyBuffer(out, src, buf); err != nil {
 		_ = out.Close()
 		return err
 	}

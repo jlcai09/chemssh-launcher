@@ -112,6 +112,7 @@ Important fields:
 - `Start Command`: command that starts ChemSSH.
 - `Health Check URL`: optional override; when empty, the launcher checks the local browser URL.
 - `Open ChemSSH tab after start`: controls browser/WebView auto-open.
+- `Security Token`: ChemSSH security token for token-authenticated ChemSSH instances. When set, the launcher injects the token into proxied API requests, terminal WebSocket connections, and health/identity checks so you do not need to enter it manually each time.
 
 Saved secrets are displayed only as `*******`. Edit a secret to replace it; save an empty edited secret to clear it.
 
@@ -222,11 +223,12 @@ Non-secret profile data is saved as JSON:
 - macOS: `~/Library/Application Support/ChemSSHLauncher/profiles.json`
 - Linux: `~/.config/chemssh-launcher/profiles.json`
 
-Passwords and private-key passphrases are not written to `profiles.json`. By default they are stored in the OS credential store:
+Passwords, private-key passphrases, and security tokens are not written to `profiles.json`. By default they are stored in the OS credential store:
 
 - service: `chemssh-launcher`
 - username: `<profile-id>:password`
 - username: `<profile-id>:key-passphrase`
+- username: `<profile-id>:security-token`
 
 If the OS keyring is unavailable, set `CHEMSSH_LAUNCHER_VAULT_PASSWORD` to use an encrypted local vault:
 
@@ -333,7 +335,7 @@ go test ./...
 Build the launcher from the repository root:
 
 ```bash
-go run ./tools/build
+go run ./tools/build --optimize 
 ```
 
 The build tool reads `internal/version/VERSION`, syncs `winres/winres.json`, builds the Vue frontend, regenerates Windows resources when needed, and runs `go build ./cmd/chemssh-launcher`.
@@ -341,11 +343,17 @@ The build tool reads `internal/version/VERSION`, syncs `winres/winres.json`, bui
 Build optional Windows WebView2 variants:
 
 ```bash
-go run ./tools/build --webview2
-go run ./tools/build --webview2 --windowsgui
+go run ./tools/build --webview2                   # WebView2 with console (for debugging)
+go run ./tools/build --webview2 --windowsgui      # WebView2 without console (recommended for release)
 ```
 
-The `--windowsgui` variant hides the console window for double-click use. The console build is better for debugging startup errors.
+The build tool optimizes for size and startup speed by default (using `-trimpath -ldflags="-s -w"`). Use `--no-optimize` to disable optimizations for debugging.
+
+**Build variants**:
+- **Standard (browser mode)**: Opens in system browser, shows console for debugging
+- **Standard + `--windowsgui`**: Opens in system browser, no console window (clean for end users)
+- **WebView2**: Embedded browser window with console (for debugging startup issues)
+- **WebView2 + `--windowsgui`**: Embedded browser window, no console (best user experience)
 
 For local frontend iteration you can run Vite:
 

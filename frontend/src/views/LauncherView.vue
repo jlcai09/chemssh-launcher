@@ -42,16 +42,16 @@
         </div>
         <div class="toolbar-actions">
           <el-tooltip :content="t('launcher.sshTest')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-            <el-button :icon="Connection" circle :disabled="!current.id" @click="testProfile" />
+            <el-button :icon="Connection" circle :disabled="!current.id" @click.stop="testProfile" />
           </el-tooltip>
           <el-tooltip :content="t('launcher.start')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-            <el-button :icon="CaretRight" circle type="primary" :disabled="!current.id" @click="startSession" />
+            <el-button :icon="CaretRight" circle type="primary" :disabled="!current.id" @click.stop="startSession" />
           </el-tooltip>
           <el-tooltip :content="t('launcher.stopForwarding')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-            <el-button :icon="SwitchButton" circle @click="stopForwarding" />
+            <el-button :icon="SwitchButton" circle @click.stop="stopForwarding" />
           </el-tooltip>
           <el-tooltip :content="t('launcher.stopService')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-            <el-button :icon="CloseBold" circle type="danger" @click="stopService" />
+            <el-button :icon="CloseBold" circle type="danger" @click.stop="stopService" />
           </el-tooltip>
         </div>
       </div>
@@ -110,6 +110,22 @@
           </section>
 
           <section class="form-section">
+            <h3>{{ t('launcher.securityToken') }}</h3>
+            <div class="form-grid">
+              <el-form-item :label="t('launcher.securityToken')">
+                <div class="secret-edit">
+                  <el-input v-model="securityTokenInput" :placeholder="current.has_security_token ? t('launcher.savedKeepEmpty') : t('launcher.securityTokenNew')" show-password />
+                  <el-select v-model="securityTokenAction">
+                    <el-option :label="t('launcher.secretKeep')" value="keep" />
+                    <el-option :label="t('launcher.secretReplace')" value="replace" />
+                    <el-option :label="t('launcher.secretClear')" value="clear" />
+                  </el-select>
+                </div>
+              </el-form-item>
+            </div>
+          </section>
+
+          <section class="form-section">
             <h3>{{ isLocalProfile ? t('launcher.localAccess') : t('launcher.tunnel') }}</h3>
             <div class="form-grid">
               <el-form-item v-if="!isLocalProfile" :label="t('launcher.remoteHost')"><el-input v-model="current.remote_host" :placeholder="t('launcher.placeholder.remoteHost')" /></el-form-item>
@@ -133,6 +149,7 @@
           </section>
 
           <div class="editor-actions">
+            <span v-if="isDirty" class="dirty-label">{{ t('launcher.unsavedChanges') }}</span>
             <el-button :icon="Delete" type="danger" :disabled="!current.id" @click="deleteProfile">{{ t('launcher.actions.delete') }}</el-button>
             <el-button :icon="Check" type="primary" native-type="submit">{{ t('launcher.actions.save') }}</el-button>
           </div>
@@ -170,17 +187,44 @@ const logRef = ref<HTMLElement | null>(null)
 const logScroller = createAutoScroll(() => logRef.value)
 const passwordInput = ref('')
 const passphraseInput = ref('')
+const securityTokenInput = ref('')
 const passwordAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const passphraseAction = ref<'keep' | 'replace' | 'clear'>('keep')
+const securityTokenAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const isLocalProfile = computed(() => current.kind === 'local')
+
+const isDirty = computed(() => {
+  if (!defaults.value) return false
+  const source: Partial<Profile> = current.id
+    ? profiles.value.find(profile => profile.id === current.id) || {}
+    : {}
+  const target = current as Partial<Profile>
+  const keys: (keyof Profile)[] = [
+    'name', 'kind', 'ssh_host', 'ssh_port', 'ssh_user', 'auth_method',
+    'private_key_path', 'remote_host', 'remote_port', 'local_host', 'local_port',
+    'local_url_path', 'health_check_url', 'open_browser',
+    'pre_start_commands', 'start_command'
+  ]
+  for (const key of keys) {
+    const left = source[key] ?? defaults.value[key] ?? ''
+    const right = target[key] ?? defaults.value[key] ?? ''
+    if (left !== right) return true
+  }
+  if (passwordInput.value) return true
+  if (passphraseInput.value) return true
+  if (securityTokenInput.value) return true
+  return false
+})
 
 function applyProfile(profile: Partial<Profile>) {
   Object.assign(current, defaults.value, profile)
   current.kind = current.kind || 'remote'
   passwordInput.value = ''
   passphraseInput.value = ''
+  securityTokenInput.value = ''
   passwordAction.value = 'keep'
   passphraseAction.value = 'keep'
+  securityTokenAction.value = 'keep'
 }
 
 function setProfileKind(kind: string | number | boolean) {
@@ -236,7 +280,9 @@ async function saveProfile() {
       password_action: passwordAction.value,
       password: passwordInput.value,
       passphrase_action: passphraseAction.value,
-      passphrase: passphraseInput.value
+      passphrase: passphraseInput.value,
+      security_token_action: securityTokenAction.value,
+      security_token: securityTokenInput.value
     }
   }
   const saved = current.id
@@ -291,13 +337,21 @@ async function startSession() {
   ElMessage.success(t('launcher.requestedStart'))
 }
 
+function suppressSessionAutoOpen() {
+  window.parent?.postMessage({ type: 'chemssh-launcher:suppress-auto-open' }, window.location.origin)
+}
+
 async function stopForwarding() {
+  if (!current.id) return
+  suppressSessionAutoOpen()
   await postJSON('/api/session/stop', { id: current.id })
   await refreshStatus()
 }
 
 async function stopService() {
+  if (!current.id) return
   await ElMessageBox.confirm(t('launcher.confirmStop'), t('launcher.confirmTitle'), { type: 'warning' })
+  suppressSessionAutoOpen()
   await postJSON('/api/session/stop-service', { id: current.id })
   await refreshStatus()
 }
@@ -335,6 +389,10 @@ watch(passwordInput, value => {
 
 watch(passphraseInput, value => {
   if (value) passphraseAction.value = 'replace'
+})
+
+watch(securityTokenInput, value => {
+  if (value) securityTokenAction.value = 'replace'
 })
 
 // SSE for real-time log streaming

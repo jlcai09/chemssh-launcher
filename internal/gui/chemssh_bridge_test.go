@@ -2,11 +2,13 @@ package gui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,6 +192,72 @@ func TestSaveLocalProfileClearsCredentials(t *testing.T) {
 	}
 	if _, ok, err := secrets.Get("local", secret.KeyPassword); err != nil || ok {
 		t.Fatalf("password secret retained: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestImportProfilesClearsAllSecrets(t *testing.T) {
+	profiles := config.NewFileStore(filepath.Join(t.TempDir(), "profiles.json"))
+	secrets := secret.NewMemoryStore()
+	for _, key := range []string{secret.KeyPassword, secret.KeyPrivatePassphrase, secret.KeySecurityToken} {
+		if err := secrets.Set("remote", key, "secret-"+key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := &Server{
+		rt: &runtime.Runtime{
+			Profiles: profiles,
+			Secrets:  secrets,
+		},
+		logs:     &safeLog{},
+		localLog: &safeLog{},
+	}
+	body := `{"version":1,"profiles":[{"id":"remote","name":"Imported","ssh_host":"host","ssh_port":22,"ssh_user":"user","auth_method":"password","remote_host":"127.0.0.1","remote_port":8888,"local_host":"127.0.0.1","local_port":8888,"local_url_path":"/","start_command":"chemssh --config config.yaml","open_browser":true}]}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/backend/import", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	server.handleImportProfiles(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, key := range []string{secret.KeyPassword, secret.KeyPrivatePassphrase, secret.KeySecurityToken} {
+		if _, ok, err := secrets.Get("remote", key); err != nil || ok {
+			t.Fatalf("secret %s retained: ok=%v err=%v", key, ok, err)
+		}
+	}
+	got, err := profiles.Get("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HasPassword || got.HasPrivateKeyPassphrase || got.HasSecurityToken {
+		t.Fatalf("imported profile retained secret flags: %+v", got)
+	}
+}
+
+func TestWaitForProfileHealthRejectsAuthFailureWhenTokenConfigured(t *testing.T) {
+	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer service.Close()
+
+	profile := config.NewProfileDefaults()
+	profile.ID = "token-profile"
+	profile.HealthCheckURL = service.URL
+	profile.HasSecurityToken = true
+	secrets := secret.NewMemoryStore()
+	if err := secrets.Set(profile.ID, secret.KeySecurityToken, "bad-token"); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		rt: &runtime.Runtime{Secrets: secrets},
+	}
+
+	err := server.waitForProfileHealth(context.Background(), profile, 50*time.Millisecond, 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected token profile health check to reject 401")
+	}
+	if !strings.Contains(err.Error(), "security token") {
+		t.Fatalf("health error did not mention token: %v", err)
 	}
 }
 

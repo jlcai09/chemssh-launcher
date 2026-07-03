@@ -3,11 +3,15 @@ package app
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"chemssh-launcher/internal/browser"
 	"chemssh-launcher/internal/config"
 	"chemssh-launcher/internal/netcheck"
+	"chemssh-launcher/internal/secret"
 	"chemssh-launcher/internal/sshclient"
 )
 
@@ -49,7 +53,7 @@ func (a *App) Start(ctx context.Context, profile config.Profile) error {
 	}
 	defer tunnel.Close()
 
-	if err := netcheck.WaitForURL(ctx, profile.HealthURL(), 90*time.Second, time.Second); err != nil {
+	if err := a.waitForProfileHealth(ctx, profile, 90*time.Second, time.Second); err != nil {
 		if process != nil {
 			_ = process.Stop()
 		}
@@ -84,4 +88,31 @@ func (a *App) Start(ctx context.Context, profile config.Profile) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+}
+
+func (a *App) waitForProfileHealth(ctx context.Context, profile config.Profile, timeout, interval time.Duration) error {
+	options := netcheck.HealthOptions{}
+	if profile.HasSecurityToken {
+		options.RejectStatuses = map[int]string{
+			http.StatusUnauthorized: "ChemSSH rejected the configured security token",
+			http.StatusForbidden:    "ChemSSH rejected the configured security token",
+		}
+	}
+	return netcheck.WaitForURLWithOptions(ctx, a.healthURLWithToken(profile), timeout, interval, options)
+}
+
+func (a *App) healthURLWithToken(profile config.Profile) string {
+	baseURL := profile.HealthURL()
+	if a.Secrets == nil {
+		return baseURL
+	}
+	token, ok, err := a.Secrets.Get(profile.ID, secret.KeySecurityToken)
+	if err != nil || !ok || token == "" {
+		return baseURL
+	}
+	separator := "?"
+	if strings.Contains(baseURL, "?") {
+		separator = "&"
+	}
+	return baseURL + separator + "token=" + url.QueryEscape(token)
 }

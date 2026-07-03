@@ -18,6 +18,7 @@ export interface Profile {
   start_command: string
   health_check_url: string
   open_browser: boolean
+  has_security_token: boolean
 }
 
 export interface FileEntry {
@@ -43,9 +44,40 @@ export class APIError extends Error {
   data: any
 }
 
+export const launcherTokenCookieName = 'chemssh_launcher_token'
+export const launcherTokenHeader = 'X-ChemSSH-Launcher-Token'
+
+export function launcherToken() {
+  const prefix = `${launcherTokenCookieName}=`
+  const value = document.cookie
+    .split(';')
+    .map(item => item.trim())
+    .find(item => item.startsWith(prefix))
+  return value ? decodeURIComponent(value.slice(prefix.length)) : ''
+}
+
+export function withLauncherToken(headers?: HeadersInit) {
+  const merged = new Headers(headers)
+  const token = launcherToken()
+  if (token) merged.set(launcherTokenHeader, token)
+  return merged
+}
+
+function mergeHeaders(defaults?: HeadersInit, overrides?: HeadersInit) {
+  const merged = new Headers(defaults)
+  if (overrides) new Headers(overrides).forEach((value, key) => merged.set(key, value))
+  return merged
+}
+
+function requestNeedsLauncherToken(method?: string) {
+  const normalized = (method || 'GET').toUpperCase()
+  return normalized !== 'GET' && normalized !== 'HEAD' && normalized !== 'OPTIONS'
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers: HeadersInit | undefined = options.body instanceof FormData ? undefined : { 'Content-Type': 'application/json' }
-  const res = await fetch(path, { ...options, headers: options.headers || headers })
+  const defaultHeaders: HeadersInit | undefined = options.body instanceof FormData ? undefined : { 'Content-Type': 'application/json' }
+  const headers = mergeHeaders(defaultHeaders, options.headers)
+  const res = await fetch(path, { ...options, headers: requestNeedsLauncherToken(options.method) ? withLauncherToken(headers) : headers })
   const text = await res.text()
   const data = text ? JSON.parse(text) : {}
   if (!res.ok) {

@@ -112,6 +112,7 @@ Profile 保存在本机，分为远程 profile 和本地 profile。
 - `Start Command`：启动 ChemSSH 的命令。
 - `Health Check URL`：可选覆盖值；留空时检查本地浏览器 URL。
 - `Open ChemSSH tab after start`：启动成功后是否自动打开 ChemSSH。
+- `Security Token`：ChemSSH 安全令牌，用于启用了 token 认证的 ChemSSH 实例。配置后，Launcher 会在代理的 API 请求、终端 WebSocket 连接和 health/identity 检查中自动注入令牌，无需每次手动输入。
 
 已保存的 secret 只显示为 `*******`。编辑 secret 可替换；编辑后留空并保存会清除对应 secret。
 
@@ -222,11 +223,12 @@ http://127.0.0.1:8888
 - macOS: `~/Library/Application Support/ChemSSHLauncher/profiles.json`
 - Linux: `~/.config/chemssh-launcher/profiles.json`
 
-密码和私钥 passphrase 不会写入 `profiles.json`。默认保存到系统凭证管理器：
+密码、私钥 passphrase 和安全令牌不会写入 `profiles.json`。默认保存到系统凭证管理器：
 
 - service: `chemssh-launcher`
 - username: `<profile-id>:password`
 - username: `<profile-id>:key-passphrase`
+- username: `<profile-id>:security-token`
 
 如果系统凭证管理器不可用，可以设置 `CHEMSSH_LAUNCHER_VAULT_PASSWORD`，改用本地加密 vault：
 
@@ -333,7 +335,7 @@ go test ./...
 在仓库根目录构建 Launcher：
 
 ```bash
-go run ./tools/build
+go run ./tools/build --optimize 
 ```
 
 构建工具会读取 `internal/version/VERSION`，同步 `winres/winres.json`，构建 Vue 前端，在需要时重新生成 Windows 资源，然后执行 `go build ./cmd/chemssh-launcher`。
@@ -341,11 +343,17 @@ go run ./tools/build
 构建可选 Windows WebView2 版本：
 
 ```bash
-go run ./tools/build --webview2
-go run ./tools/build --webview2 --windowsgui
+go run ./tools/build --webview2                   # WebView2 带控制台（调试用）
+go run ./tools/build --webview2 --windowsgui      # WebView2 无控制台（推荐发布版）
 ```
 
-`--windowsgui` 版本适合双击使用，不显示控制台窗口。不带该参数的控制台版本更适合调试启动错误。
+构建工具默认启用体积和启动速度优化（使用 `-trimpath -ldflags="-s -w"`）。调试时可使用 `--no-optimize` 禁用优化。
+
+**构建版本说明**：
+- **标准版（浏览器模式）**：在系统浏览器中打开，显示控制台便于调试
+- **标准版 + `--windowsgui`**：在系统浏览器中打开，无控制台窗口（用户友好）
+- **WebView2 版**：内嵌浏览器窗口，带控制台（用于调试启动问题）
+- **WebView2 + `--windowsgui`**：内嵌浏览器窗口，无控制台（最佳用户体验）
 
 本地前端迭代可以运行 Vite：
 

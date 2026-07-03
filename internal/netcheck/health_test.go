@@ -19,6 +19,20 @@ func TestWaitForURLTreatsHTTP499AsReachable(t *testing.T) {
 	}
 }
 
+func TestWaitForURLWithOptionsRejectsConfiguredStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	err := WaitForURLWithOptions(context.Background(), server.URL, 50*time.Millisecond, 10*time.Millisecond, HealthOptions{
+		RejectStatuses: map[int]string{http.StatusUnauthorized: "bad token"},
+	})
+	if err == nil {
+		t.Fatal("expected health check to reject configured status")
+	}
+}
+
 func TestWaitForURLFailsWhenServerErrorPersists(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

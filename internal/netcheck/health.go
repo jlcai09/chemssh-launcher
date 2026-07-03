@@ -7,7 +7,15 @@ import (
 	"time"
 )
 
+type HealthOptions struct {
+	RejectStatuses map[int]string
+}
+
 func WaitForURL(ctx context.Context, url string, timeout, interval time.Duration) error {
+	return WaitForURLWithOptions(ctx, url, timeout, interval, HealthOptions{})
+}
+
+func WaitForURLWithOptions(ctx context.Context, url string, timeout, interval time.Duration, options HealthOptions) error {
 	deadline, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -24,10 +32,16 @@ func WaitForURL(ctx context.Context, url string, timeout, interval time.Duration
 		resp, err := client.Do(req)
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode <= 499 {
+			if message, rejected := options.RejectStatuses[resp.StatusCode]; rejected {
+				if message == "" {
+					message = http.StatusText(resp.StatusCode)
+				}
+				return fmt.Errorf("health check failed for %s: unexpected HTTP status %d: %s", url, resp.StatusCode, message)
+			} else if resp.StatusCode >= 200 && resp.StatusCode <= 499 {
 				return nil
+			} else {
+				lastErr = fmt.Errorf("unexpected HTTP status %d", resp.StatusCode)
 			}
-			lastErr = fmt.Errorf("unexpected HTTP status %d", resp.StatusCode)
 		} else {
 			lastErr = err
 		}

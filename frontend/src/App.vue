@@ -28,14 +28,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import en from 'element-plus/es/locale/lang/en'
 import BackendView from './views/BackendView.vue'
 import LauncherView from './views/LauncherView.vue'
 import SftpView from './views/SftpView.vue'
 import ShellView from './views/ShellView.vue'
-import { api } from './api'
+import { api, withLauncherToken } from './api'
 import { locale, setLocale, t } from './i18n'
 
 type RouteName = 'launcher' | 'sftp' | 'backend' | 'shell'
@@ -62,6 +62,8 @@ const subtitle = computed(() => {
   if (route.value === 'backend') return t('app.backendSubtitle')
   return t('app.launcherSubtitle')
 })
+const browserClientID = `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+let heartbeatTimer: number | null = null
 
 watch(route, value => {
   const path = value === 'launcher' ? '/' : value === 'backend' ? '/launcher-logs' : `/${value}`
@@ -72,12 +74,37 @@ window.addEventListener('popstate', () => {
   route.value = initialRoute()
 })
 
+async function sendHeartbeat() {
+  try {
+    await api('/api/browser-client/heartbeat', {
+      method: 'POST',
+      body: JSON.stringify({ id: browserClientID })
+    })
+  } catch {
+    // The backend may already be shutting down.
+  }
+}
+
+function notifyBrowserClientClosed() {
+  const path = `/api/browser-client/close?id=${encodeURIComponent(browserClientID)}`
+  fetch(path, { method: 'POST', keepalive: true, headers: withLauncherToken() }).catch(() => undefined)
+}
+
 onMounted(async () => {
+  await sendHeartbeat()
+  heartbeatTimer = window.setInterval(sendHeartbeat, 5000)
+  window.addEventListener('pagehide', notifyBrowserClientClosed)
   try {
     const data = await api<{ version: string }>('/api/version')
     appVersion.value = data.version.trim()
   } catch {
     appVersion.value = ''
   }
+})
+
+onBeforeUnmount(() => {
+  if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer)
+  window.removeEventListener('pagehide', notifyBrowserClientClosed)
+  notifyBrowserClientClosed()
 })
 </script>

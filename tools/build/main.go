@@ -14,9 +14,11 @@ import (
 func main() {
 	var webview2 bool
 	var windowsGUI bool
+	var noOptimize bool
 	var out string
 	flag.BoolVar(&webview2, "webview2", false, "build with WebView2 support")
 	flag.BoolVar(&windowsGUI, "windowsgui", false, "build with the Windows GUI subsystem")
+	flag.BoolVar(&noOptimize, "no-optimize", false, "disable size and startup speed optimizations")
 	flag.StringVar(&out, "o", "", "output executable path")
 	flag.Parse()
 
@@ -39,7 +41,7 @@ func main() {
 			fatal(err)
 		}
 	}
-	if err := goBuild(root, webview2, windowsGUI, out); err != nil {
+	if err := goBuild(root, webview2, windowsGUI, !noOptimize, out); err != nil {
 		fatal(err)
 	}
 }
@@ -181,13 +183,23 @@ func outputIsFresh(output string, inputs []string) (bool, error) {
 	return true, nil
 }
 
-func goBuild(root string, webview2, windowsGUI bool, out string) error {
+func goBuild(root string, webview2, windowsGUI, optimize bool, out string) error {
 	args := []string{"build"}
+	if optimize {
+		args = append(args, "-trimpath")
+	}
 	if webview2 {
 		args = append(args, "-tags", "webview2")
 	}
+	var ldflags []string
+	if optimize {
+		ldflags = append(ldflags, "-s", "-w")
+	}
 	if windowsGUI {
-		args = append(args, "-ldflags", "-H=windowsgui")
+		ldflags = append(ldflags, "-H", "windowsgui")
+	}
+	if len(ldflags) > 0 {
+		args = append(args, "-ldflags", strings.Join(ldflags, " "))
 	}
 	if out == "" && webview2 {
 		out = executableName("chemssh-launcher-webview2")

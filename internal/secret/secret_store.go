@@ -1,9 +1,10 @@
 package secret
 
 const (
-	ServiceName          = "chemssh-launcher"
-	KeyPassword          = "password"
+	ServiceName       = "chemssh-launcher"
+	KeyPassword       = "password"
 	KeyPrivatePassphrase = "key-passphrase"
+	KeySecurityToken  = "security-token"
 )
 
 type Store interface {

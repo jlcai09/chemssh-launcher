@@ -29,9 +29,9 @@ type Manager struct {
 }
 
 type activeSession struct {
-	info       Session
-	pool       *connectionPool  // 使用连接池替代单个连接
-	refs       int
+	info Session
+	pool *connectionPool // 使用连接池替代单个连接
+	refs int
 }
 
 func NewManager() *Manager {
@@ -188,13 +188,17 @@ func (m *Manager) Download(id, remotePath string) (io.ReadCloser, FileInfo, erro
 	if err != nil {
 		return nil, FileInfo{}, err
 	}
-	defer session.pool.release(conn)
+	// NOTE: Do NOT defer release here. The returned ReadCloser is a streaming
+	// reader (*sftp.File) that the caller must consume after this function returns.
+	// The connection is released by pooledReadCloser.Close() when the caller is done.
 
 	reader, info, err := downloadFile(conn.client, remotePath)
 	if err != nil {
 		conn.failed = true
+		session.pool.release(conn)
+		return nil, FileInfo{}, err
 	}
-	return reader, info, err
+	return &pooledReadCloser{ReadCloser: reader, pool: session.pool, conn: conn}, info, nil
 }
 
 func (m *Manager) Mkdir(id, remotePath string) error {

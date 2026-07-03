@@ -19,6 +19,11 @@ func (s *Server) handleFileIcon(w http.ResponseWriter, r *http.Request) {
 	isDir := query.Get("is_dir") == "1" || query.Get("is_dir") == "true"
 	size, _ := strconv.Atoi(query.Get("size"))
 
+	// Lazy initialize icon service on first use
+	s.iconsOnce.Do(func() {
+		s.icons = fileicon.NewService()
+	})
+
 	data, err := s.icons.IconPNG(name, isDir, size)
 	if err != nil {
 		status := http.StatusBadGateway
