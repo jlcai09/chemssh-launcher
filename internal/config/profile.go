@@ -9,22 +9,9 @@ const (
 )
 
 const DefaultStartCommand = `source .venv/bin/activate
-__chemssh_conda_prompt=""
-if [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
-  __chemssh_conda_prompt="(${CONDA_DEFAULT_ENV}) "
-fi
-
-__chemssh_venv_prompt=""
-if [ -n "${VIRTUAL_ENV:-}" ]; then
-  __chemssh_venv_prompt="($(basename "$VIRTUAL_ENV")) "
-fi
-
-__chemssh_prompt_char="$"
-if [ "$(id -u)" = "0" ]; then
-  __chemssh_prompt_char="#"
-fi
-
-export PS1="${__chemssh_conda_prompt}${__chemssh_venv_prompt}[\u@\h \W]${__chemssh_prompt_char} "
+unset PS1
+export CONDA_CHANGEPS1=false
+export VIRTUAL_ENV_DISABLE_PROMPT=1
 chemssh --config config.yaml`
 
 type Profile struct {

@@ -104,7 +104,7 @@ Remote profiles connect through SSH and can start ChemSSH on the server.
 Important fields:
 
 - `SSH Host`, `SSH Port`, `SSH User`: SSH target.
-- `Auth Method`: `Password` or `Private Key`.
+- `Auth Method`: `Password` or `Private Key`. When `Password` is selected, the launcher sends both the RFC 4252 `password` method and the RFC 4256 `keyboard-interactive` method, so servers that only allow `keyboard-interactive` (common on HPC login nodes) authenticate without extra configuration.
 - `Remote Host`, `Remote Port`: where ChemSSH listens on the remote machine.
 - `Local Host`, `Local Port`: where the local tunnel listens.
 - `Local URL Path`: path opened in the browser after the local host/port.
@@ -128,22 +128,9 @@ The default remote start command assumes the server has `bash`, a project `.venv
 
 ```bash
 source .venv/bin/activate
-__chemssh_conda_prompt=""
-if [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
-  __chemssh_conda_prompt="(${CONDA_DEFAULT_ENV}) "
-fi
-
-__chemssh_venv_prompt=""
-if [ -n "${VIRTUAL_ENV:-}" ]; then
-  __chemssh_venv_prompt="($(basename "$VIRTUAL_ENV")) "
-fi
-
-__chemssh_prompt_char="$"
-if [ "$(id -u)" = "0" ]; then
-  __chemssh_prompt_char="#"
-fi
-
-export PS1="${__chemssh_conda_prompt}${__chemssh_venv_prompt}[\u@\h \W]${__chemssh_prompt_char} "
+unset PS1
+export CONDA_CHANGEPS1=false
+export VIRTUAL_ENV_DISABLE_PROMPT=1
 chemssh --config config.yaml
 ```
 

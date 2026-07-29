@@ -118,9 +118,9 @@ func TestDefaultStartCommandIncludesEnvironmentPromptAndChemSSH(t *testing.T) {
 	profile := NewProfileDefaults()
 	for _, want := range []string{
 		"source .venv/bin/activate",
-		"__chemssh_conda_prompt",
-		"__chemssh_venv_prompt",
-		"export PS1=",
+		"unset PS1",
+		"export CONDA_CHANGEPS1=false",
+		"export VIRTUAL_ENV_DISABLE_PROMPT=1",
 		"chemssh --config config.yaml",
 	} {
 		if !strings.Contains(profile.StartCommand, want) {

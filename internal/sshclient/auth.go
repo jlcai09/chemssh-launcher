@@ -28,6 +28,7 @@ func ClientConfigWithHostKeyPolicy(profile config.Profile, secrets secret.Store,
 			return nil, fmt.Errorf("password is not set for profile %q", profile.Name)
 		}
 		auths = append(auths, ssh.Password(password))
+		auths = append(auths, keyboardInteractivePassword(password))
 	case config.AuthPrivateKey:
 		key, err := os.ReadFile(profile.PrivateKeyPath)
 		if err != nil {
@@ -64,4 +65,28 @@ func ClientConfigWithHostKeyPolicy(profile config.Profile, secrets secret.Store,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         15 * time.Second,
 	}, nil
+}
+
+// keyboardInteractivePassword returns an ssh.AuthMethod that answers every
+// keyboard-interactive challenge with the stored password. Many servers
+// (e.g. some HPC login nodes) only advertise keyboard-interactive even when
+// the user intends to log in with a plain password. Mirrors the behavior of
+// Xshell, MobaXterm and the OpenSSH client, which fall back to
+// keyboard-interactive automatically when the server rejects password auth.
+func keyboardInteractivePassword(password string) ssh.AuthMethod {
+	return ssh.KeyboardInteractive(keyboardInteractiveCallback(password))
+}
+
+// keyboardInteractiveCallback builds the challenge-response function used by
+// keyboardInteractivePassword. Split out so it can be unit tested directly,
+// since ssh.AuthMethod is an opaque interface and cannot be invoked from
+// tests.
+func keyboardInteractiveCallback(password string) func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+	return func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+		answers := make([]string, len(questions))
+		for i := range questions {
+			answers[i] = password
+		}
+		return answers, nil
+	}
 }

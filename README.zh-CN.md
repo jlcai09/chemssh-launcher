@@ -104,7 +104,7 @@ Profile 保存在本机，分为远程 profile 和本地 profile。
 重要字段：
 
 - `SSH Host`、`SSH Port`、`SSH User`：SSH 目标。
-- `Auth Method`：`Password` 或 `Private Key`。
+- `Auth Method`：`Password` 或 `Private Key`。选择 `Password` 时，Launcher 会同时发送 RFC 4252 `password` 和 RFC 4256 `keyboard-interactive` 两种认证方式，因此仅允许 `keyboard-interactive` 的服务器（常见于 HPC 登录节点）无需额外配置即可认证。
 - `Remote Host`、`Remote Port`：ChemSSH 在远程机器上的监听地址。
 - `Local Host`、`Local Port`：本地 tunnel 的监听地址。
 - `Local URL Path`：本地浏览器打开的路径。
@@ -128,22 +128,9 @@ Profile 保存在本机，分为远程 profile 和本地 profile。
 
 ```bash
 source .venv/bin/activate
-__chemssh_conda_prompt=""
-if [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
-  __chemssh_conda_prompt="(${CONDA_DEFAULT_ENV}) "
-fi
-
-__chemssh_venv_prompt=""
-if [ -n "${VIRTUAL_ENV:-}" ]; then
-  __chemssh_venv_prompt="($(basename "$VIRTUAL_ENV")) "
-fi
-
-__chemssh_prompt_char="$"
-if [ "$(id -u)" = "0" ]; then
-  __chemssh_prompt_char="#"
-fi
-
-export PS1="${__chemssh_conda_prompt}${__chemssh_venv_prompt}[\u@\h \W]${__chemssh_prompt_char} "
+unset PS1
+export CONDA_CHANGEPS1=false
+export VIRTUAL_ENV_DISABLE_PROMPT=1
 chemssh --config config.yaml
 ```
 
