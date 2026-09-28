@@ -1453,6 +1453,14 @@ func (s *Server) newChemSSHReverseProxy(target *url.URL, session *activeSession)
 		req.Host = target.Host
 		req.Header.Set("X-Forwarded-Host", target.Host)
 		req.Header.Set("X-Forwarded-Proto", "http")
+		// ChemSSH compresses responses with Brotli when the client advertises
+		// "br" (see its BrotliMiddleware), and the launcher cannot decode
+		// brotli while rewriting proxied documents (see decodeBody). Document
+		// navigations therefore ask for gzip; other requests keep the
+		// browser's Accept-Encoding so assets still get brotli.
+		if strings.Contains(req.Header.Get("Accept"), "text/html") {
+			req.Header.Set("Accept-Encoding", "gzip")
+		}
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy ChemSSH request failed: %w", err))
@@ -1465,13 +1473,13 @@ func (s *Server) newChemSSHReverseProxy(target *url.URL, session *activeSession)
 				resp.Header.Set("Location", rewritten)
 			}
 		}
-		// Inject a self-healing guard into proxied HTML so that a transient
-		// failure to load a dynamically-imported module (which we cannot fully
-		// eliminate — ChemSSH may briefly drop an asset request right after the
-		// session becomes ready) automatically reloads the page once instead of
-		// leaving the SPA on a dead "Failed to fetch dynamically imported
-		// module" screen that needs a manual refresh.
-		injectChemSSHImportReloader(resp)
+		// Inject the launcher client scripts into proxied HTML:
+		// 1. a self-healing guard for transient dynamic-import failures, and
+		// 2. the launcher API token shim, so the ChemSSH page can call launcher
+		//    bridge endpoints whose writes require the per-launch token.
+		// Also refresh the launcher API token cookie so the shim reads the
+		// current value even before any launcher API request was made.
+		injectChemSSHClientScripts(resp, s.apiToken)
 		return nil
 	}
 	return proxy
@@ -1485,18 +1493,72 @@ func (s *Server) newChemSSHReverseProxy(target *url.URL, session *activeSession)
 // stranding the user on a blank page.
 const chemsshImportReloaderScript = `<script>(function(){if(sessionStorage.getItem('__chemsshReloaded')){sessionStorage.removeItem('__chemsshReloaded');return;}var reloaded=false;function isImportError(ev){var msg=(ev&&ev.message)||'';if(/Failed to fetch dynamically imported module/.test(msg))return true;if(ev&&ev.error&&/Failed to fetch dynamically imported module/.test(ev.error.message||''))return true;return false;}window.addEventListener('error',function(ev){if(reloaded)return;if(!isImportError(ev))return;reloaded=true;try{sessionStorage.setItem('__chemsshReloaded','1');}catch(e){}try{window.location.reload();}catch(e){}},{capture:true});window.addEventListener('unhandledrejection',function(ev){if(reloaded)return;var msg=(ev&&ev.reason&&(ev.reason.message||ev.reason))||'';if(/Failed to fetch dynamically imported module/.test(String(msg))){reloaded=true;try{sessionStorage.setItem('__chemsshReloaded','1');}catch(e){}try{window.location.reload();}catch(e){}}},{capture:true});})();</script>`
 
-// injectChemSSHImportReloader inserts chemsshImportReloaderScript right after
-// the opening <head> tag of an HTML response. Non-HTML responses, compressed
-// encodings we cannot safely decompress, and responses without a readable
-// body are passed through untouched. It recomputes Content-Length and strips
-// Content-Encoding so the browser does not see a truncated body (which would
-// itself look like a failed module load).
-func injectChemSSHImportReloader(resp *http.Response) {
-	if resp == nil || resp.Body == nil {
+// chemsshLauncherTokenScript is injected into the <head> of proxied ChemSSH
+// HTML documents, ahead of the ChemSSH application scripts. Launcher GUI API
+// writes require both the per-launch token cookie and the matching
+// X-ChemSSH-Launcher-Token header; the launcher's own frontend supplies the
+// header itself, but a proxied ChemSSH page has no knowledge of the token and
+// would be rejected with 403. This shim fills the header in from the cookie for
+// same-origin requests to the launcher bridge namespace only, so the token is
+// never forwarded to the remote ChemSSH backend.
+const chemsshLauncherTokenScript = `<script>(function(){
+var C='chemssh_launcher_token',H='X-ChemSSH-Launcher-Token',P='/api/chemssh-bridge/';
+function token(){var parts=document.cookie?document.cookie.split(';'):[];for(var i=0;i<parts.length;i++){var item=parts[i].trim();if(item.indexOf(C+'=')===0){return decodeURIComponent(item.slice(C.length+1));}}return '';}
+function origin(){try{return window.location.origin||(window.location.protocol+'//'+window.location.host);}catch(e){return '';}}
+function inScope(url){try{var target=new URL(url,window.location.href);return target.origin===origin()&&target.pathname.indexOf(P)===0;}catch(e){return false;}}
+var originalFetch=window.fetch;
+if(typeof originalFetch!=='function'){return;}
+window.fetch=function(input,init){
+try{
+var url=typeof input==='string'?input:(input&&input.url)||'';
+var value=token();
+if(value&&inScope(url)){
+var headers=new Headers((init&&init.headers)||(input&&input.headers)||undefined);
+if(!headers.has(H)){headers.set(H,value);var next=Object.assign({},init||{});next.headers=headers;return originalFetch.call(this,input,next);}
+}
+}catch(e){}
+return originalFetch.call(this,input,init);
+};
+})();</script>`
+
+// injectChemSSHClientScripts inserts the launcher client scripts right after
+// the opening <head> tag of a proxied ChemSSH HTML document: the
+// dynamic-import self-healing guard plus the launcher API token shim. It also
+// refreshes the launcher API token cookie on the document so the shim can read
+// the current per-launch token even before the first launcher API response
+// arrives (apiHandler sets the same cookie on every API request).
+func injectChemSSHClientScripts(resp *http.Response, apiToken string) {
+	if !isChemSSHHTMLResponse(resp) {
 		return
 	}
-	ct := resp.Header.Get("Content-Type")
-	if !strings.Contains(ct, "text/html") {
+	if apiToken != "" {
+		resp.Header.Add("Set-Cookie", (&http.Cookie{
+			Name:     launcherAPITokenCookie,
+			Value:    apiToken,
+			Path:     "/",
+			SameSite: http.SameSiteStrictMode,
+		}).String())
+	}
+	injectChemSSHHTML(resp, chemsshImportReloaderScript+chemsshLauncherTokenScript)
+}
+
+// isChemSSHHTMLResponse reports whether the proxied response is an HTML
+// document the launcher may rewrite.
+func isChemSSHHTMLResponse(resp *http.Response) bool {
+	if resp == nil || resp.Body == nil {
+		return false
+	}
+	return strings.Contains(resp.Header.Get("Content-Type"), "text/html")
+}
+
+// injectChemSSHHTML inserts snippet right after the opening <head> tag of an
+// HTML response. Non-HTML responses, compressed encodings we cannot safely
+// decompress, and responses without a readable body are passed through
+// untouched. It recomputes Content-Length and strips Content-Encoding so the
+// browser does not see a truncated body (which would itself look like a failed
+// module load).
+func injectChemSSHHTML(resp *http.Response, snippet string) {
+	if !isChemSSHHTMLResponse(resp) {
 		return
 	}
 	raw, err := io.ReadAll(resp.Body)
@@ -1513,7 +1575,7 @@ func injectChemSSHImportReloader(resp *http.Response) {
 		return
 	}
 
-	injected := injectAfterHeadOpen(body, chemsshImportReloaderScript)
+	injected := injectAfterHeadOpen(body, snippet)
 	resp.Body = io.NopCloser(bytes.NewReader(injected))
 	resp.ContentLength = int64(len(injected))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(injected)))

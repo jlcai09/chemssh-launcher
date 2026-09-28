@@ -61,7 +61,7 @@ Environment overrides:
 
 - `CHEMSSH_LAUNCHER_WEBVIEW=1` or `0`: enable or disable embedded WebView mode when the build supports it.
 - `CHEMSSH_LAUNCHER_DEVTOOLS=1`: enable WebView2 DevTools for debugging.
-- `CHEMSSH_LAUNCHER_VAULT_PASSWORD=...`: use the encrypted local vault when the OS credential store is unavailable.
+- `CHEMSSH_LAUNCHER_VAULT_PASSWORD=...`: forces the encrypted local vault, even when the OS credential store is available (secrets already saved in the keyring are not read in this mode).
 
 ## First Run
 
@@ -80,7 +80,7 @@ If the remote ChemSSH port is already serving a reusable ChemSSH instance, the l
 - Multi-line pre-start and start commands executed in one remote shell session.
 - SSH local port forwarding with local/remote port checks and suggested local fallback ports.
 - Browser mode and optional Windows WebView2 mode.
-- Same-origin `/chemssh` proxy for embedded ChemSSH, including WebView2-friendly file dragging.
+- Same-origin launcher proxy for embedded ChemSSH (`/<profile-name>/chemssh`; the bare `/chemssh` path works too), including WebView2-friendly file dragging.
 - Remote and local profile support.
 - Profile-scoped logs plus launcher/backend logs.
 - OS credential-store secrets, encrypted vault fallback, and OpenSSH-compatible `known_hosts`.
@@ -114,7 +114,7 @@ Important fields:
 - `Open ChemSSH tab after start`: controls browser/WebView auto-open.
 - `Security Token`: ChemSSH security token for token-authenticated ChemSSH instances. When set, the launcher injects the token into proxied API requests, terminal WebSocket connections, and health/identity checks so you do not need to enter it manually each time.
 
-Saved secrets are displayed only as `*******`. Edit a secret to replace it; save an empty edited secret to clear it.
+Saved secrets are displayed only as `*******`. Each secret has `Keep` / `Replace` / `Clear` actions: leaving the field empty with `Keep` changes nothing, typing a value switches to `Replace`, and only `Clear` removes the stored secret (an empty value with `Replace` stores an empty secret).
 
 ### Local Profiles
 
@@ -134,7 +134,7 @@ export VIRTUAL_ENV_DISABLE_PROMPT=1
 chemssh --config config.yaml
 ```
 
-When the command does not already contain `--host` or `--port`, the launcher appends:
+The launcher checks the **last line** of the start command and appends the flags to that line when it does not already contain `--host` or `--port`:
 
 ```bash
 --host <Remote Host> --port <Remote Port>
@@ -158,7 +158,7 @@ Supported transfer paths include:
 - Local to local through the launcher.
 - External file/folder drop upload to a remote tab.
 
-Remote files opened through `Open` or `Open in text editor` are downloaded to a local cache directory, opened with the OS file association or text editor, watched for changes, and uploaded back to the remote path while the SFTP session remains connected. This cache is temporary and is cleaned when the launcher exits when possible.
+Remote files opened through `Open` or `Open in text editor` are downloaded to a local cache directory and opened with the OS file association; `Open in text editor` uses Notepad on Windows, TextEdit on macOS, and the system default app (xdg-open) on Linux. They are watched for changes and uploaded back to the remote path while the SFTP session remains connected. This cache is temporary and is cleaned when the launcher exits when possible.
 
 Directory transfer support is implemented by expanding directories into file tasks. Some backend paths still only copy individual files, so a local-to-local directory transfer may fail with `directory transfer is not supported yet`.
 
@@ -174,7 +174,7 @@ These endpoints let the proxied ChemSSH page discover launcher capabilities, req
 
 Bridge features are conditional:
 
-- ChemSSH must be opened through the active launcher's proxy, usually `/chemssh`.
+- ChemSSH must be opened through the active launcher's proxy (the launcher opens `/<profile-name>/chemssh`; the bare `/chemssh` path works as well).
 - The active session must still be forwarding.
 - ChemSSH identity must be readable and must include a workspace root.
 - Remote bridge open uses a dedicated SFTP session for the active remote profile.
@@ -191,7 +191,7 @@ WebView2 mode opens `/shell` in an embedded window. Normal WebView2 mode disable
 In WebView2 mode, ChemSSH is opened through the launcher's same-origin proxy:
 
 ```text
-http://127.0.0.1:<launcher-port>/chemssh
+http://127.0.0.1:<launcher-port>/<profile-name>/chemssh
 ```
 
 not directly through:
@@ -217,7 +217,7 @@ Passwords, private-key passphrases, and security tokens are not written to `prof
 - username: `<profile-id>:key-passphrase`
 - username: `<profile-id>:security-token`
 
-If the OS keyring is unavailable, set `CHEMSSH_LAUNCHER_VAULT_PASSWORD` to use an encrypted local vault:
+If the OS keyring is unavailable, set `CHEMSSH_LAUNCHER_VAULT_PASSWORD` to use the encrypted local vault instead (setting the variable always selects the vault, there is no automatic fallback, and secrets already saved in the keyring are not migrated):
 
 - Windows: `%AppData%\ChemSSHLauncher\vault.json`
 - macOS: `~/Library/Application Support/ChemSSHLauncher/vault.json`
@@ -231,6 +231,8 @@ SSH host keys are stored in an OpenSSH-compatible file:
 - macOS: `~/Library/Application Support/ChemSSHLauncher/known_hosts`
 - Linux: `~/.config/chemssh-launcher/known_hosts`
 
+The config directory also holds `client_identity.json`: the launcher's stable client id, sent as the `X-ChemSSH-Client-Id` header when proxying ChemSSH (the terminal WebSocket uses the `client_id` query parameter) so ChemSSH can isolate per-client session caches.
+
 WebView2 data and temporary SFTP-open cache paths are shown in the Backend page. On Windows, cache cleanup can be delayed by file locks; the launcher records a pending cleanup marker and retries on the next start.
 
 ## Security Notes
@@ -240,6 +242,8 @@ ChemSSH Launcher relies on SSH for authentication, encryption, host-key verifica
 On the first connection to a server, the GUI/CLI shows the host key type and SHA256 fingerprint. Trust it only after comparing it with a reliable source, such as a server administrator or an existing trusted SSH client. If a saved host key changes later, the launcher blocks the connection.
 
 Binding `Local Host` to anything other than loopback, such as `0.0.0.0`, can expose the tunnel or local ChemSSH target to other machines. The launcher logs a warning, but the setting is still your responsibility.
+
+The launcher's local GUI API additionally protects write operations (non-GET requests): every launch generates a random token, stores it in the `chemssh_launcher_token` cookie, and requires write requests to carry a matching `X-ChemSSH-Launcher-Token` header plus a valid Origin/Sec-Fetch-Site. The launcher's own frontend sends that header itself; for proxied ChemSSH pages the launcher injects a small script that reads the cookie and fills the header in, so bridge write endpoints (such as opening a file locally) need no extra configuration.
 
 ---
 
@@ -254,7 +258,7 @@ chemssh-launcher executable
     Vue app: /, /shell, /sftp, /launcher-logs
     Profile/session APIs: /api/profiles, /api/session/*
     SFTP/local file APIs: /api/sftp/*, /api/local/*
-    ChemSSH proxy: /chemssh and related proxied paths
+    ChemSSH proxy: /<profile-name>/chemssh (bare /chemssh also accepted)
     ChemSSH bridge: /api/chemssh-bridge/*
   SSH client
     remote command startup
@@ -292,7 +296,7 @@ internal/version/         Version source and tests
 internal/webview/         Optional WebView2 integration
 tools/build/              Build orchestration for frontend, resources, and Go binary
 winres/                   Windows icon and version resource metadata
-idea/                     Development task notes and design notes
+idea/                     Local development notes (gitignored, not shipped with the repository)
 ```
 
 </details>
@@ -322,7 +326,7 @@ go test ./...
 Build the launcher from the repository root:
 
 ```bash
-go run ./tools/build --optimize 
+go run ./tools/build
 ```
 
 The build tool reads `internal/version/VERSION`, syncs `winres/winres.json`, builds the Vue frontend, regenerates Windows resources when needed, and runs `go build ./cmd/chemssh-launcher`.
@@ -378,11 +382,13 @@ Only edit this file when bumping the app version:
 internal/version/VERSION
 ```
 
-`go run ./tools/build` syncs that version into Windows resource metadata. The version is shown in the GUI sidebar and through:
+`go run ./tools/build` syncs that version into Windows resource metadata. The version is shown in the GUI top bar (the brand block in the upper-left corner) and through:
 
 ```bash
 chemssh-launcher --version
 ```
+
+Before releasing, make sure `internal/version/VERSION` is updated and matches the git tag and commit message (the build tool only syncs `winres/winres.json`, it never edits VERSION).
 
 </details>
 
@@ -395,6 +401,7 @@ chemssh-launcher --version
 - The launcher only controls ChemSSH processes it starts or can identify by ChemSSH identity. If PID discovery fails, stopping the service may leave a remote ChemSSH process running.
 - Remote and local recursive deletion is supported by the backend, so delete confirmations should be read carefully.
 - Temporary SFTP-open cache cleanup can be blocked by Windows file locks; this is an environment cleanup issue, not necessarily a test or code failure.
+- The launcher tracks browser page heartbeats: once the launcher page is closed (about 75 seconds without a heartbeat plus a 10 second grace period), it stops session resources, closes tunnels/SFTP/bridge, and exits.
 - `go.sum` is intentionally committed. It locks Go module checksums for reproducible and tamper-resistant builds.
 
 </details>

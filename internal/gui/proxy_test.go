@@ -204,7 +204,7 @@ func TestInjectChemSSHImportReloaderPlainHTML(t *testing.T) {
 	}
 	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
 
-	injectChemSSHImportReloader(resp)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript)
 
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -244,7 +244,7 @@ func TestInjectChemSSHImportReloaderGzip(t *testing.T) {
 	resp.Header.Set("Content-Type", "text/html")
 	resp.Header.Set("Content-Encoding", "gzip")
 
-	injectChemSSHImportReloader(resp)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript)
 
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -269,7 +269,7 @@ func TestInjectChemSSHImportReloaderSkipsNonHTML(t *testing.T) {
 	}
 	resp.Header.Set("Content-Type", "application/javascript")
 
-	injectChemSSHImportReloader(resp)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript)
 
 	got, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(got, body) {
@@ -287,10 +287,130 @@ func TestInjectChemSSHImportReloaderSkipsUnsupportedEncoding(t *testing.T) {
 	resp.Header.Set("Content-Type", "text/html")
 	resp.Header.Set("Content-Encoding", "br")
 
-	injectChemSSHImportReloader(resp)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript)
 
 	got, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(got, body) {
 		t.Fatalf("unsupported encoding body should be untouched, got %v", got)
+	}
+}
+
+func TestInjectChemSSHClientScriptsAddsTokenShimAndCookie(t *testing.T) {
+	body := []byte("<html><head><title>x</title></head><body></body></html>")
+	resp := &http.Response{
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+
+	injectChemSSHClientScripts(resp, "launch-token")
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("X-ChemSSH-Launcher-Token")) {
+		t.Fatalf("launcher token shim not injected: %s", got)
+	}
+	if !bytes.Contains(got, []byte("/api/chemssh-bridge/")) {
+		t.Fatalf("token shim is not scoped to the launcher bridge namespace: %s", got)
+	}
+	if !bytes.Contains(got, []byte("__chemsshReloaded")) {
+		t.Fatalf("import reloader no longer injected: %s", got)
+	}
+	cookie := resp.Header.Get("Set-Cookie")
+	if !strings.Contains(cookie, launcherAPITokenCookie+"=launch-token") {
+		t.Fatalf("launcher token cookie not set on HTML documents: %q", cookie)
+	}
+	if !strings.Contains(cookie, "SameSite=Strict") {
+		t.Fatalf("launcher token cookie must be SameSite=Strict, got %q", cookie)
+	}
+	wantLen := strconv.Itoa(len(got))
+	if resp.Header.Get("Content-Length") != wantLen || resp.ContentLength != int64(len(got)) {
+		t.Fatalf("content length not recomputed: header=%q field=%d want=%d", resp.Header.Get("Content-Length"), resp.ContentLength, len(got))
+	}
+}
+
+func TestInjectChemSSHClientScriptsHandlesGzipHTML(t *testing.T) {
+	original := []byte("<html><head><title>g</title></head><body></body></html>")
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := &http.Response{
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(buf.Bytes())),
+		ContentLength: int64(buf.Len()),
+	}
+	resp.Header.Set("Content-Type", "text/html")
+	resp.Header.Set("Content-Encoding", "gzip")
+
+	injectChemSSHClientScripts(resp, "launch-token")
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("X-ChemSSH-Launcher-Token")) {
+		t.Fatalf("token shim not injected after gzip decode: %s", got)
+	}
+	if !bytes.Contains(got, []byte("<title>g</title>")) {
+		t.Fatalf("original content lost after gzip decode: %s", got)
+	}
+	if resp.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("Content-Encoding should be stripped for gzip, got %q", resp.Header.Get("Content-Encoding"))
+	}
+	if cookie := resp.Header.Get("Set-Cookie"); !strings.Contains(cookie, launcherAPITokenCookie+"=launch-token") {
+		t.Fatalf("launcher token cookie not set on gzip HTML: %q", cookie)
+	}
+}
+
+func TestInjectChemSSHClientScriptsSkipsNonHTML(t *testing.T) {
+	body := []byte(`{"ok":true}`)
+	resp := &http.Response{
+		Header: http.Header{},
+		Body:   io.NopCloser(bytes.NewReader(body)),
+	}
+	resp.Header.Set("Content-Type", "application/json")
+
+	injectChemSSHClientScripts(resp, "launch-token")
+
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, body) {
+		t.Fatalf("non-HTML body should be untouched, got %s", got)
+	}
+	if cookie := resp.Header.Get("Set-Cookie"); cookie != "" {
+		t.Fatalf("token cookie must not be set on non-HTML responses, got %q", cookie)
+	}
+}
+
+func TestChemSSHProxyDocumentRequestsAskForDecodableEncoding(t *testing.T) {
+	server := NewServer(nil)
+	target, err := url.Parse("http://127.0.0.1:8888")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := server.newChemSSHReverseProxy(target, nil)
+
+	document := httptest.NewRequest(http.MethodGet, "/remote/chemssh", nil)
+	document.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	document.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	proxy.Director(document)
+	if got := document.Header.Get("Accept-Encoding"); got != "gzip" {
+		t.Fatalf("document Accept-Encoding = %q, want gzip so the HTML can be rewritten", got)
+	}
+
+	asset := httptest.NewRequest(http.MethodGet, "/remote/chemssh/assets/app.js", nil)
+	asset.Header.Set("Accept", "*/*")
+	asset.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	proxy.Director(asset)
+	if got := asset.Header.Get("Accept-Encoding"); got != "gzip, deflate, br, zstd" {
+		t.Fatalf("asset Accept-Encoding = %q, want the original value so brotli still applies", got)
 	}
 }

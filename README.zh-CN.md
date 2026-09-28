@@ -61,7 +61,7 @@ chemssh-launcher --version
 
 - `CHEMSSH_LAUNCHER_WEBVIEW=1` 或 `0`：在支持 WebView 的构建中启用或关闭内嵌模式。
 - `CHEMSSH_LAUNCHER_DEVTOOLS=1`：调试 WebView2 页面时启用 DevTools。
-- `CHEMSSH_LAUNCHER_VAULT_PASSWORD=...`：系统凭证管理器不可用时，改用本地加密 vault。
+- `CHEMSSH_LAUNCHER_VAULT_PASSWORD=...`：设置后强制改用本地加密 vault（即使系统凭证管理器可用；此时不会读取 keyring 中已保存的 secret）。
 
 ## 第一次使用
 
@@ -80,7 +80,7 @@ chemssh-launcher --version
 - 在同一个远程 shell session 中执行多行 pre-start/start 命令。
 - SSH 本地端口转发、本地/远程端口检查、本地可用端口建议。
 - 系统浏览器模式和可选 Windows WebView2 模式。
-- 面向内嵌 ChemSSH 的同源 `/chemssh` 代理，包括 WebView2 友好的文件拖拽。
+- 面向内嵌 ChemSSH 的同源代理（`/<profile-name>/chemssh`，裸 `/chemssh` 亦可用），包括 WebView2 友好的文件拖拽。
 - 远程 profile 和本地调试 profile。
 - 按 profile 记录日志，同时提供 launcher/backend 日志。
 - 系统凭证管理器保存 secret，加密 vault 兜底，OpenSSH 兼容 `known_hosts`。
@@ -114,7 +114,7 @@ Profile 保存在本机，分为远程 profile 和本地 profile。
 - `Open ChemSSH tab after start`：启动成功后是否自动打开 ChemSSH。
 - `Security Token`：ChemSSH 安全令牌，用于启用了 token 认证的 ChemSSH 实例。配置后，Launcher 会在代理的 API 请求、终端 WebSocket 连接和 health/identity 检查中自动注入令牌，无需每次手动输入。
 
-已保存的 secret 只显示为 `*******`。编辑 secret 可替换；编辑后留空并保存会清除对应 secret。
+已保存的 secret 只显示为 `*******`。每个 secret 都有 `保持` / `替换` / `清除` 三个动作：留空并选择 `保持` 时不变，输入新值会自动切到 `替换`，只有选择 `清除` 并保存才会删除已保存的 secret（留空 + `替换` 会写入一个空值）。
 
 ### 本地 Profile
 
@@ -134,7 +134,7 @@ export VIRTUAL_ENV_DISABLE_PROMPT=1
 chemssh --config config.yaml
 ```
 
-如果命令中还没有 `--host` 或 `--port`，Launcher 会自动追加：
+Launcher 会检查启动命令的**最后一行**：如果该行还没有 `--host` 或 `--port`，就把参数追加到该行：
 
 ```bash
 --host <Remote Host> --port <Remote Port>
@@ -158,7 +158,7 @@ SFTP 页面与 ChemSSH 启动流程解耦，可以从 Launcher 打开，也可�
 - 本地到本地，通过 Launcher 复制。
 - 从系统文件管理器拖拽文件/文件夹上传到远程标签页。
 
-通过 `Open` 或 `Open in text editor` 打开的远程文件会先下载到本地缓存目录，再使用系统文件关联或文本编辑器打开。只要 SFTP session 仍保持连接，Launcher 会监控缓存文件变化并同步上传回原远程路径。缓存是临时的，Launcher 退出时会尽量清理。
+通过 `Open` 或 `Open in text editor` 打开的远程文件会先下载到本地缓存目录，再使用系统文件关联打开；`Open in text editor` 在 Windows 使用记事本、macOS 使用 TextEdit、Linux 使用系统默认应用（xdg-open）。只要 SFTP session 仍保持连接，Launcher 会监控缓存文件变化并同步上传回原远程路径。缓存是临时的，Launcher 退出时会尽量清理。
 
 目录传输通过前端展开为文件任务实现。部分后端路径仍只支持单文件复制，因此本地到本地的目录传输可能会报 `directory transfer is not supported yet`。
 
@@ -174,7 +174,7 @@ Launcher 为 ChemSSH 暴露 bridge 接口：
 
 Bridge 能力有条件：
 
-- ChemSSH 必须通过当前 Launcher 的代理打开，通常是 `/chemssh`。
+- ChemSSH 必须通过当前 Launcher 的代理打开（自动打开的是 `/<profile-name>/chemssh`，裸 `/chemssh` 也可用）。
 - 当前 session 必须仍在 forwarding。
 - Launcher 必须能读取 ChemSSH identity，并且 identity 中要包含 workspace root。
 - 远程 bridge open 会为当前远程 profile 建立专用 SFTP session。
@@ -191,7 +191,7 @@ WebView2 模式会在内嵌窗口中打开 `/shell`。普通 WebView2 模式会�
 WebView2 模式下，ChemSSH 通过 Launcher 同源代理打开：
 
 ```text
-http://127.0.0.1:<launcher-port>/chemssh
+http://127.0.0.1:<launcher-port>/<profile-name>/chemssh
 ```
 
 而不是直接打开：
@@ -217,7 +217,7 @@ http://127.0.0.1:8888
 - username: `<profile-id>:key-passphrase`
 - username: `<profile-id>:security-token`
 
-如果系统凭证管理器不可用，可以设置 `CHEMSSH_LAUNCHER_VAULT_PASSWORD`，改用本地加密 vault：
+如果系统凭证管理器不可用，可以设置 `CHEMSSH_LAUNCHER_VAULT_PASSWORD` 改用本地加密 vault（只要设置了该变量就会强制使用 vault，不存在自动回退；keyring 中已保存的 secret 不会迁移过来）：
 
 - Windows: `%AppData%\ChemSSHLauncher\vault.json`
 - macOS: `~/Library/Application Support/ChemSSHLauncher/vault.json`
@@ -231,6 +231,8 @@ SSH host key 保存为 OpenSSH 兼容格式：
 - macOS: `~/Library/Application Support/ChemSSHLauncher/known_hosts`
 - Linux: `~/.config/chemssh-launcher/known_hosts`
 
+配置目录中还保存 `client_identity.json`：Launcher 的稳定 client id，代理 ChemSSH 时通过 `X-ChemSSH-Client-Id` 头发送（终端 WebSocket 走 `client_id` 查询参数），让 ChemSSH 按客户端隔离会话缓存。
+
 WebView2 数据目录和临时 SFTP 打开缓存目录可以在 Backend 页面查看。Windows 上缓存清理可能被文件锁阻塞；Launcher 会记录 pending marker，并在下次启动时继续尝试。
 
 ## 安全说明
@@ -240,6 +242,8 @@ ChemSSH Launcher 依赖 SSH 完成认证、加密、host key 校验和本地端�
 首次连接服务器时，GUI/CLI 会显示 host key 类型和 SHA256 指纹。请只在你已经通过可信来源确认后再信任，例如服务器管理员或一台已经信任该服务器的 SSH 客户端。如果已保存的 host key 后续变化，Launcher 会阻止连接。
 
 如果把 `Local Host` 绑定到非 loopback 地址，例如 `0.0.0.0`，可能会把 tunnel 或本地 ChemSSH 目标暴露给其他机器。Launcher 会记录警告，但这个设置仍由使用者负责。
+
+Launcher 的本地 GUI API 对写操作（非 GET 请求）有额外保护：每次启动生成随机 token 写入 `chemssh_launcher_token` cookie，写请求必须同时携带匹配的 `X-ChemSSH-Launcher-Token` 头，并校验 Origin/Sec-Fetch-Site。Launcher 自带前端会自行带上该头；通过代理打开的 ChemSSH 页面由 Launcher 注入的脚本从 cookie 读取并补头，因此 bridge 写接口（例如本地打开文件）无需额外配置。
 
 ---
 
@@ -254,7 +258,7 @@ chemssh-launcher executable
     Vue app: /, /shell, /sftp, /launcher-logs
     Profile/session APIs: /api/profiles, /api/session/*
     SFTP/local file APIs: /api/sftp/*, /api/local/*
-    ChemSSH proxy: /chemssh and related proxied paths
+    ChemSSH proxy: /<profile-name>/chemssh (bare /chemssh also accepted)
     ChemSSH bridge: /api/chemssh-bridge/*
   SSH client
     remote command startup
@@ -292,7 +296,7 @@ internal/version/         版本源文件和测试
 internal/webview/         可选 WebView2 集成
 tools/build/              前端、资源和 Go binary 的构建编排
 winres/                   Windows 图标和版本资源元数据
-idea/                     开发任务说明和设计记录
+idea/                     本地开发笔记（已在 .gitignore 中，不随仓库分发）
 ```
 
 </details>
@@ -322,7 +326,7 @@ go test ./...
 在仓库根目录构建 Launcher：
 
 ```bash
-go run ./tools/build --optimize 
+go run ./tools/build
 ```
 
 构建工具会读取 `internal/version/VERSION`，同步 `winres/winres.json`，构建 Vue 前端，在需要时重新生成 Windows 资源，然后执行 `go build ./cmd/chemssh-launcher`。
@@ -378,11 +382,13 @@ chemssh-launcher start <name-or-id>
 internal/version/VERSION
 ```
 
-`go run ./tools/build` 会把版本同步到 Windows 资源信息中。版本号会显示在 GUI 侧边栏，也可以用命令查看：
+`go run ./tools/build` 会把版本同步到 Windows 资源信息中。版本号会显示在 GUI 顶部标题栏（左上角品牌区），也可以用命令查看：
 
 ```bash
 chemssh-launcher --version
 ```
+
+发布前请确认 `internal/version/VERSION` 已更新，并与 git tag、提交信息保持一致（构建工具只会同步 `winres/winres.json`，不会自动修改 VERSION）。
 
 </details>
 
@@ -395,6 +401,7 @@ chemssh-launcher --version
 - Launcher 只能停止自己启动的 ChemSSH，或能通过 ChemSSH identity 识别 PID 的服务。如果 PID 读取失败，停止服务时可能留下远程 ChemSSH 进程。
 - 远程和本地递归删除由后端支持，删除确认需要仔细阅读。
 - 临时 SFTP open cache 清理可能被 Windows 文件锁阻塞；这属于环境清理问题，不一定表示测试或代码失败。
+- Launcher 依赖页面心跳判断前端是否还在运行：Launcher 页面关闭后（约 75 秒无心跳 + 10 秒宽限），会自动停止会话、关闭 tunnel/SFTP/bridge 并退出。
 - `go.sum` 应提交到仓库。它用于锁定 Go 依赖校验和，保证构建可复现，并降低依赖被篡改的风险。
 
 </details>
