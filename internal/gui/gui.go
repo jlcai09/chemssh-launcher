@@ -56,6 +56,7 @@ type Server struct {
 	icons                    *fileicon.Service
 	iconsOnce                sync.Once
 	transfers                *transferProgressStore
+	shells                   *shellManager
 	apiToken                 string
 	options                  Options
 	baseURL                  string
@@ -160,6 +161,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	defer cleanupSFTPOpenCache(server.localLog)
 	defer server.sftp.CloseAll()
 	defer server.sftpSync.CloseAll()
+	defer server.shells.closeAll()
 	defer server.closeChemSSHBridgeSession()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -199,6 +201,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 				return server.activeTransferCount.Load() > 0
 			},
 		}); err == nil {
+			server.shells.closeAll()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			_ = httpServer.Shutdown(ctx)
@@ -208,6 +211,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 			}
 			return err
 		} else {
+			server.shells.closeAll()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			_ = httpServer.Shutdown(ctx)
@@ -229,6 +233,7 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 	select {
 	case err = <-errCh:
 	case <-serverCtx.Done():
+		server.shells.closeAll()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = httpServer.Shutdown(ctx)
 		cancel()
@@ -249,6 +254,7 @@ func NewServer(rt *runtime.Runtime) *Server {
 		localLog:       &safeLog{},
 		sftp:           sftpclient.NewManager(),
 		transfers:      newTransferProgressStore(),
+		shells:         newShellManager(),
 		apiToken:       newLauncherAPIToken(),
 		sessions:       map[string]*activeSession{},
 		browserClients: map[string]time.Time{},
@@ -261,6 +267,7 @@ func NewServer(rt *runtime.Runtime) *Server {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/shell", s.handleShell)
+	s.mux.HandleFunc("/terminal", s.handleTerminalPage)
 	s.mux.HandleFunc("/sftp", s.handleSFTPPage)
 	s.mux.HandleFunc("/launcher-logs", s.handleLauncherLogsPage)
 	s.mux.HandleFunc("/chemssh", s.handleChemSSHProxy)
@@ -278,6 +285,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/stop", s.apiHandler(gzipHandler(s.handleStop)))
 	s.mux.HandleFunc("/api/session/stop-service", s.apiHandler(gzipHandler(s.handleStopService)))
 	s.mux.HandleFunc("/api/session/status", s.apiHandler(gzipHandler(s.handleStatus)))
+	s.mux.HandleFunc("/api/session/shell/open", s.apiHandler(gzipHandler(s.handleShellOpen)))
+	s.mux.HandleFunc("/api/session/shell/output", s.handleShellOutput)
+	s.mux.HandleFunc("/api/session/shell/input", s.apiHandler(s.handleShellInput))
+	s.mux.HandleFunc("/api/session/shell/resize", s.apiHandler(gzipHandler(s.handleShellResize)))
+	s.mux.HandleFunc("/api/session/shell/close", s.apiHandler(gzipHandler(s.handleShellClose)))
 	s.mux.HandleFunc("/api/logs", s.apiHandler(s.handleLogs))              // No gzip: small payload, high frequency
 	s.mux.HandleFunc("/api/logs/stream", s.apiHandler(s.handleLogsStream)) // SSE endpoint for real-time log streaming
 
@@ -285,6 +297,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sftp/connect", s.apiHandler(gzipHandler(s.handleSFTPConnect)))
 	s.mux.HandleFunc("/api/sftp/disconnect", s.apiHandler(gzipHandler(s.handleSFTPDisconnect)))
 	s.mux.HandleFunc("/api/sftp/list", s.apiHandler(gzipHandler(s.handleSFTPList)))
+	s.mux.HandleFunc("/api/sftp/realpath", s.apiHandler(gzipHandler(s.handleSFTPRealPath)))
 	s.mux.HandleFunc("/api/sftp/mkdir", s.apiHandler(gzipHandler(s.handleSFTPMkdir)))
 	s.mux.HandleFunc("/api/sftp/create-file", s.apiHandler(gzipHandler(s.handleSFTPCreateFile)))
 	s.mux.HandleFunc("/api/sftp/rename", s.apiHandler(gzipHandler(s.handleSFTPRename)))
@@ -447,6 +460,14 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 	s.serveVueApp(w, r)
 }
 
+func (s *Server) handleTerminalPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/terminal" {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveVueApp(w, r)
+}
+
 func (s *Server) handleSFTPPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/sftp" {
 		http.NotFound(w, r)
@@ -532,6 +553,7 @@ func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		s.shells.closeProfile(id)
 		_ = s.rt.Secrets.Delete(id, secret.KeyPassword)
 		_ = s.rt.Secrets.Delete(id, secret.KeyPrivatePassphrase)
 		_ = s.rt.Secrets.Delete(id, secret.KeySecurityToken)
@@ -1188,7 +1210,7 @@ func profileProxySlugFromPath(path string) (string, bool) {
 		return "", false
 	}
 	switch parts[0] {
-	case "api", "assets", "launcher-logs", "shell", "sftp", "static":
+	case "api", "assets", "launcher-logs", "shell", "sftp", "static", "terminal":
 		return "", false
 	}
 	slug, err := url.PathUnescape(parts[0])
@@ -2185,6 +2207,7 @@ func (s *Server) shutdownAfterBrowserClientsGone() {
 		s.stopAllLocalLauncherResources()
 		s.sftp.CloseAll()
 		s.sftpSync.CloseAll()
+		s.shells.closeAll()
 		s.closeChemSSHBridgeSession()
 		if s.shutdown != nil {
 			s.shutdown()

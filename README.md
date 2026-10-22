@@ -84,6 +84,8 @@ If the remote ChemSSH port is already serving a reusable ChemSSH instance, the l
 - Remote and local profile support.
 - Profile-scoped logs plus launcher/backend logs.
 - OS credential-store secrets, encrypted vault fallback, and OpenSSH-compatible `known_hosts`.
+- Standalone SSH debug terminal at `/terminal` that works before ChemSSH is installed.
+- Drag files or folders from the OS into the SSH terminal, or use the toolbar upload button, to upload them over SFTP with a progress ring.
 - Standalone SFTP page at `/sftp`.
 - Xftp-style two-pane file manager with local and remote tabs.
 - File operations: list, open, open in text editor, create file, create directory, rename, delete, copy path.
@@ -139,6 +141,20 @@ The launcher checks the **last line** of the start command and appends the flags
 ```bash
 --host <Remote Host> --port <Remote Port>
 ```
+
+## SSH Debug Terminal
+
+The terminal page provides a basic interactive SSH shell for remote profiles without depending on ChemSSH:
+
+```text
+/terminal
+```
+
+It can be used before ChemSSH is installed to inspect the server, check paths, load modules, or run simple commands. The launcher opens a direct SSH connection and requests a remote PTY (`xterm-256color`); authentication and host-key verification use the same profile and `known_hosts` policy as normal sessions. Terminal size is forwarded on resize, and sessions are closed when you disconnect, delete the profile, or exit the launcher. Local profiles do not provide an SSH terminal.
+
+Drag files or folders from the OS file manager onto the terminal to upload them over SFTP, or click the upload button in the toolbar to pick files manually; the button shows a progress ring and percentage while uploading. The launcher tracks the shell's current working directory from a prompt marker (falling back to the remote home directory when unavailable), so uploads follow the directory you are currently in; relative subdirectories are created as needed, and existing items require confirmation. The SFTP session is tied to the active terminal and is released when the terminal disconnects.
+
+The launcher also installs temporary `sz`/`rz` shims into the remote shell's `PATH`, mirroring ChemSSH's own terminal integration: `rz` opens the local file picker and uploads into the current directory, while `sz <files>` downloads those files through SFTP. The shims exit immediately after emitting a transfer marker, so they cannot leave the terminal waiting. If shell integration cannot be installed, native ZMODEM signatures are intercepted with Ctrl-C to keep the terminal usable. Drag-and-drop and the SFTP page remain the recommended transfer paths.
 
 ## SFTP And Local Files
 
@@ -255,13 +271,14 @@ The project combines a Go backend, embedded Vue frontend, SSH/SFTP clients, and 
 ```text
 chemssh-launcher executable
   Go GUI server on 127.0.0.1:<random>
-    Vue app: /, /shell, /sftp, /launcher-logs
-    Profile/session APIs: /api/profiles, /api/session/*
+    Vue app: /, /shell, /terminal, /sftp, /launcher-logs
+    Profile/session APIs: /api/profiles, /api/session/*, /api/session/shell/*
     SFTP/local file APIs: /api/sftp/*, /api/local/*
     ChemSSH proxy: /<profile-name>/chemssh (bare /chemssh also accepted)
     ChemSSH bridge: /api/chemssh-bridge/*
   SSH client
     remote command startup
+    interactive PTY shell
     local port forwarding
     host-key verification
   SFTP client manager
@@ -281,7 +298,7 @@ The frontend is built with Vue 3, TypeScript, Vite, and Element Plus. The produc
 ```text
 cmd/chemssh-launcher/      CLI entrypoint and Windows resource object
 frontend/                 Vue 3 frontend, Vite config, package metadata
-frontend/src/views/       Launcher, SFTP, shell, and backend views
+frontend/src/views/       Launcher, SFTP, shell, terminal, and backend views
 internal/app/             Higher-level app/session helpers
 internal/browser/         Browser and OS file-opening helpers
 internal/chemssh/         ChemSSH identity discovery

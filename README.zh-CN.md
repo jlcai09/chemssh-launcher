@@ -84,6 +84,8 @@ chemssh-launcher --version
 - 远程 profile 和本地调试 profile。
 - 按 profile 记录日志，同时提供 launcher/backend 日志。
 - 系统凭证管理器保存 secret，加密 vault 兜底，OpenSSH 兼容 `known_hosts`。
+- 独立 SSH 调试终端 `/terminal`，无需先安装 ChemSSH。
+- 从系统文件管理器拖拽文件/文件夹到 SSH 终端，或使用工具栏上传按钮，通过 SFTP 上传并显示进度环。
 - 独立 SFTP 页面 `/sftp`。
 - 类似 Xftp 的左右双窗格文件管理，每个窗格可打开本地或远程多标签。
 - 文件操作：列目录、打开、用文本编辑器打开、新建文件、新建目录、重命名、删除、复制路径。
@@ -139,6 +141,20 @@ Launcher 会检查启动命令的**最后一行**：如果该行还没有 `--hos
 ```bash
 --host <Remote Host> --port <Remote Port>
 ```
+
+## SSH 调试终端
+
+终端页面为远程 profile 提供不依赖 ChemSSH 的基础交互式 SSH shell：
+
+```text
+/terminal
+```
+
+可以在安装 ChemSSH 之前用它查看服务器、检查路径、加载模块或执行简单命令。Launcher 会建立独立的 SSH 连接并申请远程 PTY（`xterm-256color`）；认证和 host key 校验沿用 profile 与 `known_hosts` 策略。终端尺寸变化会同步到远程，断开连接、删除 profile 或退出 Launcher 时会关闭会话。本地 profile 不提供 SSH 终端。
+
+可以从系统文件管理器将文件或文件夹拖到终端上，通过 SFTP 上传，也可以点击工具栏的上传按钮手动选择文件；上传时按钮外圈会显示进度环和百分比数字。Launcher 会从提示符标记跟踪 shell 当前工作目录（无法获取时回退到远程主目录），因此上传会跟随当前所在目录；缺少的相对子目录会自动创建，遇到同名项目会先询问。终端使用的 SFTP 会话与当前连接绑定，断开终端时释放。
+
+Launcher 还会在远程 shell 的 `PATH` 中安装临时的 `sz`/`rz` shim，与 ChemSSH 本体的终端集成逻辑一致：执行 `rz` 会打开本地文件选择器并上传到当前目录，执行 `sz <文件>` 会通过 SFTP 下载这些文件。shim 发出传输标记后立即退出，因此不会让终端停在等待状态。如果无法安装 shell 集成，则会拦截原生 ZMODEM 特征并发送 Ctrl-C，保证终端仍可使用。拖拽和 SFTP 页面仍是推荐的传输方式。
 
 ## SFTP 与本地文件
 
@@ -255,13 +271,14 @@ Launcher 的本地 GUI API 对写操作（非 GET 请求）有额外保护：每
 ```text
 chemssh-launcher executable
   Go GUI server on 127.0.0.1:<random>
-    Vue app: /, /shell, /sftp, /launcher-logs
-    Profile/session APIs: /api/profiles, /api/session/*
+    Vue app: /, /shell, /terminal, /sftp, /launcher-logs
+    Profile/session APIs: /api/profiles, /api/session/*, /api/session/shell/*
     SFTP/local file APIs: /api/sftp/*, /api/local/*
     ChemSSH proxy: /<profile-name>/chemssh (bare /chemssh also accepted)
     ChemSSH bridge: /api/chemssh-bridge/*
   SSH client
     remote command startup
+    interactive PTY shell
     local port forwarding
     host-key verification
   SFTP client manager
@@ -281,7 +298,7 @@ chemssh-launcher executable
 ```text
 cmd/chemssh-launcher/      CLI 入口和 Windows resource object
 frontend/                 Vue 3 前端、Vite 配置、package 配置
-frontend/src/views/       Launcher、SFTP、Shell、Backend 页面
+frontend/src/views/       Launcher、SFTP、Shell、Terminal、Backend 页面
 internal/app/             应用/session 辅助逻辑
 internal/browser/         浏览器和 OS 文件打开辅助
 internal/chemssh/         ChemSSH identity 读取

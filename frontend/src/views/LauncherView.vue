@@ -17,6 +17,22 @@
       </div>
       <div class="profile-list">
         <button
+          v-if="draftOpen"
+          class="profile-card is-draft"
+          :class="{ 'is-active': draftActive }"
+          type="button"
+          @click="selectDraft"
+        >
+          <span class="state-dot" />
+          <span>
+            <span class="profile-card-heading">
+              <strong>{{ draftName }}</strong>
+              <em class="draft-tag">{{ t('launcher.draft') }}</em>
+            </span>
+            <small>{{ draftSummary }}</small>
+          </span>
+        </button>
+        <button
           v-for="profile in profiles"
           :key="profile.id"
           class="profile-card"
@@ -43,6 +59,9 @@
         <div class="toolbar-actions">
           <el-tooltip :content="t('launcher.sshTest')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Connection" circle :disabled="!current.id" @click.stop="testProfile" />
+          </el-tooltip>
+          <el-tooltip :content="t('launcher.sshTerminal')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+            <el-button :icon="Monitor" circle :disabled="!current.id || isLocalProfile" @click.stop="openTerminal" />
           </el-tooltip>
           <el-tooltip :content="t('launcher.start')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="CaretRight" circle type="primary" :disabled="!current.id" @click.stop="startSession" />
@@ -172,7 +191,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, CloseBold, Connection, Delete, Plus, Refresh, SwitchButton, CaretRight } from '@element-plus/icons-vue'
+import { Check, CloseBold, Connection, Delete, Monitor, Plus, Refresh, SwitchButton, CaretRight } from '@element-plus/icons-vue'
 import { api, APIError, postJSON, putJSON, type HostKeyInfo, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
 import { t } from '../i18n'
@@ -180,6 +199,9 @@ import { t } from '../i18n'
 const defaults = ref<Profile | null>(null)
 const profiles = ref<Profile[]>([])
 const current = reactive<Profile>({} as Profile)
+const draftOpen = ref(false)
+const draftSnapshot = ref<Partial<Profile>>({})
+const draftSecrets = ref({ password: '', passphrase: '', securityToken: '' })
 const activeProfileId = ref('')
 const runningProfileIds = ref(new Set<string>())
 const logs = ref<string[]>([])
@@ -192,6 +214,17 @@ const passwordAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const passphraseAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const securityTokenAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const isLocalProfile = computed(() => current.kind === 'local')
+const draftActive = computed(() => draftOpen.value && !current.id)
+const draftName = computed(() => (draftActive.value ? current.name : draftSnapshot.value.name) || t('launcher.unsaved'))
+const draftSummary = computed(() => {
+  const source = draftActive.value ? current : draftSnapshot.value
+  if (source.kind === 'local') {
+    if (!source.local_host && !source.local_port) return t('launcher.newProfileHint')
+    return profileSummary(source)
+  }
+  if (!source.ssh_host) return t('launcher.newProfileHint')
+  return profileSummary(source)
+})
 
 const isDirty = computed(() => {
   if (!defaults.value) return false
@@ -258,22 +291,58 @@ function profileSummary(profile: Partial<Profile>) {
   return `${profile.ssh_user || '?'}@${profile.ssh_host || '?'}`
 }
 
+function snapshotDraft() {
+  if (!draftOpen.value || current.id) return
+  draftSnapshot.value = { ...current }
+  draftSecrets.value = {
+    password: passwordInput.value,
+    passphrase: passphraseInput.value,
+    securityToken: securityTokenInput.value
+  }
+}
+
+function restoreDraft() {
+  applyProfile(draftSnapshot.value)
+  passwordInput.value = draftSecrets.value.password
+  passphraseInput.value = draftSecrets.value.passphrase
+  securityTokenInput.value = draftSecrets.value.securityToken
+  passwordAction.value = passwordInput.value ? 'replace' : 'keep'
+  passphraseAction.value = passphraseInput.value ? 'replace' : 'keep'
+  securityTokenAction.value = securityTokenInput.value ? 'replace' : 'keep'
+  logs.value = []
+}
+
+function selectDraft() {
+  if (!draftOpen.value || draftActive.value) return
+  restoreDraft()
+}
+
 function newProfile() {
+  if (draftOpen.value) {
+    selectDraft()
+    return
+  }
+  draftOpen.value = true
+  draftSnapshot.value = {}
+  draftSecrets.value = { password: '', passphrase: '', securityToken: '' }
   applyProfile({})
   logs.value = []
 }
 
 function selectProfile(profile: Profile) {
+  if (profile.id === current.id) return
+  snapshotDraft()
   applyProfile(profile)
   // Log stream will auto-reconnect via watch on current.id
 }
 
 async function loadProfiles() {
   profiles.value = await api<Profile[]>('/api/profiles')
-  if (!current.id && profiles.value[0]) applyProfile(profiles.value[0])
+  if (!current.id && !draftOpen.value && profiles.value[0]) applyProfile(profiles.value[0])
 }
 
 async function saveProfile() {
+  const wasDraft = !current.id
   const payload = {
     profile: current,
     secrets: {
@@ -288,6 +357,11 @@ async function saveProfile() {
   const saved = current.id
     ? await putJSON<Profile>(`/api/profiles/${current.id}`, payload)
     : await postJSON<Profile>('/api/profiles', payload)
+  if (wasDraft) {
+    draftOpen.value = false
+    draftSnapshot.value = {}
+    draftSecrets.value = { password: '', passphrase: '', securityToken: '' }
+  }
   applyProfile(saved)
   await loadProfiles()
   await refreshLogs(true)
@@ -300,6 +374,7 @@ async function deleteProfile() {
   await api(`/api/profiles/${current.id}`, { method: 'DELETE' })
   applyProfile({})
   await loadProfiles()
+  if (draftOpen.value) restoreDraft()
   ElMessage.success(t('launcher.profileDeleted'))
 }
 
@@ -328,6 +403,16 @@ async function testProfile() {
   if (!current.id) return ElMessage.warning(t('launcher.warnSaveFirst'))
   await withHostKey('/api/profile-test', { id: current.id })
   ElMessage.success(t('launcher.sshTestPassed'))
+}
+
+function openTerminal() {
+  if (!current.id || isLocalProfile.value) return
+  const url = `/terminal?profile=${encodeURIComponent(current.id)}`
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ type: 'chemssh-launcher:new-tab', url }, window.location.origin)
+    return
+  }
+  window.open(url, '_blank')
 }
 
 async function startSession() {

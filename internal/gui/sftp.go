@@ -95,6 +95,19 @@ func (s *Server) handleSFTPList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result, nil)
 }
 
+func (s *Server) handleSFTPRealPath(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	resolved, err := s.sftp.RealPath(r.URL.Query().Get("session"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeSFTPError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"path": resolved}, nil)
+}
+
 func (s *Server) handleSFTPMkdir(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))

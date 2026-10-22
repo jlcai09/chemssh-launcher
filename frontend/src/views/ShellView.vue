@@ -46,6 +46,7 @@
           <strong>新标签页</strong>
           <div class="quick-links">
             <el-button :icon="VideoPlay" type="primary" @click="navigateTab(tab.id, '/')">启动器</el-button>
+            <el-button :icon="Monitor" @click="navigateTab(tab.id, '/terminal')">终端</el-button>
             <el-button :icon="FolderOpened" @click="navigateTab(tab.id, '/sftp')">SFTP</el-button>
             <el-button :icon="Operation" @click="navigateTab(tab.id, '/launcher-logs')">后台</el-button>
           </div>
@@ -58,7 +59,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ArrowLeft, ArrowRight, Close, Download, FolderOpened, Operation, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Close, Download, FolderOpened, Monitor, Operation, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
 
 interface BrowserTab {
   id: string
@@ -145,6 +146,7 @@ function shortTitle(url: string) {
     const parsed = new URL(url)
     if (parsed.origin === window.location.origin) {
       if (parsed.pathname === '/') return '启动器'
+      if (parsed.pathname === '/terminal') return '终端'
       if (parsed.pathname === '/sftp') return 'SFTP'
       if (parsed.pathname === '/launcher-logs') return '后台'
       const parts = parsed.pathname.split('/').filter(Boolean)

@@ -20,6 +20,7 @@
       </header>
       <main class="app-main">
         <LauncherView v-show="route === 'launcher'" />
+        <TerminalView v-show="route === 'terminal'" :active="route === 'terminal'" />
         <SftpView v-show="route === 'sftp'" />
         <BackendView v-show="route === 'backend'" />
       </main>
@@ -35,13 +36,15 @@ import BackendView from './views/BackendView.vue'
 import LauncherView from './views/LauncherView.vue'
 import SftpView from './views/SftpView.vue'
 import ShellView from './views/ShellView.vue'
+import TerminalView from './views/TerminalView.vue'
 import { api, withLauncherToken } from './api'
 import { locale, setLocale, t } from './i18n'
 
-type RouteName = 'launcher' | 'sftp' | 'backend' | 'shell'
+type RouteName = 'launcher' | 'sftp' | 'backend' | 'shell' | 'terminal'
 
 function initialRoute(): RouteName {
   if (location.pathname === '/sftp') return 'sftp'
+  if (location.pathname === '/terminal') return 'terminal'
   if (location.pathname === '/launcher-logs') return 'backend'
   if (location.pathname === '/shell') return 'shell'
   return 'launcher'
@@ -54,10 +57,12 @@ const elementLocale = computed(() => (locale.value === 'zh' ? zhCn : en))
 const appTitle = computed(() => (appVersion.value ? `ChemSSH Launcher ${appVersion.value}` : 'ChemSSH Launcher'))
 const navOptions = computed(() => [
   { label: t('app.launcher'), value: 'launcher' },
+  { label: t('app.terminal'), value: 'terminal' },
   { label: 'SFTP', value: 'sftp' },
   { label: t('app.backend'), value: 'backend' }
 ])
 const subtitle = computed(() => {
+  if (route.value === 'terminal') return t('app.terminalSubtitle')
   if (route.value === 'sftp') return t('app.sftpSubtitle')
   if (route.value === 'backend') return t('app.backendSubtitle')
   return t('app.launcherSubtitle')

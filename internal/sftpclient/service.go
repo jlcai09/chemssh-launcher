@@ -131,6 +131,28 @@ func (m *Manager) List(id, remotePath string) (ListResult, error) {
 	return result, err
 }
 
+func (m *Manager) RealPath(id, remotePath string) (string, error) {
+	session, err := m.get(id)
+	if err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer session.pool.release(conn)
+
+	resolved, err := conn.client.RealPath(CleanPath(remotePath))
+	if err != nil {
+		conn.failed = true
+	}
+	return resolved, err
+}
+
 func (m *Manager) Upload(id, remoteDir, fileName string, src io.Reader) error {
 	session, err := m.get(id)
 	if err != nil {
