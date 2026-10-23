@@ -569,8 +569,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ID            string `json:"id"`
-		AcceptHostKey bool   `json:"accept_host_key"`
+		ID             string `json:"id"`
+		AcceptHostKey  bool   `json:"accept_host_key"`
+		ReplaceHostKey bool   `json:"replace_host_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -612,10 +613,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	policy := sshclient.HostKeyStrict
-	if req.AcceptHostKey {
-		policy = sshclient.HostKeyAcceptNew
-	}
+	policy := hostKeyPolicyForRequest(req.AcceptHostKey, req.ReplaceHostKey)
 
 	client, err := sshclient.DialWithHostKeyPolicy(p, s.rt.Secrets, policy)
 	if err != nil {
@@ -1684,8 +1682,9 @@ func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ID            string `json:"id"`
-		AcceptHostKey bool   `json:"accept_host_key"`
+		ID             string `json:"id"`
+		AcceptHostKey  bool   `json:"accept_host_key"`
+		ReplaceHostKey bool   `json:"replace_host_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1711,10 +1710,7 @@ func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.profileLog(p.ID, "testing SSH for "+p.Name)
-	policy := sshclient.HostKeyStrict
-	if req.AcceptHostKey {
-		policy = sshclient.HostKeyAcceptNew
-	}
+	policy := hostKeyPolicyForRequest(req.AcceptHostKey, req.ReplaceHostKey)
 	client, err := sshclient.DialWithHostKeyPolicy(p, s.rt.Secrets, policy)
 	if err != nil {
 		s.profileLog(p.ID, "SSH connection failed for "+p.Name+": "+err.Error())
@@ -2625,6 +2621,16 @@ func writeError(w http.ResponseWriter, status int, err error) {
 	}
 }
 
+func hostKeyPolicyForRequest(acceptNew, replaceChanged bool) sshclient.HostKeyPolicy {
+	if replaceChanged {
+		return sshclient.HostKeyReplaceChanged
+	}
+	if acceptNew {
+		return sshclient.HostKeyAcceptNew
+	}
+	return sshclient.HostKeyStrict
+}
+
 func writeSSHError(w http.ResponseWriter, err error) {
 	var hostKeyErr *sshclient.HostKeyVerificationError
 	if errors.As(err, &hostKeyErr) {
@@ -2634,12 +2640,13 @@ func writeSSHError(w http.ResponseWriter, err error) {
 			"error":  hostKeyErr.Error(),
 			"status": strconv.Itoa(http.StatusPreconditionRequired),
 			"host_key": map[string]any{
-				"host":             hostKeyErr.Host,
-				"address":          hostKeyErr.Address,
-				"key_type":         hostKeyErr.KeyType,
-				"fingerprint":      hostKeyErr.Fingerprint,
-				"known_hosts_path": hostKeyErr.KnownHostsPath,
-				"mismatch":         hostKeyErr.Mismatch,
+				"host":                  hostKeyErr.Host,
+				"address":               hostKeyErr.Address,
+				"key_type":              hostKeyErr.KeyType,
+				"fingerprint":           hostKeyErr.Fingerprint,
+				"known_hosts_path":      hostKeyErr.KnownHostsPath,
+				"previous_fingerprints": hostKeyErr.PreviousFingerprints,
+				"mismatch":              hostKeyErr.Mismatch,
 			},
 		}
 		if encErr := json.NewEncoder(w).Encode(body); encErr != nil {

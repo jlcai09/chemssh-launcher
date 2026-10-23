@@ -75,6 +75,37 @@ func TestHostKeyCallbackRequiresTrustBeforeAcceptingHost(t *testing.T) {
 	if !verifyErr.Mismatch {
 		t.Fatal("changed host key should be reported as a mismatch")
 	}
+	if len(verifyErr.PreviousFingerprints) != 1 || verifyErr.PreviousFingerprints[0] != ssh.FingerprintSHA256(key) {
+		t.Fatalf("previous fingerprints = %v, want %s", verifyErr.PreviousFingerprints, ssh.FingerprintSHA256(key))
+	}
+
+	acceptNew, err = hostKeyCallback(profile, HostKeyAcceptNew)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := acceptNew(hostname, remoteAddr, changedKey); err == nil {
+		t.Fatal("accept-new policy must not replace an existing host key")
+	}
+
+	replaceChanged, err := hostKeyCallback(profile, HostKeyReplaceChanged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceChanged(hostname, remoteAddr, changedKey); err != nil {
+		t.Fatalf("replace changed host key: %v", err)
+	}
+
+	strict, err = hostKeyCallback(profile, HostKeyStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := strict(hostname, remoteAddr, changedKey); err != nil {
+		t.Fatalf("replaced host key should pass strict verification: %v", err)
+	}
+	err = strict(hostname, remoteAddr, key)
+	if !errors.As(err, &verifyErr) || !verifyErr.Mismatch {
+		t.Fatalf("old host key must no longer be trusted, got %T: %v", err, err)
+	}
 }
 
 func testPublicKey(t *testing.T) ssh.PublicKey {

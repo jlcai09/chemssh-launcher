@@ -192,8 +192,9 @@
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, CloseBold, Connection, Delete, Monitor, Plus, Refresh, SwitchButton, CaretRight } from '@element-plus/icons-vue'
-import { api, APIError, postJSON, putJSON, type HostKeyInfo, type Profile } from '../api'
+import { api, postJSON, putJSON, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
+import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import { t } from '../i18n'
 
 const defaults = ref<Profile | null>(null)
@@ -382,20 +383,10 @@ async function withHostKey<T>(path: string, payload: Record<string, unknown>) {
   try {
     return await postJSON<T>(path, payload)
   } catch (error) {
-    const err = error as APIError
-    const hostKey = err.data?.host_key as HostKeyInfo | undefined
-    if (!hostKey || hostKey.mismatch) throw error
-    await ElMessageBox.confirm(
-      t('launcher.hostKeyConfirm', {
-        address: hostKey.address,
-        keyType: hostKey.key_type,
-        fingerprint: hostKey.fingerprint,
-        path: hostKey.known_hosts_path
-      }),
-      t('launcher.hostKeyTitle'),
-      { type: 'warning' }
-    )
-    return await postJSON<T>(path, { ...payload, accept_host_key: true })
+    const hostKey = hostKeyFromError(error)
+    if (!hostKey) throw error
+    const trust = await confirmHostKey(hostKey)
+    return await postJSON<T>(path, { ...payload, ...trust })
   }
 }
 

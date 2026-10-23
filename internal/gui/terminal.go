@@ -38,10 +38,11 @@ type launcherShell struct {
 }
 
 type shellOpenRequest struct {
-	ProfileID     string `json:"profile_id"`
-	Cols          int    `json:"cols"`
-	Rows          int    `json:"rows"`
-	AcceptHostKey bool   `json:"accept_host_key"`
+	ProfileID      string `json:"profile_id"`
+	Cols           int    `json:"cols"`
+	Rows           int    `json:"rows"`
+	AcceptHostKey  bool   `json:"accept_host_key"`
+	ReplaceHostKey bool   `json:"replace_host_key"`
 }
 
 type shellIDRequest struct {
@@ -211,10 +212,7 @@ func (s *Server) handleShellOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("local ChemSSH profiles do not provide an SSH terminal"))
 		return
 	}
-	policy := sshclient.HostKeyStrict
-	if req.AcceptHostKey {
-		policy = sshclient.HostKeyAcceptNew
-	}
+	policy := hostKeyPolicyForRequest(req.AcceptHostKey, req.ReplaceHostKey)
 	s.profileLog(profile.ID, "opening SSH terminal for "+profile.Name)
 	shell, err := sshclient.StartInteractiveShell(profile, s.rt.Secrets, policy, req.Cols, req.Rows)
 	if err != nil {

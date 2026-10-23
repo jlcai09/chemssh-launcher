@@ -16,10 +16,23 @@
             v-for="tab in panes[paneName].tabs"
             :key="tab.id"
             class="xftp-tab"
-            :class="{ active: tab.id === panes[paneName].active }"
+            :class="{
+              active: tab.id === panes[paneName].active,
+              'is-tab-dragging': isTabDragging(paneName, tab.id),
+              'is-tab-drop-before': isTabDropTarget(paneName, tab.id, 'before'),
+              'is-tab-drop-after': isTabDropTarget(paneName, tab.id, 'after')
+            }"
             type="button"
+            draggable="true"
             :title="tabTitle(tab)"
             @click="activateTab(paneName, tab.id)"
+            @dblclick="duplicateTab(paneName, tab)"
+            @contextmenu.prevent="openTabContextMenu(paneName, tab.id, $event)"
+            @dragstart="startTabDrag(paneName, tab.id, $event)"
+            @dragover="handleTabDragOver(paneName, tab.id, $event)"
+            @dragleave="handleTabDragLeave(paneName, tab.id, $event)"
+            @drop.prevent.stop="handleTabDrop(paneName, tab.id)"
+            @dragend="finishTabDrag"
           >
             <el-icon><FolderOpened v-if="tab.kind === 'local'" /><Connection v-else /></el-icon>
             <span>{{ tabLabel(tab) }}</span>
@@ -33,29 +46,38 @@
             trigger="click"
             placement="bottom-start"
             popper-class="xftp-new-popover"
-            :width="360"
+            :width="300"
           >
             <template #reference>
               <el-button class="xftp-add-tab" :icon="Plus" circle />
             </template>
-            <div class="xftp-new-menu">
-              <el-segmented v-model="panes[paneName].draft.kind" :options="newTabOptions" />
-              <div v-if="panes[paneName].draft.kind === 'local'" class="xftp-new-form">
-                <el-input v-model="panes[paneName].draft.localPath" placeholder="本地路径" @keydown.enter="openDraftTab(paneName)" />
-                <el-button :icon="Select" type="primary" @click="openDraftTab(paneName)">打开本地</el-button>
-              </div>
-              <div v-else class="xftp-new-form">
-                <el-select v-model="panes[paneName].draft.profileID" placeholder="选择已保存服务器" :teleported="false" @click.stop>
-                  <el-option
-                    v-for="profile in remoteProfiles"
-                    :key="profile.id"
-                    :label="`${profile.name || profile.ssh_host} - ${profile.ssh_user || '?'}@${profile.ssh_host || '?'}`"
-                    :value="profile.id"
-                  />
-                </el-select>
-                <el-input v-model="panes[paneName].draft.remotePath" placeholder="远程路径" @keydown.enter="openDraftTab(paneName)" />
-                <el-button :icon="Connection" type="primary" @click="openDraftTab(paneName)">连接远程</el-button>
-              </div>
+            <div class="xftp-new-menu" role="menu">
+              <button type="button" class="xftp-new-item" role="menuitem" @click="openLocalTab(paneName, home)">
+                <span class="xftp-new-item-icon"><el-icon><FolderOpened /></el-icon></span>
+                <span class="xftp-new-item-text">
+                  <span class="xftp-new-item-name">{{ t('sftp.local') }}</span>
+                  <span class="xftp-new-item-meta" :title="home">{{ home }}</span>
+                </span>
+              </button>
+              <template v-if="remoteProfiles.length">
+                <div class="xftp-new-group">{{ t('sftp.savedServers') }}</div>
+                <button
+                  v-for="profile in remoteProfiles"
+                  :key="profile.id"
+                  type="button"
+                  class="xftp-new-item"
+                  role="menuitem"
+                  :title="`${profile.ssh_user ? `${profile.ssh_user}@` : ''}${profile.ssh_host || ''}`"
+                  @click="openRemoteTab(paneName, profile, '.')"
+                >
+                  <span class="xftp-new-item-icon"><el-icon><Connection /></el-icon></span>
+                  <span class="xftp-new-item-text">
+                    <span class="xftp-new-item-name">{{ profile.name || profile.ssh_host }}</span>
+                    <span class="xftp-new-item-meta">{{ profile.ssh_user ? `${profile.ssh_user}@${profile.ssh_host}` : profile.ssh_host }}</span>
+                  </span>
+                </button>
+              </template>
+              <div v-else class="xftp-new-empty">{{ t('sftp.noSavedServers') }}</div>
             </div>
           </el-popover>
         </div>
@@ -224,7 +246,7 @@
             @mousedown.left="beginBlankSelect(paneName, $event)"
           >
             <div v-if="activeTab(paneName)?.loading" class="empty-state compact">正在读取目录...</div>
-            <div v-else-if="!activeTab(paneName)" class="empty-state compact">没有打开的标签页。</div>
+            <div v-else-if="!activeTab(paneName)" class="empty-state compact">没有打开的标签页，点击 + 新建。</div>
             <template v-else>
               <div
                 v-if="parentDirectoryEntry(paneName)"
@@ -285,18 +307,25 @@
                 @keydown.enter.prevent="openEntry(paneName, entry)"
               >
                 <span class="file-cell file-icon-cell">
-                  <img
-                    v-if="!systemIconFailed(entry)"
-                    class="file-system-icon"
-                    :src="fileIconURL(entry)"
-                    alt=""
-                    draggable="false"
-                    @load="markSystemIconLoaded(entry)"
-                    @error="markSystemIconFailed(entry)"
-                  />
-                  <el-icon v-else class="file-kind-icon"><Folder v-if="entry.is_dir" /><Document v-else /></el-icon>
+                  <span class="file-icon-stack">
+                    <img
+                      v-if="!systemIconFailed(entry)"
+                      class="file-system-icon"
+                      :src="fileIconURL(entry)"
+                      alt=""
+                      draggable="false"
+                      @load="markSystemIconLoaded(entry)"
+                      @error="markSystemIconFailed(entry)"
+                    />
+                    <el-icon v-else class="file-kind-icon"><Folder v-if="entry.is_dir" /><Document v-else /></el-icon>
+                    <el-icon
+                      v-if="entry.is_symlink"
+                      class="file-link-badge"
+                      :class="{ 'is-broken': entry.link_broken }"
+                    ><Link /></el-icon>
+                  </span>
                 </span>
-                <span class="file-cell file-name-cell" :title="entry.path">{{ entry.name }}</span>
+                <span class="file-cell file-name-cell" :title="entryTooltip(entry)">{{ entry.name }}</span>
                 <span class="file-column-divider file-column-divider-name-size" aria-hidden="true" />
                 <span class="file-cell file-size-cell">{{ entry.is_dir ? '' : formatBytes(entry.size) }}</span>
                 <span class="file-column-divider file-column-divider-size-time" aria-hidden="true" />
@@ -489,6 +518,14 @@
     </Teleport>
 
     <Teleport to="body">
+      <div v-if="tabContextMenu.visible" class="sftp-context-menu" :style="{ left: `${tabContextMenu.x}px`, top: `${tabContextMenu.y}px` }" role="menu">
+        <button type="button" role="menuitem" @click="runTabContextAction('duplicate')">复制</button>
+        <button type="button" role="menuitem" @click="runTabContextAction('close')">关闭</button>
+        <button type="button" role="menuitem" class="is-danger" @click="runTabContextAction('closeAll')">全部关闭</button>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
       <div v-if="conflictDialog.visible" class="upload-conflict-backdrop">
         <div class="upload-conflict-dialog" role="dialog" aria-modal="true">
           <div class="upload-conflict-title">目标中已存在同名项目</div>
@@ -529,14 +566,15 @@ import {
   FolderAdd,
   FolderOpened,
   Hide,
+  Link,
   Plus,
   Refresh,
-  Select,
   Upload,
   View
 } from '@element-plus/icons-vue'
-import { api, APIError, baseName, formatBytes, formatDate, joinPath, launcherToken, launcherTokenHeader, parentPath, postJSON, type FileEntry, type HostKeyInfo, type Profile } from '../api'
+import { api, baseName, formatBytes, formatDate, joinPath, launcherToken, launcherTokenHeader, parentPath, postJSON, type FileEntry, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
+import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import {
   collectDropUploadEntries,
   filesToUploadEntries,
@@ -590,12 +628,6 @@ interface PaneState {
   sortKey: SortKey
   sortDirection: SortDirection
   scrollState: ScrollState
-  draft: {
-    kind: TabKind
-    localPath: string
-    remotePath: string
-    profileID: string
-  }
 }
 
 interface ScrollState {
@@ -638,6 +670,22 @@ interface TransferContextMenuState {
   x: number
   y: number
   item: TransferItem | null
+}
+
+interface TabContextMenuState {
+  visible: boolean
+  x: number
+  y: number
+  pane: PaneName | null
+  tabID: string
+}
+
+interface TabDragState {
+  active: boolean
+  pane: PaneName
+  tabID: string
+  targetID: string
+  position: 'before' | 'after'
 }
 
 interface RelativeTransfer<T> {
@@ -727,10 +775,7 @@ const FILE_BODY_VERTICAL_PADDING = 4
 const VIRTUAL_ROW_OVERSCAN = 10
 const TRANSFER_PROGRESS_POLL_MS = 80
 const DIRECTORY_HISTORY_LIMIT = 20
-const newTabOptions = computed(() => [
-  { label: t('sftp.local'), value: 'local' },
-  { label: t('sftp.remote'), value: 'remote' }
-])
+const TRANSFER_MAX_DEPTH = 64
 const transferPanelOptions = computed(() => [
   { label: t('sftp.transfer'), value: 'transfers' },
   { label: t('sftp.logs'), value: 'logs' }
@@ -790,6 +835,20 @@ const transferContextMenu = ref<TransferContextMenuState>({
   x: 0,
   y: 0,
   item: null
+})
+const tabContextMenu = ref<TabContextMenuState>({
+  visible: false,
+  x: 0,
+  y: 0,
+  pane: null,
+  tabID: ''
+})
+const tabDrag = reactive<TabDragState>({
+  active: false,
+  pane: 'left',
+  tabID: '',
+  targetID: '',
+  position: 'before'
 })
 
 const panes = reactive<Record<PaneName, PaneState>>({
@@ -880,8 +939,7 @@ function makePane(): PaneState {
       verticalThumbOffset: 0,
       horizontalThumbSize: FLOATING_SCROLLBAR_MIN_THUMB,
       horizontalThumbOffset: 0
-    },
-    draft: { kind: 'local', localPath: '.', remotePath: '.', profileID: '' }
+    }
   }
 }
 
@@ -1202,20 +1260,10 @@ async function withHostKey<T>(path: string, payload: Record<string, unknown>) {
   try {
     return await postJSON<T>(path, payload)
   } catch (error) {
-    const err = error as APIError
-    const hostKey = err.data?.host_key as HostKeyInfo | undefined
-    if (!hostKey || hostKey.mismatch) throw error
-    await ElMessageBox.confirm(
-      t('launcher.hostKeyConfirm', {
-        address: hostKey.address,
-        keyType: hostKey.key_type,
-        fingerprint: hostKey.fingerprint,
-        path: hostKey.known_hosts_path
-      }),
-      t('launcher.hostKeyTitle'),
-      { type: 'warning' }
-    )
-    return await postJSON<T>(path, { ...payload, accept_host_key: true })
+    const hostKey = hostKeyFromError(error)
+    if (!hostKey) throw error
+    const trust = await confirmHostKey(hostKey)
+    return await postJSON<T>(path, { ...payload, ...trust })
   }
 }
 
@@ -1287,13 +1335,25 @@ function entryTypeRank(entry: FileEntry) {
   return entry.is_dir ? 0 : 1
 }
 
+function fileIconSourceName(entry: FileEntry) {
+  if (entry.is_dir) return 'folder'
+  // A link usually has no extension of its own; the target decides the icon.
+  return entry.link_target || entry.name || entry.path
+}
+
 function fileIconURL(entry: FileEntry) {
   const params = new URLSearchParams({
-    name: entry.is_dir ? 'folder' : entry.name || entry.path,
+    name: fileIconSourceName(entry),
     is_dir: entry.is_dir ? '1' : '0',
     size: '16'
   })
   return `/api/file-icon?${params.toString()}`
+}
+
+function entryTooltip(entry: FileEntry) {
+  if (!entry.is_symlink) return entry.path
+  if (entry.link_broken) return `${entry.path}\n链接目标不存在${entry.link_target ? `：${entry.link_target}` : ''}`
+  return entry.link_target ? `${entry.path}\n链接到：${entry.link_target}` : `${entry.path}\n符号链接`
 }
 
 function parentDirectoryIconURL(paneName: PaneName) {
@@ -1337,12 +1397,15 @@ function markParentDirectoryIconFailed(paneName: PaneName) {
 function systemIconKey(entry: FileEntry) {
   if (entry.is_dir) return 'dir'
   const pathKey = (entry.path || entry.name || '').trim().toLowerCase()
-  const name = (entry.name || entry.path || '').trim().toLowerCase()
-  const lastSlash = Math.max(pathKey.lastIndexOf('/'), pathKey.lastIndexOf('\\'))
-  const base = lastSlash >= 0 ? pathKey.slice(lastSlash + 1) : name
+  return `${iconExtension(fileIconSourceName(entry))}:${pathKey}`
+}
+
+function iconExtension(value: string) {
+  const clean = (value || '').trim().toLowerCase()
+  const lastSlash = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'))
+  const base = lastSlash >= 0 ? clean.slice(lastSlash + 1) : clean
   const dot = base.lastIndexOf('.')
-  const ext = dot >= 0 ? base.slice(dot) : 'file'
-  return `${ext}:${pathKey || name}`
+  return dot >= 0 ? base.slice(dot) : 'file'
 }
 
 function clearSystemIconFailure(key: string) {
@@ -1689,20 +1752,6 @@ function toggleHidden(paneName: PaneName) {
   nextTick(() => updateVirtualMetrics(paneName))
 }
 
-async function openDraftTab(paneName: PaneName) {
-  const pane = panes[paneName]
-  if (pane.draft.kind === 'local') {
-    await openLocalTab(paneName, pane.draft.localPath || home.value)
-    return
-  }
-  const profile = remoteProfiles.value.find(item => item.id === pane.draft.profileID)
-  if (!profile) {
-    ElMessage.warning('请先选择已保存的服务器')
-    return
-  }
-  await openRemoteTab(paneName, profile, pane.draft.remotePath || '.')
-}
-
 async function openLocalTab(paneName: PaneName, path: string) {
   const pane = panes[paneName]
   const tab = localTab(path)
@@ -1741,16 +1790,163 @@ async function openRemoteTab(paneName: PaneName, profile: Profile, path: string)
 
 async function closeTab(paneName: PaneName, tabID: string) {
   const pane = panes[paneName]
-  if (pane.tabs.length <= 1) {
-    ElMessage.warning('每个窗口至少保留一个标签页')
-    return
+  const index = pane.tabs.findIndex(item => item.id === tabID)
+  if (index < 0) return
+  const [tab] = pane.tabs.splice(index, 1)
+  if (pane.active === tabID) {
+    const next = pane.tabs[Math.min(index, pane.tabs.length - 1)] || null
+    pane.active = next?.id || ''
   }
-  const tab = pane.tabs.find(item => item.id === tabID)
-  pane.tabs = pane.tabs.filter(item => item.id !== tabID)
-  if (pane.active === tabID) pane.active = pane.tabs[0]?.id || ''
-  if (tab?.kind === 'remote' && tab.session) {
+  closeTabContextMenu()
+  if (tab.kind === 'remote' && tab.session) {
     await postJSON('/api/sftp/disconnect', { session: tab.session }).catch(() => undefined)
   }
+  await nextTick()
+  updateVirtualMetrics(paneName)
+}
+
+async function closeAllTabs(paneName: PaneName) {
+  const pane = panes[paneName]
+  const closing = pane.tabs.splice(0, pane.tabs.length)
+  pane.active = ''
+  pane.newMenuOpen = false
+  pane.dropActive = false
+  closeTabContextMenu()
+  await Promise.all(closing
+    .filter(tab => tab.kind === 'remote' && tab.session)
+    .map(tab => postJSON('/api/sftp/disconnect', { session: tab.session }).catch(() => undefined)))
+  await nextTick()
+  updateVirtualMetrics(paneName)
+}
+
+async function duplicateTab(paneName: PaneName, tab: FileTab) {
+  if (tab.kind === 'local') {
+    await openLocalTab(paneName, tab.path || tab.loadedPath)
+    return
+  }
+  const profile = remoteProfiles.value.find(item => item.id === tab.profileID)
+  if (!profile) {
+    ElMessage.warning('找不到该标签页的服务器配置')
+    return
+  }
+  await openRemoteTab(paneName, profile, tab.path || tab.loadedPath || '.')
+}
+
+function openTabContextMenu(paneName: PaneName, tabID: string, event: MouseEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+  closeContextMenu()
+  const menuWidth = 176
+  const menuHeight = 116
+  tabContextMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8)),
+    y: Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8)),
+    pane: paneName,
+    tabID
+  }
+}
+
+function closeTabContextMenu() {
+  if (!tabContextMenu.value.visible) return
+  tabContextMenu.value = { visible: false, x: 0, y: 0, pane: null, tabID: '' }
+}
+
+async function runTabContextAction(action: 'duplicate' | 'close' | 'closeAll') {
+  const paneName = tabContextMenu.value.pane
+  const tabID = tabContextMenu.value.tabID
+  closeTabContextMenu()
+  if (!paneName) return
+  if (action === 'closeAll') {
+    await closeAllTabs(paneName)
+    return
+  }
+  const tab = tabByID(paneName, tabID)
+  if (!tab) return
+  if (action === 'duplicate') {
+    await duplicateTab(paneName, tab)
+    return
+  }
+  await closeTab(paneName, tabID)
+}
+
+function isTabDragging(paneName: PaneName, tabID: string) {
+  return tabDrag.active && tabDrag.pane === paneName && tabDrag.tabID === tabID
+}
+
+function isTabDropTarget(paneName: PaneName, tabID: string, position: 'before' | 'after') {
+  return tabDrag.active && tabDrag.pane === paneName && tabDrag.targetID === tabID && tabDrag.position === position
+}
+
+function startTabDrag(paneName: PaneName, tabID: string, event: DragEvent) {
+  if (!event.dataTransfer) return
+  event.stopPropagation()
+  tabDrag.active = true
+  tabDrag.pane = paneName
+  tabDrag.tabID = tabID
+  tabDrag.targetID = ''
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('text/plain', tabID)
+  panes[paneName].dropActive = false
+}
+
+function handleTabDragOver(paneName: PaneName, tabID: string, event: DragEvent) {
+  if (!tabDrag.active || tabDrag.pane !== paneName || tabDrag.tabID === tabID) return
+  event.preventDefault()
+  event.stopPropagation()
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  tabDrag.targetID = tabID
+  tabDrag.position = event.clientX < rect.left + rect.width / 2 ? 'before' : 'after'
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
+function handleTabDragLeave(paneName: PaneName, tabID: string, event: DragEvent) {
+  if (!tabDrag.active || tabDrag.pane !== paneName || tabDrag.targetID !== tabID) return
+  const current = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  const related = event.relatedTarget instanceof Node ? event.relatedTarget : null
+  if (current && related && current.contains(related)) return
+  tabDrag.targetID = ''
+}
+
+async function handleTabDrop(paneName: PaneName, tabID: string) {
+  if (!tabDrag.active || tabDrag.pane !== paneName || tabDrag.tabID === tabID) return
+  const pane = panes[paneName]
+  const fromIndex = pane.tabs.findIndex(tab => tab.id === tabDrag.tabID)
+  if (fromIndex < 0) return
+  const position = tabDrag.position
+  const [moved] = pane.tabs.splice(fromIndex, 1)
+  let targetIndex = pane.tabs.findIndex(tab => tab.id === tabID)
+  if (targetIndex < 0) {
+    pane.tabs.push(moved)
+  } else {
+    if (position === 'after') targetIndex += 1
+    pane.tabs.splice(targetIndex, 0, moved)
+  }
+  finishTabDrag()
+  await nextTick()
+  updateVirtualMetrics(paneName)
+}
+
+function finishTabDrag() {
+  tabDrag.active = false
+  tabDrag.tabID = ''
+  tabDrag.targetID = ''
+}
+
+function isAbsoluteTabPath(path: string, kind: TabKind) {
+  if (!path) return false
+  if (path.startsWith('/')) return true
+  return kind === 'local' && (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\'))
+}
+
+// Resolve '.' and other relative inputs before listing so the path bar and every
+// entry path stay absolute from the first load onward.
+async function resolveTabPath(tab: FileTab, path: string) {
+  if (tab.kind !== 'remote' || isAbsoluteTabPath(path, tab.kind) || !path.trim() || !tab.session) return path
+  const resolved = await api<{ path: string }>(
+    `/api/sftp/realpath?session=${encodeURIComponent(tab.session)}&path=${encodeURIComponent(path)}`
+  ).catch(() => null)
+  return resolved?.path?.trim() || path
 }
 
 async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: { recordHistory?: boolean } = {}) {
@@ -1760,6 +1956,7 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
   tab.selected = []
   tab.anchorPath = ''
   try {
+    tab.path = await resolveTabPath(tab, tab.path)
     const data = tab.kind === 'local'
       ? await api<{ path: string; entries: FileEntry[] }>(`/api/local/list?path=${encodeURIComponent(tab.path)}`)
       : await api<{ path: string; entries: FileEntry[] }>(`/api/sftp/list?session=${encodeURIComponent(tab.session || '')}&path=${encodeURIComponent(tab.path)}`)
@@ -2041,6 +2238,7 @@ function openFileContextMenu(paneName: PaneName, index: number, entry: FileEntry
   event.preventDefault()
   event.stopPropagation()
   closeTransferContextMenu()
+  closeTabContextMenu()
   if (!isSelected(paneName, entry)) {
     tab.selected = [entry]
     tab.anchorPath = entry.path
@@ -2062,6 +2260,7 @@ function closeContextMenu() {
     contextMenu.value = { visible: false, x: 0, y: 0, pane: null, entry: null }
   }
   closeTransferContextMenu()
+  closeTabContextMenu()
 }
 
 async function runContextAction(action: 'open' | 'openText' | 'copyPath' | 'rename' | 'delete') {
@@ -2074,7 +2273,7 @@ async function runContextAction(action: 'open' | 'openText' | 'copyPath' | 'rena
   } else if (action === 'openText') {
     await openTextFile(paneName, entry)
   } else if (action === 'copyPath') {
-    await copyEntryPath(entry)
+    await copyEntryPath(paneName, entry)
   } else if (action === 'rename') {
     await renameEntry(paneName, entry)
   } else if (action === 'delete') {
@@ -2094,6 +2293,7 @@ function openTransferContextMenu(item: TransferItem, event: MouseEvent) {
   const menuWidth = 180
   const menuHeight = 150
   contextMenu.value = { visible: false, x: 0, y: 0, pane: null, entry: null }
+  closeTabContextMenu()
   transferContextMenu.value = {
     visible: true,
     x: Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8)),
@@ -2434,6 +2634,9 @@ async function collectTransferEntry(source: FileTab, entry: FileEntry, relativeP
     isDir: entry.is_dir
   })
   if (!entry.is_dir) return
+  if (relativeDepth(cleanRelative) >= TRANSFER_MAX_DEPTH) {
+    throw new Error(`目录层级超过 ${TRANSFER_MAX_DEPTH} 层，可能存在循环符号链接：${entry.path}`)
+  }
   const listing = await listTabDirectory(source, entry.path)
   for (const child of listing.entries) {
     await collectTransferEntry(source, child, `${cleanRelative}/${child.name}`, tasks)
@@ -2643,8 +2846,16 @@ async function openTextFile(paneName: PaneName, entry: FileEntry) {
   log(`用记事本编辑远程文件缓存：${entry.path} -> ${result.path}`)
 }
 
-async function copyEntryPath(entry: FileEntry) {
-  await writeClipboard(entry.path)
+async function copyEntryPath(paneName: PaneName, entry: FileEntry) {
+  const tab = activeTab(paneName)
+  let value = entry.path
+  if (tab?.kind === 'remote' && tab.session && !value.startsWith('/')) {
+    const resolved = await api<{ path: string }>(
+      `/api/sftp/realpath?session=${encodeURIComponent(tab.session)}&path=${encodeURIComponent(value)}`
+    ).catch(() => null)
+    if (resolved?.path) value = resolved.path
+  }
+  await writeClipboard(value)
   ElMessage.success('已复制路径')
 }
 
@@ -3175,8 +3386,6 @@ onMounted(async () => {
   const homeData = await api<{ path: string }>('/api/local/home')
   home.value = homeData.path || '.'
   paneNames.forEach(paneName => {
-    panes[paneName].draft.localPath = home.value
-    panes[paneName].draft.profileID = remoteProfiles.value[0]?.id || ''
     const tab = localTab(home.value)
     panes[paneName].tabs.push(tab)
     panes[paneName].active = tab.id

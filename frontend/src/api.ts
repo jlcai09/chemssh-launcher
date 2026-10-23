@@ -28,6 +28,9 @@ export interface FileEntry {
   size: number
   mode: string
   mod_time: string
+  is_symlink?: boolean
+  link_target?: string
+  link_broken?: boolean
 }
 
 export interface HostKeyInfo {
@@ -36,6 +39,7 @@ export interface HostKeyInfo {
   key_type: string
   fingerprint: string
   known_hosts_path: string
+  previous_fingerprints?: string[]
   mismatch: boolean
 }
 

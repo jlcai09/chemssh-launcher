@@ -15,16 +15,16 @@ import (
 	"chemssh-launcher/internal/browser"
 	"chemssh-launcher/internal/config"
 	"chemssh-launcher/internal/sftpclient"
-	"chemssh-launcher/internal/sshclient"
 )
 
 type sftpSessionRequest struct {
-	ID            string `json:"id"`
-	Session       string `json:"session"`
-	Path          string `json:"path"`
-	NewPath       string `json:"new_path"`
-	TransferID    string `json:"transfer_id"`
-	AcceptHostKey bool   `json:"accept_host_key"`
+	ID             string `json:"id"`
+	Session        string `json:"session"`
+	Path           string `json:"path"`
+	NewPath        string `json:"new_path"`
+	TransferID     string `json:"transfer_id"`
+	AcceptHostKey  bool   `json:"accept_host_key"`
+	ReplaceHostKey bool   `json:"replace_host_key"`
 }
 
 func (s *Server) handleSFTPConnect(w http.ResponseWriter, r *http.Request) {
@@ -46,10 +46,7 @@ func (s *Server) handleSFTPConnect(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("local ChemSSH profiles do not provide SFTP"))
 		return
 	}
-	policy := sshclient.HostKeyStrict
-	if req.AcceptHostKey {
-		policy = sshclient.HostKeyAcceptNew
-	}
+	policy := hostKeyPolicyForRequest(req.AcceptHostKey, req.ReplaceHostKey)
 	s.logs.add("SFTP connection requested for " + profile.Name)
 	session, err := s.sftp.Connect(profile, s.rt.Secrets, policy)
 	if err != nil {

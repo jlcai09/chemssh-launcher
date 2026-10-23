@@ -95,6 +95,7 @@ button {
   height: 100dvh;
   min-height: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 52px minmax(0, 1fr);
 }
 
@@ -235,6 +236,7 @@ p,
 }
 
 .app-main {
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -260,6 +262,7 @@ p,
 .settings-section,
 .log-panel,
 .xftp-pane,
+.terminal-sessions,
 .transfer-log,
 .transfer-panel {
   min-width: 0;
@@ -634,7 +637,8 @@ p,
   grid-row: 1;
 }
 
-.xftp-tabs {
+.xftp-tabs,
+.terminal-tabs {
   min-width: 0;
   display: flex;
   align-items: center;
@@ -647,7 +651,8 @@ p,
 }
 
 .xftp-tab,
-.browser-tab {
+.browser-tab,
+.terminal-tab {
   min-width: 0;
   display: inline-flex;
   align-items: center;
@@ -660,14 +665,16 @@ p,
   cursor: pointer;
 }
 
-.xftp-tab {
+.xftp-tab,
+.terminal-tab {
   max-width: 210px;
   height: 30px;
   padding: 0 7px;
 }
 
 .xftp-tab.active,
-.browser-tab.active {
+.browser-tab.active,
+.terminal-tab.active {
   color: #103f50;
   border-color: rgba(22, 115, 143, 0.42);
   background: var(--accent-weak);
@@ -675,7 +682,8 @@ p,
 }
 
 .xftp-tab > span:nth-child(2),
-.browser-tab > span {
+.browser-tab > span,
+.terminal-tab-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -683,7 +691,8 @@ p,
 }
 
 .xftp-tab-close,
-.browser-tab-close {
+.browser-tab-close,
+.terminal-tab-close {
   width: 18px;
   height: 18px;
   display: inline-grid;
@@ -694,23 +703,125 @@ p,
 }
 
 .xftp-tab-close:hover,
-.browser-tab-close:hover {
+.browser-tab-close:hover,
+.terminal-tab-close:hover {
   color: var(--danger);
   background: #fdecec;
 }
 
-.xftp-add-tab {
+.xftp-add-tab,
+.terminal-add-tab {
   flex: 0 0 auto;
+}
+
+.xftp-tab,
+.terminal-tab {
+  position: relative;
+}
+
+.xftp-tab.is-tab-dragging,
+.terminal-tab.is-tab-dragging {
+  opacity: 0.4;
+}
+
+.xftp-tab.is-tab-drop-before::before,
+.xftp-tab.is-tab-drop-after::after,
+.terminal-tab.is-tab-drop-before::before,
+.terminal-tab.is-tab-drop-after::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.xftp-tab.is-tab-drop-before::before,
+.terminal-tab.is-tab-drop-before::before {
+  left: -5px;
+}
+
+.xftp-tab.is-tab-drop-after::after,
+.terminal-tab.is-tab-drop-after::after {
+  right: -5px;
 }
 
 .xftp-new-menu {
   display: grid;
-  gap: 10px;
+  gap: 2px;
+  max-height: 60vh;
+  overflow: auto;
 }
 
-.xftp-new-form {
+.xftp-new-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.xftp-new-item:hover,
+.xftp-new-item:focus-visible {
+  background: rgba(14, 116, 144, 0.09);
+  outline: none;
+}
+
+.xftp-new-item-icon {
   display: grid;
-  gap: 8px;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: rgba(14, 116, 144, 0.09);
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.xftp-new-item-text {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.xftp-new-item-name,
+.xftp-new-item-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xftp-new-item-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.xftp-new-item-meta {
+  color: #667085;
+  font-size: 11.5px;
+}
+
+.xftp-new-group {
+  padding: 8px 8px 2px;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.xftp-new-empty {
+  padding: 8px;
+  color: #667085;
+  font-size: 12px;
 }
 
 .path-bar {
@@ -1181,6 +1292,28 @@ p,
   pointer-events: none;
 }
 
+.file-icon-stack {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+
+.file-link-badge {
+  position: absolute;
+  right: -7px;
+  bottom: -5px;
+  font-size: 11px;
+  color: var(--accent);
+  filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff);
+  pointer-events: none;
+}
+
+.file-link-badge.is-broken {
+  color: #c2452d;
+}
+
 .file-column-divider {
   position: relative;
   align-self: stretch;
@@ -1243,7 +1376,8 @@ p,
   background: rgba(71, 85, 105, 0.68);
 }
 
-.sftp-context-menu {
+.sftp-context-menu,
+.terminal-tab-menu {
   position: fixed;
   z-index: 4000;
   min-width: 176px;
@@ -1257,7 +1391,8 @@ p,
   backdrop-filter: blur(20px) saturate(1.2);
 }
 
-.sftp-context-menu button {
+.sftp-context-menu button,
+.terminal-tab-menu button {
   width: 100%;
   min-height: 30px;
   display: flex;
@@ -1275,23 +1410,29 @@ p,
 }
 
 .sftp-context-menu button:hover,
-.sftp-context-menu button:focus-visible {
+.sftp-context-menu button:focus-visible,
+.terminal-tab-menu button:hover,
+.terminal-tab-menu button:focus-visible {
   color: #103f50;
   background: var(--accent-weak);
   outline: 0;
 }
 
-.sftp-context-menu button.is-danger {
+.sftp-context-menu button.is-danger,
+.terminal-tab-menu button.is-danger {
   color: var(--danger);
 }
 
 .sftp-context-menu button.is-danger:hover,
-.sftp-context-menu button.is-danger:focus-visible {
+.sftp-context-menu button.is-danger:focus-visible,
+.terminal-tab-menu button.is-danger:hover,
+.terminal-tab-menu button.is-danger:focus-visible {
   color: #8f1d15;
   background: #fff0ef;
 }
 
-.sftp-context-menu button:disabled {
+.sftp-context-menu button:disabled,
+.terminal-tab-menu button:disabled {
   color: #98a2b3;
   background: transparent;
   cursor: not-allowed;
@@ -1927,7 +2068,8 @@ p,
 
 .topbar .el-button.is-circle,
 .browser-chrome .el-button.is-circle,
-.xftp-add-tab.el-button.is-circle {
+.xftp-add-tab.el-button.is-circle,
+.terminal-add-tab.el-button.is-circle {
   width: 32px;
   height: 32px;
   border: 1.5px solid rgba(94, 111, 126, 0.2);
@@ -1941,7 +2083,9 @@ p,
 .browser-chrome .el-button.is-circle:hover,
 .browser-chrome .el-button.is-circle:focus-visible,
 .xftp-add-tab.el-button.is-circle:hover,
-.xftp-add-tab.el-button.is-circle:focus-visible {
+.xftp-add-tab.el-button.is-circle:focus-visible,
+.terminal-add-tab.el-button.is-circle:hover,
+.terminal-add-tab.el-button.is-circle:focus-visible {
   transform: translateY(-2px) scale(1.05);
   border-color: rgba(14, 116, 144, 0.4);
   background: linear-gradient(135deg, #ffffff 0%, #e8f4f7 100%);
@@ -1951,7 +2095,8 @@ p,
 
 .topbar .el-button.is-circle:active,
 .browser-chrome .el-button.is-circle:active,
-.xftp-add-tab.el-button.is-circle:active {
+.xftp-add-tab.el-button.is-circle:active,
+.terminal-add-tab.el-button.is-circle:active {
   transform: translateY(0) scale(1);
   box-shadow: 0 2px 4px rgba(24, 39, 54, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
@@ -2164,10 +2309,12 @@ body,
 .settings-section,
 .log-panel,
 .xftp-pane,
+.terminal-sessions,
 .transfer-log,
 .transfer-panel,
 .toolbar-submenu,
 .sftp-context-menu,
+.terminal-tab-menu,
 .canvas-file-drop-overlay,
 .upload-conflict-backdrop,
 .upload-conflict-dialog,
@@ -2183,7 +2330,9 @@ body,
 .panel-header,
 .launcher-toolbar,
 .logs-title,
+.terminal-sessions-title,
 .xftp-tabs,
+.terminal-tabs,
 .file-toolbar,
 .path-bar,
 .blank-page {
@@ -2195,6 +2344,7 @@ body,
 .settings-section,
 .log-panel,
 .xftp-pane,
+.terminal-sessions,
 .transfer-log,
 .transfer-panel,
 .form-section,
@@ -2219,6 +2369,7 @@ body,
 .topbar .el-button.is-circle,
 .browser-chrome .el-button.is-circle,
 .xftp-add-tab.el-button.is-circle,
+.terminal-add-tab.el-button.is-circle,
 .el-button {
   border-color: var(--control-border);
   background: var(--control-bg);
@@ -2238,6 +2389,8 @@ body,
 .browser-chrome .el-button.is-circle:focus-visible,
 .xftp-add-tab.el-button.is-circle:hover,
 .xftp-add-tab.el-button.is-circle:focus-visible,
+.terminal-add-tab.el-button.is-circle:hover,
+.terminal-add-tab.el-button.is-circle:focus-visible,
 .el-button:not(.is-disabled):hover,
 .el-button:not(.is-disabled):focus-visible {
   border-color: var(--control-border-hover);
@@ -2253,6 +2406,7 @@ body,
 .topbar .el-button.is-circle:active,
 .browser-chrome .el-button.is-circle:active,
 .xftp-add-tab.el-button.is-circle:active,
+.terminal-add-tab.el-button.is-circle:active,
 .el-button:not(.is-disabled):active {
   background: var(--control-active);
   transform: none;
@@ -2368,6 +2522,7 @@ body,
 .profile-card,
 .xftp-tab,
 .browser-tab,
+.terminal-tab,
 .cache-entry {
   border-color: var(--panel-border);
   background: #ffffff;
@@ -2377,7 +2532,9 @@ body,
 .profile-card:hover,
 .profile-card:focus-visible,
 .xftp-tab:hover,
-.browser-tab:hover {
+.browser-tab:hover,
+.terminal-tab:hover,
+.terminal-tab:focus-visible {
   border-color: var(--control-border-hover);
   background: var(--control-bg-hover);
   box-shadow: none !important;
@@ -2386,7 +2543,8 @@ body,
 
 .profile-card.is-active,
 .xftp-tab.active,
-.browser-tab.active {
+.browser-tab.active,
+.terminal-tab.active {
   border-color: var(--accent);
   background: var(--accent-weak);
   color: #073647;
@@ -2615,7 +2773,9 @@ body,
 .panel-header,
 .launcher-toolbar,
 .logs-title,
+.terminal-sessions-title,
 .xftp-tabs,
+.terminal-tabs,
 .file-toolbar,
 .path-bar,
 .blank-page {
@@ -2627,6 +2787,7 @@ body,
 .settings-section,
 .log-panel,
 .xftp-pane,
+.terminal-sessions,
 .transfer-log,
 .transfer-panel {
   background: #ffffff;
@@ -2659,6 +2820,7 @@ body,
   .settings-section,
   .log-panel,
   .xftp-pane,
+  .terminal-sessions,
   .transfer-panel {
     border-radius: 12px;
   }
@@ -2685,6 +2847,7 @@ body,
   .settings-section,
   .log-panel,
   .xftp-pane,
+  .terminal-sessions,
   .transfer-log,
   .transfer-panel,
   .topbar,
@@ -2774,14 +2937,169 @@ body,
 
 .terminal-view {
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: 224px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.terminal-sessions {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.terminal-sessions-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--panel-border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72) 0%, rgba(244, 249, 251, 0.5) 100%);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.terminal-sessions-count {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--soft-bg);
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.terminal-session-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 6px;
+  overflow: auto;
+}
+
+.terminal-session {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 8px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 6px 8px;
+  color: #24313d;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.terminal-session:hover,
+.terminal-session:focus-visible {
+  border-color: rgba(22, 115, 143, 0.28);
+  background: rgba(14, 116, 144, 0.07);
+  outline: 0;
+}
+
+.terminal-session.is-active {
+  border-color: rgba(22, 115, 143, 0.32);
+  background: var(--accent-weak);
+}
+
+.terminal-session-icon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(14, 116, 144, 0.1);
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.terminal-session-text {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.terminal-session-text strong,
+.terminal-session-text small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-session-text strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.terminal-session-text small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.terminal-session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #f59e0b;
+}
+
+.terminal-session-dot.is-live {
+  background: #22c55e;
+}
+
+.terminal-sessions-empty {
+  display: grid;
+  gap: 6px;
+  padding: 18px 10px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.terminal-sessions-empty span {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.terminal-sessions-empty small {
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.terminal-tab-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+
+.terminal-tab-dot.is-connecting {
+  background: #f59e0b;
+}
+
+.terminal-tab-dot.is-connected {
+  background: #22c55e;
+}
+
+.terminal-tab-dot.is-error {
+  background: var(--danger);
 }
 
 .terminal-card {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-panel);
   background: #f8fbfd;
@@ -2790,27 +3108,68 @@ body,
   overflow: hidden;
 }
 
-.terminal-toolbar {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--panel-border);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72) 0%, rgba(244, 249, 251, 0.5) 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
-}
-
-.terminal-toolbar-main {
+.terminal-footer {
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 5px 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  background: #0d151c;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 11px;
 }
 
-.terminal-profile-select {
-  width: min(340px, 40vw);
+.terminal-footer-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.terminal-footer .el-button.is-circle {
+  width: 26px;
+  height: 26px;
+  border-color: rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  color: #cbd5e1;
+}
+
+.terminal-footer .el-button.is-circle:hover,
+.terminal-footer .el-button.is-circle:focus-visible {
+  border-color: rgba(125, 211, 252, 0.4);
+  background: rgba(125, 211, 252, 0.14);
+  color: #e2e8f0;
+}
+
+.terminal-footer .el-button.is-circle.is-disabled,
+.terminal-footer .el-button.is-circle.is-disabled:hover,
+.terminal-footer .el-button.is-circle.is-disabled:focus-visible {
+  border-color: rgba(148, 163, 184, 0.08);
+  background: transparent;
+  color: rgba(148, 163, 184, 0.35);
+  cursor: not-allowed;
+}
+
+.terminal-footer .terminal-upload-ring {
+  color: inherit;
+}
+
+.terminal-footer .terminal-upload-percent {
+  right: -6px;
+  bottom: -3px;
+}
+
+.terminal-footer-address {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(148, 163, 184, 0.86);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
 }
 
 .terminal-status {
@@ -2821,6 +3180,21 @@ body,
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.terminal-footer .terminal-status {
+  gap: 7px;
+  color: rgba(203, 213, 225, 0.6);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.terminal-footer .terminal-status.is-connected {
+  color: #4ade80;
+}
+
+.terminal-footer .terminal-status.is-error {
+  color: #fca5a5;
 }
 
 .terminal-status.is-connected {
@@ -2923,16 +3297,20 @@ body,
 
 .terminal-host .xterm {
   height: 100%;
-  padding: 4px;
   background-color: #0b1218;
 }
 
-.terminal-host .xterm-screen,
-.terminal-host .xterm-viewport {
+/* xterm.css paints the viewport and the IME composition box pure black, and it is
+   bundled after this file with the same specificity, so its black showed through in
+   the padding ring and the space the cell grid leaves over. Three classes win on
+   specificity regardless of source order. */
+.terminal-host .xterm .xterm-screen,
+.terminal-host .xterm .xterm-viewport,
+.terminal-host .xterm .composition-view {
   background-color: #0b1218;
 }
 
-.terminal-host .xterm-viewport {
+.terminal-host .xterm .xterm-viewport {
   scrollbar-color: rgba(125, 211, 252, 0.35) transparent;
 }
 
@@ -2989,22 +3367,49 @@ body,
   font-size: 12px;
 }
 
-@media (max-width: 720px) {
-  .terminal-toolbar {
-    align-items: stretch;
-    flex-direction: column;
+@media (max-width: 900px) {
+  .terminal-view {
+    grid-template-columns: 64px minmax(0, 1fr);
   }
 
-  .terminal-toolbar-main {
-    flex-wrap: wrap;
+  .terminal-sessions-title {
+    justify-content: center;
+    padding: 10px 6px;
+    font-size: 0;
   }
 
-  .terminal-profile-select {
-    width: 100%;
+  .terminal-sessions-count {
+    display: none;
   }
 
-  .terminal-status {
-    justify-content: flex-end;
+  .terminal-session {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    padding: 7px 4px;
+  }
+
+  .terminal-session-text,
+  .terminal-session-dot {
+    display: none;
+  }
+
+  .terminal-session-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .terminal-sessions-empty {
+    padding: 12px 4px;
+  }
+
+  .terminal-sessions-empty small {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .terminal-footer-address {
+    display: none;
   }
 }
 
@@ -3017,6 +3422,16 @@ body,
 .profile-card.is-draft .state-dot {
   background: transparent;
   border: 1px dashed rgba(14, 116, 144, 0.72);
+}
+
+.host-key-confirm-dialog .el-message-box__message p,
+.host-key-mismatch-dialog .el-message-box__message p {
+  white-space: pre-line;
+}
+
+.host-key-mismatch-dialog .el-message-box__message {
+  max-height: 55vh;
+  overflow: auto;
 }
 
 .profile-card.is-draft.is-active {

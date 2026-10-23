@@ -84,8 +84,8 @@ If the remote ChemSSH port is already serving a reusable ChemSSH instance, the l
 - Remote and local profile support.
 - Profile-scoped logs plus launcher/backend logs.
 - OS credential-store secrets, encrypted vault fallback, and OpenSSH-compatible `known_hosts`.
-- Standalone SSH debug terminal at `/terminal` that works before ChemSSH is installed.
-- Drag files or folders from the OS into the SSH terminal, or use the toolbar upload button, to upload them over SFTP with a progress ring.
+- Standalone SSH debug terminal at `/terminal` that works before ChemSSH is installed, with an Xshell-style server sidebar.
+- Drag files or folders from the OS into the SSH terminal, or use the upload button in the bottom status bar, to upload them over SFTP with a progress ring.
 - Standalone SFTP page at `/sftp`.
 - Xftp-style two-pane file manager with local and remote tabs.
 - File operations: list, open, open in text editor, create file, create directory, rename, delete, copy path.
@@ -152,7 +152,11 @@ The terminal page provides a basic interactive SSH shell for remote profiles wit
 
 It can be used before ChemSSH is installed to inspect the server, check paths, load modules, or run simple commands. The launcher opens a direct SSH connection and requests a remote PTY (`xterm-256color`); authentication and host-key verification use the same profile and `known_hosts` policy as normal sessions. Terminal size is forwarded on resize, and sessions are closed when you disconnect, delete the profile, or exit the launcher. Local profiles do not provide an SSH terminal.
 
-Drag files or folders from the OS file manager onto the terminal to upload them over SFTP, or click the upload button in the toolbar to pick files manually; the button shows a progress ring and percentage while uploading. The launcher tracks the shell's current working directory from a prompt marker (falling back to the remote home directory when unavailable), so uploads follow the directory you are currently in; relative subdirectories are created as needed, and existing items require confirmation. The SFTP session is tied to the active terminal and is released when the terminal disconnects.
+The page follows an Xshell-style layout: a left sidebar lists the saved remote profiles, and clicking one connects it. If that server already has a session, the matching tab is activated; otherwise the active idle tab is reused or a new tab is opened. On narrow windows the sidebar collapses to a compact icon column. The clear and upload buttons, the `ssh://user@host:port` address, and the connection status live in the status bar at the bottom of the terminal.
+
+Each tab holds its own SSH shell and transfer session. Click `+` in the tab strip to open another tab, right-click a tab to duplicate it, close it, or close all tabs, or double-click a tab to duplicate it. A duplicated tab reconnects to the same profile and runs `cd` into the directory the source tab was in, so parallel shells start in the same place. Drag a tab left or right to reorder the tab strip.
+
+Drag files or folders from the OS file manager onto the terminal to upload them over SFTP, or click the upload button on the left side of the bottom status bar to pick files manually; the button shows a progress ring and percentage while uploading. The launcher tracks the shell's current working directory from a prompt marker (falling back to the remote home directory when unavailable), so uploads follow the directory you are currently in; relative subdirectories are created as needed, and existing items require confirmation. The SFTP session is tied to the active terminal and is released when the terminal disconnects.
 
 The launcher also installs temporary `sz`/`rz` shims into the remote shell's `PATH`, mirroring ChemSSH's own terminal integration: `rz` opens the local file picker and uploads into the current directory, while `sz <files>` downloads those files through SFTP. The shims exit immediately after emitting a transfer marker, so they cannot leave the terminal waiting. If shell integration cannot be installed, native ZMODEM signatures are intercepted with Ctrl-C to keep the terminal usable. Drag-and-drop and the SFTP page remain the recommended transfer paths.
 
@@ -164,7 +168,11 @@ The SFTP page is independent from ChemSSH startup. It can be opened from the lau
 /sftp
 ```
 
-Each side of the page can hold multiple tabs. A tab can browse the local filesystem or connect to a saved remote profile over SSH/SFTP. Remote SFTP tabs require a remote profile and successful host-key verification, but they do not start ChemSSH, run start commands, create tunnels, or depend on ChemSSH health checks.
+Each side of the page can hold multiple tabs. A tab can browse the local filesystem or connect to a saved remote profile over SSH/SFTP. Remote SFTP tabs require a remote profile and successful host-key verification, but they do not start ChemSSH, run start commands, create tunnels, or depend on ChemSSH health checks. Right-click a tab to duplicate it, close it, or close all tabs, or double-click a tab to duplicate it; duplicating a remote tab reconnects to the same profile and opens the same directory. Drag tabs left or right to reorder them, and use `+` to reopen one after closing all tabs. The `+` menu is a flat list of the local filesystem plus every saved remote profile; clicking an entry opens a tab for that side directly and starts at the local home directory or the remote home directory, with no path prompt or extra confirmation.
+
+The path bar always shows an absolute path: relative input such as `.` or `user/data` is resolved through the server before the directory is listed, and copying a file path from the context menu copies the absolute path.
+
+Symbolic links are resolved while a directory is listed: a link to a directory shows a folder icon with a link badge and opens on double-click, and the row tooltip shows the link target. Deleting a link removes the link itself, never the target.
 
 Supported transfer paths include:
 
@@ -255,7 +263,7 @@ WebView2 data and temporary SFTP-open cache paths are shown in the Backend page.
 
 ChemSSH Launcher relies on SSH for authentication, encryption, host-key verification, and local port forwarding. The launcher manages profile storage, secret lookup, remote/local process startup, SFTP sessions, and local HTTP proxying.
 
-On the first connection to a server, the GUI/CLI shows the host key type and SHA256 fingerprint. Trust it only after comparing it with a reliable source, such as a server administrator or an existing trusted SSH client. If a saved host key changes later, the launcher blocks the connection.
+On the first connection to a server, the GUI/CLI shows the host key type and SHA256 fingerprint. Trust it only after comparing it with a reliable source, such as a server administrator or an existing trusted SSH client. If a saved host key changes later, the GUI blocks the connection and shows both the saved and the new fingerprint; the old key is replaced in `known_hosts` only after you verify the new fingerprint and explicitly confirm. The CLI continues to reject changed keys.
 
 Binding `Local Host` to anything other than loopback, such as `0.0.0.0`, can expose the tunnel or local ChemSSH target to other machines. The launcher logs a warning, but the setting is still your responsibility.
 

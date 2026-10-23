@@ -16,12 +16,15 @@ import (
 )
 
 type localEntry struct {
-	Name    string    `json:"name"`
-	Path    string    `json:"path"`
-	IsDir   bool      `json:"is_dir"`
-	Size    int64     `json:"size"`
-	Mode    string    `json:"mode"`
-	ModTime time.Time `json:"mod_time"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	IsDir      bool      `json:"is_dir"`
+	Size       int64     `json:"size"`
+	Mode       string    `json:"mode"`
+	ModTime    time.Time `json:"mod_time"`
+	IsSymlink  bool      `json:"is_symlink,omitempty"`
+	LinkTarget string    `json:"link_target,omitempty"`
+	LinkBroken bool      `json:"link_broken,omitempty"`
 }
 
 type localListResult struct {
@@ -267,6 +270,9 @@ func (s *Server) handleLocalCopy(w http.ResponseWriter, r *http.Request) {
 
 func listLocalDirectory(value string) (localListResult, error) {
 	clean := localCleanPath(value)
+	if absolute, err := filepath.Abs(clean); err == nil {
+		clean = absolute
+	}
 	entries, err := os.ReadDir(clean)
 	if err != nil {
 		return localListResult{}, err
@@ -283,18 +289,21 @@ func listLocalDirectory(value string) (localListResult, error) {
 			continue
 		}
 		name := entry.Name()
-		isDir := info.IsDir()
+		item := localEntry{
+			Name:    name,
+			Path:    filepath.Join(clean, name),
+			IsDir:   info.IsDir(),
+			Size:    info.Size(),
+			Mode:    info.Mode().String(),
+			ModTime: info.ModTime(),
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			item.resolveLink()
+		}
 		sortable = append(sortable, sortableLocalEntry{
-			isFile:   !isDir,
+			isFile:   !item.IsDir,
 			sortName: strings.ToLower(name),
-			entry: localEntry{
-				Name:    name,
-				Path:    filepath.Join(clean, name),
-				IsDir:   isDir,
-				Size:    info.Size(),
-				Mode:    info.Mode().String(),
-				ModTime: info.ModTime(),
-			},
+			entry:    item,
 		})
 	}
 	sort.Slice(sortable, func(i, j int) bool {
@@ -308,6 +317,23 @@ func listLocalDirectory(value string) (localListResult, error) {
 		items[index] = item.entry
 	}
 	return localListResult{Path: clean, Entries: items}, nil
+}
+
+// resolveLink replaces the link's own attributes with the target's, so links to
+// directories can be opened from the file browser just like over SFTP.
+func (e *localEntry) resolveLink() {
+	e.IsSymlink = true
+	if target, err := os.Readlink(e.Path); err == nil {
+		e.LinkTarget = target
+	}
+	info, err := os.Stat(e.Path)
+	if err != nil {
+		e.LinkBroken = true
+		return
+	}
+	e.IsDir = info.IsDir()
+	e.Size = info.Size()
+	e.ModTime = info.ModTime()
 }
 
 func (s *Server) copyLocalFile(sourcePath, targetDir, relativePath, transferID string) error {

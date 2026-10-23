@@ -7,18 +7,22 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
 )
 
 type RemoteEntry struct {
-	Name    string    `json:"name"`
-	Path    string    `json:"path"`
-	IsDir   bool      `json:"is_dir"`
-	Size    int64     `json:"size"`
-	Mode    string    `json:"mode"`
-	ModTime time.Time `json:"mod_time"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	IsDir      bool      `json:"is_dir"`
+	Size       int64     `json:"size"`
+	Mode       string    `json:"mode"`
+	ModTime    time.Time `json:"mod_time"`
+	IsSymlink  bool      `json:"is_symlink,omitempty"`
+	LinkTarget string    `json:"link_target,omitempty"`
+	LinkBroken bool      `json:"link_broken,omitempty"`
 }
 
 type ListResult struct {
@@ -31,6 +35,10 @@ type FileInfo struct {
 	Size int64
 }
 
+// linkResolveWorkers bounds the parallel stat lookups used to follow symlinks
+// while listing a directory; each lookup costs an extra SSH round trip.
+const linkResolveWorkers = 8
+
 func listDirectory(client *sftp.Client, remotePath string) (ListResult, error) {
 	cleanPath := CleanPath(remotePath)
 	infos, err := client.ReadDir(cleanPath)
@@ -38,26 +46,42 @@ func listDirectory(client *sftp.Client, remotePath string) (ListResult, error) {
 		return ListResult{}, err
 	}
 	type sortableRemoteEntry struct {
-		isFile   bool
 		sortName string
 		entry    RemoteEntry
 	}
 	sortable := make([]sortableRemoteEntry, 0, len(infos))
+	var symlinks []int
 	for _, info := range infos {
 		name := info.Name()
 		if name == "." || name == ".." {
 			continue
 		}
-		isDir := info.IsDir()
 		sortable = append(sortable, sortableRemoteEntry{
-			isFile:   !isDir,
 			sortName: strings.ToLower(name),
-			entry:    entryFromInfo(cleanPath, info, name, isDir),
+			entry:    entryFromInfo(cleanPath, info, name, info.IsDir()),
 		})
+		if info.Mode()&os.ModeSymlink != 0 {
+			symlinks = append(symlinks, len(sortable)-1)
+		}
+	}
+	if len(symlinks) > 0 {
+		var wg sync.WaitGroup
+		workers := make(chan struct{}, linkResolveWorkers)
+		for _, index := range symlinks {
+			entry := &sortable[index].entry
+			wg.Add(1)
+			workers <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-workers }()
+				entry.resolveLink(client)
+			}()
+		}
+		wg.Wait()
 	}
 	sort.Slice(sortable, func(i, j int) bool {
-		if sortable[i].isFile != sortable[j].isFile {
-			return !sortable[i].isFile
+		if sortable[i].entry.IsDir != sortable[j].entry.IsDir {
+			return sortable[i].entry.IsDir
 		}
 		return sortable[i].sortName < sortable[j].sortName
 	})
@@ -167,11 +191,13 @@ func deletePath(client *sftp.Client, remotePath string) error {
 }
 
 func deletePathRecursive(client *sftp.Client, cleanPath string) error {
-	info, err := client.Stat(cleanPath)
+	info, err := client.Lstat(cleanPath)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() {
+	// A link to a directory is deleted as a link: walking the target would
+	// destroy files the user only meant to unlink.
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return client.Remove(cleanPath)
 	}
 	entries, err := client.ReadDir(cleanPath)
@@ -198,6 +224,23 @@ func entryFromInfo(parent string, info os.FileInfo, name string, isDir bool) Rem
 		Mode:    info.Mode().String(),
 		ModTime: info.ModTime(),
 	}
+}
+
+// resolveLink replaces the link's own attributes with the target's, so a link
+// to a directory can be opened and a link to a file reports its real size.
+func (e *RemoteEntry) resolveLink(client *sftp.Client) {
+	e.IsSymlink = true
+	if target, err := client.ReadLink(e.Path); err == nil {
+		e.LinkTarget = target
+	}
+	info, err := client.Stat(e.Path)
+	if err != nil {
+		e.LinkBroken = true
+		return
+	}
+	e.IsDir = info.IsDir()
+	e.Size = info.Size()
+	e.ModTime = info.ModTime()
 }
 
 func CleanPath(value string) string {
