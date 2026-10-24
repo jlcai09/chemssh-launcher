@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"chemssh-launcher/internal/browser"
+	"chemssh-launcher/internal/trash"
 )
 
 type localEntry struct {
@@ -117,17 +118,11 @@ func (s *Server) handleLocalDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("refusing to delete root or current directory"))
 		return
 	}
-	info, err := os.Stat(clean)
-	if err != nil {
+	if _, err := os.Stat(clean); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	if info.IsDir() {
-		if err := os.RemoveAll(clean); err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
-		}
-	} else if err := os.Remove(clean); err != nil {
+	if err := trash.Move(clean); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}

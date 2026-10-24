@@ -20,6 +20,15 @@ The launcher exists because ChemSSH is usually run on a remote Linux server or H
 - Decode and write repository text files as UTF-8.
 - Documentation files, especially README.md, README.zh-CN.md, and AGENTS.md, must remain valid UTF-8.
 
+## Privacy and Placeholder Conventions
+
+- Never put a real username, hostname, server address, internal path, or account name into documentation, examples, tests, commit messages, or issue text.
+- Use placeholders instead: `user`, `example.com`, `example-server`, `/home/user/project`, `C:\Users\user\Desktop`.
+- When documenting a path that comes from a real machine, rewrite the user-specific segment as `user` before writing it. For example, a Windows desktop path becomes `C:\Users\user\Desktop`, and a remote home path becomes `/home/user/project`.
+- Never quote a real value as an example, even when illustrating this rule.
+- Generic credentials and tokens in examples must be obvious dummies such as `password`, `token`, `REPLACE_ME`, or `***`.
+- Screenshots and logs pasted into documentation follow the same rule: crop, mask, or replace real identifiers first.
+
 ## ChemSSH Context
 
 ChemSSH normally starts like this on the remote machine:

@@ -627,6 +627,11 @@ p,
   grid-template-rows: 42px 48px 46px minmax(0, 1fr);
 }
 
+.xftp-pane.is-tab-drop-pane {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
+}
+
 .sftp-workspace > .xftp-pane:nth-of-type(1) {
   grid-column: 1;
   grid-row: 1;

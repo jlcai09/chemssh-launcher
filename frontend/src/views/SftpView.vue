@@ -1,17 +1,26 @@
 <template>
-  <section class="sftp-view">
+  <section ref="sftpRoot" class="sftp-view">
     <div class="sftp-workspace">
       <section
         v-for="paneName in paneNames"
         :key="paneName"
         class="xftp-pane"
-        :class="{ 'is-drop-active': panes[paneName].dropActive }"
+        :class="{
+          'is-drop-active': panes[paneName].dropActive,
+          'is-tab-drop-pane': isTabDragOverPane(paneName)
+        }"
+        @mousedown.capture="setFocusedPane(paneName)"
+        @focusin.capture="setFocusedPane(paneName)"
         @dragenter="handleDragEnter(paneName, $event)"
         @dragover="handleDragOver(paneName, $event)"
         @dragleave="handleDragLeave(paneName, $event)"
         @drop="handleDrop(paneName, $event)"
       >
-        <div class="xftp-tabs">
+        <div
+          class="xftp-tabs"
+          @dragover="handleTabStripDragOver(paneName, $event)"
+          @drop.prevent.stop="handleTabStripDrop(paneName)"
+        >
           <button
             v-for="tab in panes[paneName].tabs"
             :key="tab.id"
@@ -245,8 +254,7 @@
             @scroll="handleBodyScroll(paneName)"
             @mousedown.left="beginBlankSelect(paneName, $event)"
           >
-            <div v-if="activeTab(paneName)?.loading" class="empty-state compact">正在读取目录...</div>
-            <div v-else-if="!activeTab(paneName)" class="empty-state compact">没有打开的标签页，点击 + 新建。</div>
+            <div v-if="!activeTab(paneName)" class="empty-state compact">没有打开的标签页，点击 + 新建。</div>
             <template v-else>
               <div
                 v-if="parentDirectoryEntry(paneName)"
@@ -254,9 +262,10 @@
                 role="row"
                 tabindex="0"
                 draggable="false"
+                data-file-role="parent"
+                :data-file-path="parentDirectoryEntry(paneName)?.path || ''"
                 @mousedown.left.stop
-                @click.prevent
-                @dblclick="openParentDirectory(paneName)"
+                @click.prevent="handleParentRowClick(paneName, $event)"
                 @keydown.enter.prevent="openParentDirectory(paneName)"
               >
                 <span class="file-cell file-icon-cell">
@@ -277,7 +286,9 @@
                 <span class="file-column-divider file-column-divider-size-time" aria-hidden="true" />
                 <span class="file-cell file-time-cell" />
               </div>
-              <div v-if="visibleEntries(paneName).length === 0" class="empty-state compact">目录为空。</div>
+              <div v-if="visibleEntries(paneName).length === 0" class="empty-state compact">
+                {{ activeTab(paneName)?.loading ? '正在读取目录...' : '目录为空。' }}
+              </div>
               <div class="file-list-virtual-spacer" :style="{ height: `${topSpacerHeight(paneName)}px` }" aria-hidden="true" />
               <div
                 v-for="{ entry, index } in virtualRows(paneName)"
@@ -293,10 +304,11 @@
                 role="row"
                 tabindex="0"
                 draggable="true"
+                data-file-role="item"
+                :data-file-path="entry.path"
                 @mousedown.left="beginSelect(paneName, index, entry, $event)"
-                @click.prevent
+                @click.prevent="handleRowClick(paneName, entry, $event)"
                 @contextmenu.prevent="openFileContextMenu(paneName, index, entry, $event)"
-                @dblclick="openEntry(paneName, entry)"
                 @mouseenter="extendSelection(paneName, index)"
                 @dragstart="startFileDrag(paneName, index, entry, $event)"
                 @dragenter="handleFolderDragOver(paneName, entry, $event)"
@@ -684,8 +696,10 @@ interface TabDragState {
   active: boolean
   pane: PaneName
   tabID: string
+  targetPane: PaneName
   targetID: string
   position: 'before' | 'after'
+  overPane: PaneName
 }
 
 interface RelativeTransfer<T> {
@@ -760,6 +774,9 @@ const appDragType = 'application/x-chemssh-launcher-file-transfer'
 const safeNamePattern = /^[^/\\]+$/
 const LONG_PRESS_MS = 430
 const SELECT_DRAG_THRESHOLD = 4
+const ROW_DOUBLE_CLICK_MS = 500
+const ROW_DOUBLE_CLICK_DISTANCE = 6
+const DEFERRED_OPEN_MAX_AGE = 800
 const DEFAULT_SIZE_COLUMN_WIDTH = 88
 const DEFAULT_TIME_COLUMN_WIDTH = 152
 const MIN_NAME_COLUMN_WIDTH = 160
@@ -807,6 +824,8 @@ const uploadInputs: Record<PaneName, Partial<Record<UploadKind, HTMLInputElement
   right: {}
 }
 const dragging = ref<DragPayload | null>(null)
+const sftpRoot = ref<HTMLElement | null>(null)
+const focusedPane = ref<PaneName>('left')
 const folderDropTarget = ref<{ pane: PaneName; path: string } | null>(null)
 const activeColumnResize = ref<{ pane: PaneName; target: ColumnResizeTarget } | null>(null)
 const rangeDragPane = ref<PaneName | null>(null)
@@ -847,8 +866,10 @@ const tabDrag = reactive<TabDragState>({
   active: false,
   pane: 'left',
   tabID: '',
+  targetPane: 'left',
   targetID: '',
-  position: 'before'
+  position: 'before',
+  overPane: 'left'
 })
 
 const panes = reactive<Record<PaneName, PaneState>>({
@@ -866,6 +887,10 @@ let pressIndex: number | null = null
 let pressStartX = 0
 let pressStartY = 0
 let longPressTimer: number | null = null
+type RowClickGesture = { time: number; x: number; y: number }
+type DeferredOpenGesture = RowClickGesture & { tabID: string }
+const lastRowClicks: Record<PaneName, RowClickGesture | null> = { left: null, right: null }
+const deferredOpenGestures: Record<PaneName, DeferredOpenGesture | null> = { left: null, right: null }
 let blankDragStartX = 0
 let blankDragStartY = 0
 let blankDragCurrentX = 0
@@ -876,6 +901,7 @@ let openSyncPolling = false
 let scrollResizeObserver: ResizeObserver | null = null
 let activeScrollbarDrag: ScrollbarDragState | null = null
 let activeTransferScrollbarDrag: TransferScrollbarDragState | null = null
+const deletingPanes = new Set<PaneName>()
 
 const activeTransferSummary = computed(() => {
   const running = transferItems.value.filter(item => item.status === 'running').length
@@ -957,8 +983,13 @@ function tabByID(paneName: PaneName, tabID: string) {
 }
 
 function activateTab(paneName: PaneName, tabID: string) {
+  clearPaneGestures(paneName)
   panes[paneName].active = tabID
   nextTick(() => updateVirtualMetrics(paneName))
+}
+
+function setFocusedPane(paneName: PaneName) {
+  focusedPane.value = paneName
 }
 
 function localTab(path: string): FileTab {
@@ -1789,6 +1820,7 @@ async function openRemoteTab(paneName: PaneName, profile: Profile, path: string)
 }
 
 async function closeTab(paneName: PaneName, tabID: string) {
+  clearPaneGestures(paneName)
   const pane = panes[paneName]
   const index = pane.tabs.findIndex(item => item.id === tabID)
   if (index < 0) return
@@ -1874,8 +1906,12 @@ function isTabDragging(paneName: PaneName, tabID: string) {
   return tabDrag.active && tabDrag.pane === paneName && tabDrag.tabID === tabID
 }
 
+function isTabDragOverPane(paneName: PaneName) {
+  return tabDrag.active && tabDrag.pane !== paneName && tabDrag.overPane === paneName
+}
+
 function isTabDropTarget(paneName: PaneName, tabID: string, position: 'before' | 'after') {
-  return tabDrag.active && tabDrag.pane === paneName && tabDrag.targetID === tabID && tabDrag.position === position
+  return tabDrag.active && tabDrag.targetPane === paneName && tabDrag.targetID === tabID && tabDrag.position === position
 }
 
 function startTabDrag(paneName: PaneName, tabID: string, event: DragEvent) {
@@ -1884,16 +1920,21 @@ function startTabDrag(paneName: PaneName, tabID: string, event: DragEvent) {
   tabDrag.active = true
   tabDrag.pane = paneName
   tabDrag.tabID = tabID
+  tabDrag.targetPane = paneName
   tabDrag.targetID = ''
+  tabDrag.overPane = paneName
   event.dataTransfer.effectAllowed = 'move'
   event.dataTransfer.setData('text/plain', tabID)
   panes[paneName].dropActive = false
 }
 
 function handleTabDragOver(paneName: PaneName, tabID: string, event: DragEvent) {
-  if (!tabDrag.active || tabDrag.pane !== paneName || tabDrag.tabID === tabID) return
+  if (!tabDrag.active) return
   event.preventDefault()
   event.stopPropagation()
+  tabDrag.targetPane = paneName
+  tabDrag.overPane = paneName
+  if (tabDrag.pane === paneName && tabDrag.tabID === tabID) return
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
   tabDrag.targetID = tabID
   tabDrag.position = event.clientX < rect.left + rect.width / 2 ? 'before' : 'after'
@@ -1901,36 +1942,75 @@ function handleTabDragOver(paneName: PaneName, tabID: string, event: DragEvent) 
 }
 
 function handleTabDragLeave(paneName: PaneName, tabID: string, event: DragEvent) {
-  if (!tabDrag.active || tabDrag.pane !== paneName || tabDrag.targetID !== tabID) return
+  if (!tabDrag.active || tabDrag.targetPane !== paneName || tabDrag.targetID !== tabID) return
   const current = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
   const related = event.relatedTarget instanceof Node ? event.relatedTarget : null
   if (current && related && current.contains(related)) return
   tabDrag.targetID = ''
 }
 
+function handleTabStripDragOver(paneName: PaneName, event: DragEvent) {
+  if (!tabDrag.active) return
+  event.preventDefault()
+  tabDrag.targetPane = paneName
+  tabDrag.overPane = paneName
+  tabDrag.targetID = ''
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
 async function handleTabDrop(paneName: PaneName, tabID: string) {
-  if (!tabDrag.active || tabDrag.pane !== paneName || tabDrag.tabID === tabID) return
-  const pane = panes[paneName]
-  const fromIndex = pane.tabs.findIndex(tab => tab.id === tabDrag.tabID)
+  if (!tabDrag.active) return
+  if (tabDrag.pane === paneName && tabDrag.tabID === tabID) return
+  await moveTab(tabDrag.pane, tabDrag.tabID, paneName, tabID, tabDrag.position)
+}
+
+async function handleTabStripDrop(paneName: PaneName) {
+  if (!tabDrag.active || tabDrag.targetID) return
+  await moveTab(tabDrag.pane, tabDrag.tabID, paneName, '', 'after')
+}
+
+async function dropTabOnPane(paneName: PaneName) {
+  if (!tabDrag.active || tabDrag.pane === paneName) return
+  await moveTab(tabDrag.pane, tabDrag.tabID, paneName, '', 'after')
+}
+
+async function moveTab(
+  sourcePane: PaneName,
+  tabID: string,
+  targetPane: PaneName,
+  targetTabID: string,
+  position: 'before' | 'after'
+) {
+  clearPaneGestures(sourcePane)
+  if (targetPane !== sourcePane) clearPaneGestures(targetPane)
+  const source = panes[sourcePane]
+  const fromIndex = source.tabs.findIndex(tab => tab.id === tabID)
   if (fromIndex < 0) return
-  const position = tabDrag.position
-  const [moved] = pane.tabs.splice(fromIndex, 1)
-  let targetIndex = pane.tabs.findIndex(tab => tab.id === tabID)
+  const [moved] = source.tabs.splice(fromIndex, 1)
+  const target = panes[targetPane]
+  let targetIndex = targetTabID ? target.tabs.findIndex(tab => tab.id === targetTabID) : -1
   if (targetIndex < 0) {
-    pane.tabs.push(moved)
+    target.tabs.push(moved)
   } else {
     if (position === 'after') targetIndex += 1
-    pane.tabs.splice(targetIndex, 0, moved)
+    target.tabs.splice(targetIndex, 0, moved)
+  }
+  target.active = moved.id
+  if (sourcePane !== targetPane && source.active === tabID) {
+    const nextIndex = Math.min(fromIndex, source.tabs.length - 1)
+    source.active = nextIndex >= 0 ? source.tabs[nextIndex].id : ''
   }
   finishTabDrag()
   await nextTick()
-  updateVirtualMetrics(paneName)
+  updateVirtualMetrics(targetPane)
+  if (sourcePane !== targetPane) updateVirtualMetrics(sourcePane)
 }
 
 function finishTabDrag() {
   tabDrag.active = false
   tabDrag.tabID = ''
   tabDrag.targetID = ''
+  tabDrag.overPane = tabDrag.pane
 }
 
 function isAbsoluteTabPath(path: string, kind: TabKind) {
@@ -1949,30 +2029,43 @@ async function resolveTabPath(tab: FileTab, path: string) {
   return resolved?.path?.trim() || path
 }
 
+const tabLoadSequence = new WeakMap<FileTab, number>()
+
 async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: { recordHistory?: boolean } = {}) {
   if (!tab) return
+  const sequence = (tabLoadSequence.get(tab) ?? 0) + 1
+  tabLoadSequence.set(tab, sequence)
+  const isLatest = () => tabLoadSequence.get(tab) === sequence
   const previousPath = tab.loadedPath || tab.path
   tab.loading = true
   tab.selected = []
   tab.anchorPath = ''
   try {
-    tab.path = await resolveTabPath(tab, tab.path)
+    const resolvedPath = await resolveTabPath(tab, tab.path)
+    if (!isLatest()) return
+    tab.path = resolvedPath
     const data = tab.kind === 'local'
       ? await api<{ path: string; entries: FileEntry[] }>(`/api/local/list?path=${encodeURIComponent(tab.path)}`)
       : await api<{ path: string; entries: FileEntry[] }>(`/api/sftp/list?session=${encodeURIComponent(tab.session || '')}&path=${encodeURIComponent(tab.path)}`)
+    if (!isLatest()) return
     const nextPath = data.path || tab.path
     tab.path = nextPath
     tab.loadedPath = nextPath
     tab.entries = rawFileEntries(data.entries)
+    tab.selected = []
+    tab.anchorPath = ''
     if (options.recordHistory) recordDirectoryHistory(tab, previousPath, nextPath)
     tab.title = tabLabel(tab)
     clearSystemIconFailure('dir')
   } catch (error) {
+    if (!isLatest()) return
     ElMessage.error((error as Error).message)
     log(`失败：${(error as Error).message}`)
   } finally {
-    tab.loading = false
-    nextTick(() => updateVirtualMetrics(paneName))
+    if (isLatest()) {
+      tab.loading = false
+      nextTick(() => updateVirtualMetrics(paneName))
+    }
   }
 }
 
@@ -1988,8 +2081,9 @@ async function goPath(paneName: PaneName) {
 async function openParentDirectory(paneName: PaneName) {
   const tab = activeTab(paneName)
   if (!tab) return
-  const parent = parentPath(tab.loadedPath || tab.path, tab.kind)
-  if (!parent || parent === (tab.loadedPath || tab.path)) return
+  const current = tab.path || tab.loadedPath
+  const parent = parentPath(current, tab.kind)
+  if (!parent || parent === current) return
   tab.path = parent
   await loadTab(paneName, tab, { recordHistory: true })
 }
@@ -1997,7 +2091,7 @@ async function openParentDirectory(paneName: PaneName) {
 function parentDirectoryEntry(paneName: PaneName) {
   const tab = activeTab(paneName)
   if (!tab) return null
-  const current = tab.loadedPath || tab.path
+  const current = tab.path || tab.loadedPath
   const parent = parentPath(current, tab.kind)
   if (!parent || parent === current) return null
   return {
@@ -2042,6 +2136,86 @@ function handleHistoryCommand(paneName: PaneName, command: string | number | boo
 function recordDirectoryHistory(tab: FileTab, previousPath: string, nextPath: string) {
   if (!previousPath || previousPath === nextPath) return
   tab.history = [previousPath, ...tab.history.filter(path => path !== previousPath)].slice(0, DIRECTORY_HISTORY_LIMIT)
+}
+
+function clearPaneGestures(paneName: PaneName) {
+  lastRowClicks[paneName] = null
+  deferredOpenGestures[paneName] = null
+}
+
+function clearAllPaneGestures() {
+  for (const paneName of paneNames) clearPaneGestures(paneName)
+}
+
+function consumeRowDoubleClick(paneName: PaneName, event: MouseEvent) {
+  const now = performance.now()
+  const last = lastRowClicks[paneName]
+  const isDouble = Boolean(
+    last &&
+      now - last.time <= ROW_DOUBLE_CLICK_MS &&
+      Math.abs(event.clientX - last.x) <= ROW_DOUBLE_CLICK_DISTANCE &&
+      Math.abs(event.clientY - last.y) <= ROW_DOUBLE_CLICK_DISTANCE
+  )
+  lastRowClicks[paneName] = isDouble ? null : { time: now, x: event.clientX, y: event.clientY }
+  return isDouble
+}
+
+// 第二次双击落在“正在加载的那个目录”行上时，屏幕上的行还是上一份列表，
+// 直接打开只会命中旧目标。记住屏幕位置，等本次列表渲染后再按位置重新解析。
+function queueDeferredOpenGesture(paneName: PaneName, tab: FileTab, event: MouseEvent) {
+  deferredOpenGestures[paneName] = { tabID: tab.id, time: performance.now(), x: event.clientX, y: event.clientY }
+}
+
+function resolveRowAtPoint(paneName: PaneName, x: number, y: number) {
+  const element = document.elementFromPoint(x, y)
+  const row = element instanceof Element ? element.closest<HTMLElement>('.file-row') : null
+  if (!row || !panes[paneName].bodyRef?.contains(row)) return null
+  const path = row.dataset.filePath
+  if (!path) return null
+  return { role: row.dataset.fileRole === 'parent' ? 'parent' : 'item', path }
+}
+
+function resolveDeferredOpenGesture(paneName: PaneName) {
+  const gesture = deferredOpenGestures[paneName]
+  if (!gesture) return
+  deferredOpenGestures[paneName] = null
+  if (performance.now() - gesture.time > DEFERRED_OPEN_MAX_AGE) return
+  const row = resolveRowAtPoint(paneName, gesture.x, gesture.y)
+  if (!row) return
+  const tab = activeTab(paneName)
+  if (!tab || tab.loading || tab.id !== gesture.tabID) return
+  if (row.role === 'parent') {
+    void openParentDirectory(paneName)
+    return
+  }
+  const entry = visibleEntries(paneName).find(candidate => candidate.path === row.path)
+  if (entry && entry.path !== tab.path) void openEntry(paneName, entry)
+}
+
+function handleRowClick(paneName: PaneName, entry: FileEntry, event: MouseEvent) {
+  if (event.button !== 0) return
+  if (!consumeRowDoubleClick(paneName, event)) return
+  const tab = activeTab(paneName)
+  if (tab?.loading && entry.is_dir && entry.path === tab.path) {
+    queueDeferredOpenGesture(paneName, tab, event)
+    return
+  }
+  void openEntry(paneName, entry)
+}
+
+function handleParentRowClick(paneName: PaneName, event: MouseEvent) {
+  if (event.button !== 0) return
+  if (!consumeRowDoubleClick(paneName, event)) return
+  void openParentDirectory(paneName)
+}
+
+for (const paneName of paneNames) {
+  watch(
+    () => activeTab(paneName)?.loading,
+    (loading, previousLoading) => {
+      if (previousLoading && !loading) void nextTick(() => resolveDeferredOpenGesture(paneName))
+    }
+  )
 }
 
 function beginSelect(paneName: PaneName, index: number, entry: FileEntry, event: MouseEvent) {
@@ -2154,6 +2328,7 @@ function extendSelection(paneName: PaneName, index: number) {
 function beginBlankSelect(paneName: PaneName, event: MouseEvent) {
   const target = event.target
   if (target instanceof Element && target.closest('.file-row')) return
+  clearPaneGestures(paneName)
   event.preventDefault()
   resetPressState()
   blankDragPane.value = paneName
@@ -2374,6 +2549,7 @@ async function openEntry(paneName: PaneName, entry: FileEntry) {
     await openFile(paneName, entry)
     return
   }
+  if (entry.path === tab.path && tab.loading) return
   tab.path = entry.path
   await loadTab(paneName, tab, { recordHistory: true })
 }
@@ -2422,52 +2598,63 @@ async function promptEntryName(title: string, message: string) {
 }
 
 async function deleteSelected(paneName: PaneName) {
+  if (deletingPanes.has(paneName)) return
   const tab = activeTab(paneName)
   const selected = selectedEntries(paneName)
   if (!tab || selected.length === 0) {
     ElMessage.warning('请先选择文件或目录')
     return
   }
-  const directories = selected.filter(entry => entry.is_dir)
-  if (directories.length > 0) {
-    const summary = await inspectDeleteDirectories(tab, directories)
-    const emptyText = summary.empty.length > 0
-      ? `<p class="delete-confirm-note">检测到 ${summary.empty.length} 个文件夹为空。</p>`
-      : ''
-    const nonEmptyText = summary.nonEmpty.length > 0
-      ? `<div class="delete-confirm-danger"><strong>检测到 ${summary.nonEmpty.length} 个非空文件夹</strong><span>这些文件夹会连同内部所有文件和子文件夹一起删除。</span>${deleteConfirmList(summary.nonEmpty)}</div>`
-      : ''
-    const unknownText = summary.unknown.length > 0
-      ? `<p class="delete-confirm-note">有 ${summary.unknown.length} 个文件夹无法确认是否为空，将按文件夹删除处理。</p>`
-      : ''
-    const title = summary.nonEmpty.length > 0 ? '递归删除确认' : '确认删除'
-    await ElMessageBox.confirm(
-      `<div class="delete-confirm-content"><p>将删除选中的 <strong>${selected.length}</strong> 项，其中包含 <strong>${directories.length}</strong> 个文件夹。</p>${emptyText}${nonEmptyText}${unknownText}<p class="delete-confirm-tail">此操作不可撤销。</p></div>`,
-      title,
-      {
-        dangerouslyUseHTMLString: true,
-        type: summary.nonEmpty.length > 0 ? 'error' : 'warning',
-        confirmButtonText: summary.nonEmpty.length > 0 ? '递归删除' : '删除',
-        cancelButtonText: '取消',
-        confirmButtonClass: summary.nonEmpty.length > 0 ? 'el-button--danger' : undefined
-      }
-    )
-  } else {
-    await ElMessageBox.confirm(`删除选中的 ${selected.length} 项？此操作不可撤销。`, '确认删除', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消'
-    })
-  }
-  for (const entry of selected) {
-    if (tab.kind === 'local') {
-      await postJSON('/api/local/delete', { path: entry.path })
+  if (tab.kind === 'remote') {
+    const directories = selected.filter(entry => entry.is_dir)
+    if (directories.length > 0) {
+      const summary = await inspectDeleteDirectories(tab, directories)
+      const emptyText = summary.empty.length > 0
+        ? `<p class="delete-confirm-note">检测到 ${summary.empty.length} 个文件夹为空。</p>`
+        : ''
+      const nonEmptyText = summary.nonEmpty.length > 0
+        ? `<div class="delete-confirm-danger"><strong>检测到 ${summary.nonEmpty.length} 个非空文件夹</strong><span>这些文件夹会连同内部所有文件和子文件夹一起删除。</span>${deleteConfirmList(summary.nonEmpty)}</div>`
+        : ''
+      const unknownText = summary.unknown.length > 0
+        ? `<p class="delete-confirm-note">有 ${summary.unknown.length} 个文件夹无法确认是否为空，将按文件夹删除处理。</p>`
+        : ''
+      const title = summary.nonEmpty.length > 0 ? '递归删除确认' : '确认删除'
+      await ElMessageBox.confirm(
+        `<div class="delete-confirm-content"><p>将删除选中的 <strong>${selected.length}</strong> 项，其中包含 <strong>${directories.length}</strong> 个文件夹。</p>${emptyText}${nonEmptyText}${unknownText}<p class="delete-confirm-tail">此操作不可撤销。</p></div>`,
+        title,
+        {
+          dangerouslyUseHTMLString: true,
+          type: summary.nonEmpty.length > 0 ? 'error' : 'warning',
+          confirmButtonText: summary.nonEmpty.length > 0 ? '递归删除' : '删除',
+          cancelButtonText: '取消',
+          confirmButtonClass: summary.nonEmpty.length > 0 ? 'el-button--danger' : undefined
+        }
+      )
     } else {
-      await postJSON('/api/sftp/delete', { session: tab.session, path: entry.path })
+      await ElMessageBox.confirm(`删除选中的 ${selected.length} 项？此操作不可撤销。`, '确认删除', {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消'
+      })
     }
-    log(`删除：${entry.path}`)
   }
-  await loadTab(paneName, tab)
+  deletingPanes.add(paneName)
+  try {
+    for (const entry of selected) {
+      if (tab.kind === 'local') {
+        await postJSON('/api/local/delete', { path: entry.path })
+        log(`移到回收站：${entry.path}`)
+      } else {
+        await postJSON('/api/sftp/delete', { session: tab.session, path: entry.path })
+        log(`删除：${entry.path}`)
+      }
+    }
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    deletingPanes.delete(paneName)
+    await loadTab(paneName, tab)
+  }
 }
 
 async function inspectDeleteDirectories(tab: FileTab, directories: FileEntry[]) {
@@ -2944,6 +3131,7 @@ function isCurrentDirectoryDropActive(paneName: PaneName) {
 }
 
 function startFileDrag(paneName: PaneName, index: number, entry: FileEntry, event: DragEvent) {
+  clearPaneGestures(paneName)
   const tab = activeTab(paneName)
   if (!tab || !event.dataTransfer || !exportDragArmed.value || !exportDragPathSet.value.has(entry.path)) {
     event.preventDefault()
@@ -3105,6 +3293,10 @@ async function handleCurrentDirectoryDrop(paneName: PaneName, event: DragEvent) 
 }
 
 function handleDragEnter(paneName: PaneName, event: DragEvent) {
+  if (tabDrag.active) {
+    if (tabDrag.pane !== paneName) tabDrag.overPane = paneName
+    return
+  }
   if (!hasExternalFiles(event) && !hasAppDrag(event)) return
   event.preventDefault()
   if (dragging.value?.pane === paneName) return
@@ -3112,6 +3304,14 @@ function handleDragEnter(paneName: PaneName, event: DragEvent) {
 }
 
 function handleDragOver(paneName: PaneName, event: DragEvent) {
+  if (tabDrag.active) {
+    if (tabDrag.pane === paneName) return
+    event.preventDefault()
+    tabDrag.overPane = paneName
+    tabDrag.targetID = ''
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    return
+  }
   if (!hasExternalFiles(event) && !hasAppDrag(event)) return
   event.preventDefault()
   setUploadDropEffect(event)
@@ -3123,9 +3323,15 @@ function handleDragLeave(paneName: PaneName, event: DragEvent) {
   const target = event.currentTarget as HTMLElement
   if (event.relatedTarget instanceof Node && target.contains(event.relatedTarget)) return
   panes[paneName].dropActive = false
+  if (tabDrag.active && tabDrag.overPane === paneName) tabDrag.overPane = tabDrag.pane
 }
 
 async function handleDrop(paneName: PaneName, event: DragEvent) {
+  if (tabDrag.active) {
+    event.preventDefault()
+    await dropTabOnPane(paneName)
+    return
+  }
   if (!hasExternalFiles(event) && !hasAppDrag(event)) return
   event.preventDefault()
   panes[paneName].dropActive = false
@@ -3360,6 +3566,29 @@ function handleContextMenuKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') closeContextMenu()
 }
 
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT'
+}
+
+function handleDeleteKey(event: KeyboardEvent) {
+  if (event.key !== 'Delete' || event.repeat) return
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+  if (event.defaultPrevented) return
+  const root = sftpRoot.value
+  if (!root || root.getClientRects().length === 0) return
+  if (isEditableTarget(event.target)) return
+  if (document.querySelector('.el-overlay, .upload-conflict-backdrop')) return
+  const paneName = focusedPane.value
+  if (selectedEntries(paneName).length === 0) return
+  event.preventDefault()
+  closeContextMenu()
+  closeTransferContextMenu()
+  closeTabContextMenu()
+  void deleteSelected(paneName)
+}
+
 onMounted(async () => {
   if (typeof ResizeObserver !== 'undefined') {
     scrollResizeObserver = new ResizeObserver(() => {
@@ -3375,6 +3604,7 @@ onMounted(async () => {
   window.addEventListener('mouseup', finishSelection)
   document.addEventListener('click', handleContextMenuDocumentClick)
   window.addEventListener('keydown', handleContextMenuKeydown)
+  window.addEventListener('keydown', handleDeleteKey)
   window.addEventListener('scroll', closeContextMenu, true)
   window.addEventListener('beforeunload', handleBeforeUnload)
   openSyncPollTimer = window.setInterval(() => {
@@ -3406,6 +3636,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', finishSelection)
   document.removeEventListener('click', handleContextMenuDocumentClick)
   window.removeEventListener('keydown', handleContextMenuKeydown)
+  window.removeEventListener('keydown', handleDeleteKey)
   window.removeEventListener('scroll', closeContextMenu, true)
   window.removeEventListener('beforeunload', handleBeforeUnload)
   if (openSyncPollTimer !== undefined) {
@@ -3415,6 +3646,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', handleBlankDragMove)
   window.removeEventListener('mousemove', handlePressMove)
   cancelLongPress()
+  clearAllPaneGestures()
   paneNames.forEach(paneName => {
     panes[paneName].tabs.forEach(tab => {
       if (tab.kind === 'remote' && tab.session) {
