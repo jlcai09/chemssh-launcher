@@ -18,6 +18,7 @@ type ProfileStore interface {
 	Get(idOrName string) (Profile, error)
 	Save(profile Profile) error
 	Delete(idOrName string) error
+	Reorder(ids []string) error
 }
 
 type FileStore struct {
@@ -92,6 +93,40 @@ func (s *FileStore) Delete(idOrName string) error {
 		}
 	}
 	return fmt.Errorf("%w: %s", ErrProfileNotFound, idOrName)
+}
+
+func (s *FileStore) Reorder(ids []string) error {
+	data, err := s.load()
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]Profile, len(data.Profiles))
+	for _, profile := range data.Profiles {
+		byID[profile.ID] = profile
+	}
+	seen := make(map[string]struct{}, len(ids))
+	ordered := make([]Profile, 0, len(data.Profiles))
+	for _, id := range ids {
+		if id == "" {
+			return errors.New("profile id is required")
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("duplicate profile id: %s", id)
+		}
+		profile, ok := byID[id]
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrProfileNotFound, id)
+		}
+		seen[id] = struct{}{}
+		ordered = append(ordered, profile)
+	}
+	for _, profile := range data.Profiles {
+		if _, ok := seen[profile.ID]; !ok {
+			ordered = append(ordered, profile)
+		}
+	}
+	data.Profiles = ordered
+	return s.save(data)
 }
 
 func (s *FileStore) load() (fileData, error) {

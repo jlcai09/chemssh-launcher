@@ -1,17 +1,23 @@
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { api, postJSON } from './api'
 
 export type Locale = 'zh' | 'en'
+export type LanguagePreference = 'system' | 'zh' | 'en'
 
-const STORAGE_KEY = 'chemssh-launcher.locale'
+const LOCALE_CHANNEL = 'chemssh-launcher:locale'
 
 const en = {
   'app.backend': 'Backend',
-  'app.backendSubtitle': 'Configuration, cache, and backend logs',
   'app.launcher': 'Launcher',
-  'app.launcherSubtitle': 'Remote ChemSSH launcher',
   'app.terminal': 'Terminal',
-  'app.terminalSubtitle': 'SSH terminal that works without ChemSSH',
-  'app.sftpSubtitle': 'Dual-pane local/remote file manager',
+  'app.sftp': 'SFTP',
+  'backend.appearance': 'Interface',
+  'backend.appearanceHint': 'Interface language and version',
+  'backend.language': 'Interface language',
+  'backend.languageSaved': 'Language setting saved',
+  'backend.languageSaveFailed': 'Failed to save the language setting',
+  'backend.systemLanguage': 'System language',
+  'backend.version': 'Version',
   'backend.cacheEntry.currentWebview': 'Current WebView2 cache directory',
   'backend.cacheEntry.legacyWebview': 'Legacy WebView2 cache directory',
   'backend.cacheEntry.sftpOpen': 'SFTP file cache directory',
@@ -41,8 +47,9 @@ const en = {
   'backend.saved': 'Exists',
   'backend.statusContinue': 'Continue cleanup on next startup',
   'backend.title': 'Configuration and cache',
-  'language.switch': 'Switch language',
+  'language.system': 'Follow system',
   'language.zh': '中文',
+  'language.en': 'English',
   'launcher.actions.delete': 'Delete',
   'launcher.actions.save': 'Save profile',
   'launcher.authMethod': 'Auth method',
@@ -52,7 +59,9 @@ const en = {
   'launcher.confirmDelete': 'Delete profile "{name}"?',
   'launcher.confirmStop': 'This will stop the remote ChemSSH service and close forwarding. Continue?',
   'launcher.confirmTitle': 'Confirm',
+  'launcher.copyName': '{name} (copy)',
   'launcher.credentials': 'Credentials',
+  'launcher.duplicateProfile': 'Duplicate profile',
   'launcher.emptyProfiles': 'No profiles yet.',
   'launcher.healthURL': 'Health check URL',
   'launcher.hostKeyConfirm': 'First SSH connection to {address}\n\n{keyType}\n{fingerprint}\n\nThis key will be saved to:\n{path}',
@@ -75,6 +84,7 @@ const en = {
   'launcher.newProfileHint': 'No connection details yet',
   'launcher.noProfileHint': 'Create or select a remote server profile.',
   'launcher.openBrowser': 'Open ChemSSH tab after start',
+  'launcher.openSftp': 'Open in SFTP',
   'launcher.passphrase': 'Private key passphrase',
   'launcher.passphraseNew': 'Enter new passphrase',
   'launcher.passwordNew': 'Enter new password',
@@ -93,12 +103,14 @@ const en = {
   'launcher.profileCount': '{count} profiles',
   'launcher.profileKind': 'Profile type',
   'launcher.profileDeleted': 'Profile deleted',
+  'launcher.profileDuplicated': 'Profile duplicated',
   'launcher.profileSaved': 'Profile saved',
   'launcher.refresh': 'Refresh',
   'launcher.refreshLogs': 'Refresh logs',
   'launcher.remoteCommands': 'Remote commands',
   'launcher.remoteHost': 'Remote host',
   'launcher.remotePort': 'Remote port',
+  'launcher.reorderFailed': 'Could not save the profile order',
   'launcher.requestedStart': 'Start requested',
   'launcher.savedKeepEmpty': 'Saved; leave empty to keep unchanged',
   'launcher.secretClear': 'Clear',
@@ -122,6 +134,14 @@ const en = {
   'launcher.unnamed': 'Unnamed',
   'launcher.unsaved': 'New profile',
   'launcher.warnSaveFirst': 'Please save the profile first',
+  'shell.newTab': 'New tab',
+  'shell.blankTitle': 'New tab',
+  'shell.blankHint': 'Choose a page to open, or enter an address in the bar above.',
+  'shell.back': 'Back',
+  'shell.forward': 'Forward',
+  'shell.reload': 'Reload',
+  'shell.addressPlaceholder': 'Enter an address or local path',
+  'shell.downloads': 'Downloads',
   'launcher.preStartCommands': 'Pre-start commands',
   'launcher.securityToken': 'Security token',
   'launcher.securityTokenNew': 'Enter ChemSSH security token',
@@ -154,7 +174,7 @@ const en = {
   'terminal.selectProfile': 'Select a remote profile',
   'terminal.servers': 'Servers',
   'terminal.sessionEnded': 'Remote session ended',
-  'terminal.sessionHint': 'Click to connect; an open session for this server is reused.',
+  'terminal.sessionHint': 'Click to select; double-click to open a session. An open session for this server is reused.',
   'terminal.skipExisting': 'Skip existing',
   'terminal.statusError': 'Error',
   'terminal.tabClose': 'Close',
@@ -191,6 +211,7 @@ const en = {
   'sftp.name': 'Name',
   'sftp.minutesSeconds': '{minutes}m {seconds}s',
   'sftp.noSavedServers': 'No saved servers',
+  'sftp.profileNotFound': 'The saved server for this SFTP tab was not found',
   'sftp.progress': 'Progress',
   'sftp.refreshBoth': 'Refresh both panes',
   'sftp.remote': 'Remote',
@@ -202,6 +223,7 @@ const en = {
   'sftp.closeDuringTransfer': '{count} transfer tasks are still running. Closing this window may interrupt them.',
   'sftp.openSyncSuccess': 'Synced {path}',
   'sftp.openSyncFailed': 'Sync failed for {path}: {error}',
+  'sftp.openTooLarge': 'Files over 100 MB cannot be opened with sync. Download them first.',
   'sftp.seconds': '{seconds}s',
   'sftp.size': 'Size',
   'sftp.sourcePath': 'Source/path',
@@ -227,12 +249,16 @@ const en = {
 
 const zh: Record<keyof typeof en, string> = {
   'app.backend': '后台',
-  'app.backendSubtitle': '配置、缓存与后台日志',
   'app.launcher': '启动器',
-  'app.launcherSubtitle': '远程 ChemSSH 启动器',
   'app.terminal': '终端',
-  'app.terminalSubtitle': '不依赖 ChemSSH 的 SSH 调试终端',
-  'app.sftpSubtitle': '双窗口本地/远程文件管理',
+  'app.sftp': 'SFTP',
+  'backend.appearance': '界面',
+  'backend.appearanceHint': '界面语言与版本信息',
+  'backend.language': '界面语言',
+  'backend.languageSaved': '语言设置已保存',
+  'backend.languageSaveFailed': '语言设置保存失败',
+  'backend.systemLanguage': '系统语言',
+  'backend.version': '版本',
   'backend.cacheEntry.currentWebview': '当前 WebView2 缓存目录',
   'backend.cacheEntry.legacyWebview': '旧版 WebView2 缓存目录',
   'backend.cacheEntry.sftpOpen': 'SFTP 文件缓存目录',
@@ -262,8 +288,9 @@ const zh: Record<keyof typeof en, string> = {
   'backend.saved': '已存在',
   'backend.statusContinue': '下次启动继续清理',
   'backend.title': '配置与缓存',
-  'language.switch': '切换语言',
+  'language.system': '跟随系统',
   'language.zh': '中文',
+  'language.en': 'English',
   'launcher.actions.delete': '删除',
   'launcher.actions.save': '保存配置',
   'launcher.authMethod': '认证方式',
@@ -273,7 +300,9 @@ const zh: Record<keyof typeof en, string> = {
   'launcher.confirmDelete': '删除配置“{name}”？',
   'launcher.confirmStop': '这会停止远程 ChemSSH 服务并关闭转发。确定继续吗？',
   'launcher.confirmTitle': '确认',
+  'launcher.copyName': '{name}（副本）',
   'launcher.credentials': '凭据',
+  'launcher.duplicateProfile': '复制配置',
   'launcher.emptyProfiles': '还没有配置。',
   'launcher.healthURL': '健康检查 URL',
   'launcher.hostKeyConfirm': '首次 SSH 连接到 {address}\n\n{keyType}\n{fingerprint}\n\n将保存到：\n{path}',
@@ -296,6 +325,7 @@ const zh: Record<keyof typeof en, string> = {
   'launcher.newProfileHint': '尚未填写连接信息',
   'launcher.noProfileHint': '创建或选择一个远程服务器配置。',
   'launcher.openBrowser': '启动后打开 ChemSSH 标签页',
+  'launcher.openSftp': '用 SFTP 打开',
   'launcher.passphrase': '私钥口令',
   'launcher.passphraseNew': '输入新口令',
   'launcher.passwordNew': '输入新密码',
@@ -314,12 +344,14 @@ const zh: Record<keyof typeof en, string> = {
   'launcher.profileCount': '{count} 个 profile',
   'launcher.profileKind': '配置类型',
   'launcher.profileDeleted': '配置已删除',
+  'launcher.profileDuplicated': '配置已复制',
   'launcher.profileSaved': '配置已保存',
   'launcher.refresh': '刷新',
   'launcher.refreshLogs': '刷新日志',
   'launcher.remoteCommands': '远程命令',
   'launcher.remoteHost': '远端主机',
   'launcher.remotePort': '远端端口',
+  'launcher.reorderFailed': '无法保存配置顺序',
   'launcher.requestedStart': '已请求启动',
   'launcher.savedKeepEmpty': '已保存；留空保持不变',
   'launcher.secretClear': '清除',
@@ -343,6 +375,14 @@ const zh: Record<keyof typeof en, string> = {
   'launcher.unnamed': '未命名',
   'launcher.unsaved': '新配置',
   'launcher.warnSaveFirst': '请先保存配置',
+  'shell.newTab': '新建标签页',
+  'shell.blankTitle': '新标签页',
+  'shell.blankHint': '选择要打开的功能页面，或在上方地址栏输入地址。',
+  'shell.back': '后退',
+  'shell.forward': '前进',
+  'shell.reload': '刷新',
+  'shell.addressPlaceholder': '输入地址或本地路径',
+  'shell.downloads': '下载历史',
   'launcher.preStartCommands': '预启动命令',
   'launcher.securityToken': '安全令牌',
   'launcher.securityTokenNew': '输入 ChemSSH 安全令牌',
@@ -375,7 +415,7 @@ const zh: Record<keyof typeof en, string> = {
   'terminal.selectProfile': '选择远程配置',
   'terminal.servers': '服务器',
   'terminal.sessionEnded': '远程会话已结束',
-  'terminal.sessionHint': '点击连接；该服务器已有会话时直接切换过去。',
+  'terminal.sessionHint': '单击选择；双击打开会话。该服务器已有会话时直接切换过去。',
   'terminal.skipExisting': '跳过已存在项',
   'terminal.statusError': '出错',
   'terminal.tabClose': '关闭',
@@ -412,6 +452,7 @@ const zh: Record<keyof typeof en, string> = {
   'sftp.name': '名称',
   'sftp.minutesSeconds': '{minutes}分{seconds}秒',
   'sftp.noSavedServers': '还没有已保存的服务器',
+  'sftp.profileNotFound': '找不到该 SFTP 标签页对应的已保存服务器',
   'sftp.progress': '进度',
   'sftp.refreshBoth': '刷新两侧',
   'sftp.remote': '远程',
@@ -423,6 +464,7 @@ const zh: Record<keyof typeof en, string> = {
   'sftp.closeDuringTransfer': '还有 {count} 个传输任务正在进行，关闭窗口可能会中断它们。',
   'sftp.openSyncSuccess': '已同步 {path}',
   'sftp.openSyncFailed': '同步失败 {path}：{error}',
+  'sftp.openTooLarge': '超过 100 MB 的文件不支持直接打开并同步，请先下载。',
   'sftp.seconds': '{seconds}秒',
   'sftp.size': '大小',
   'sftp.sourcePath': '源端/路径',
@@ -446,14 +488,37 @@ const zh: Record<keyof typeof en, string> = {
   'sftp.waitingTransfers': '等待新的传输任务'
 }
 
-export const locale = ref<Locale>(initialLocale())
+export const languagePreference = ref<LanguagePreference>('system')
+export const locale = computed<Locale>(() => resolveLocale(languagePreference.value))
 
-export function setLocale(nextLocale: Locale) {
-  locale.value = nextLocale
+let localeChannel: BroadcastChannel | null = null
+
+export function systemLanguageTag() {
+  if (navigator.languages?.length) return navigator.languages[0]
+  return navigator.language || ''
+}
+
+export async function initLocale() {
+  ensureLocaleChannel()
   try {
-    localStorage.setItem(STORAGE_KEY, nextLocale)
+    const settings = await withTimeout(api<{ language?: string }>('/api/ui-settings'), 1200)
+    if (isLanguagePreference(settings.language)) applyLanguagePreference(settings.language)
   } catch {
-    // Keep the in-memory language choice if storage is unavailable.
+    syncDocumentLanguage()
+  }
+}
+
+export async function setLanguagePreference(preference: LanguagePreference) {
+  const previous = languagePreference.value
+  if (previous === preference) return
+  applyLanguagePreference(preference)
+  broadcastLanguagePreference(preference)
+  try {
+    await postJSON('/api/ui-settings', { language: preference })
+  } catch (error) {
+    applyLanguagePreference(previous)
+    broadcastLanguagePreference(previous)
+    throw error
   }
 }
 
@@ -465,12 +530,56 @@ export function t(key: keyof typeof en, params: Record<string, string | number> 
   return text
 }
 
-function initialLocale(): Locale {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    if (stored === 'zh' || stored === 'en') return stored
-  } catch {
-    // Ignore storage failures and fall back to browser language.
+function applyLanguagePreference(preference: LanguagePreference) {
+  languagePreference.value = preference
+  syncDocumentLanguage()
+}
+
+function syncDocumentLanguage() {
+  document.documentElement.lang = locale.value === 'zh' ? 'zh-CN' : 'en'
+}
+
+function resolveLocale(preference: LanguagePreference): Locale {
+  if (preference !== 'system') return preference
+  const languages = navigator.languages?.length ? navigator.languages : [navigator.language || '']
+  for (const language of languages) {
+    const normalized = String(language || '').toLowerCase()
+    if (normalized.startsWith('zh')) return 'zh'
+    if (normalized.startsWith('en')) return 'en'
   }
-  return navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en'
+  return 'en'
+}
+
+function isLanguagePreference(value: unknown): value is LanguagePreference {
+  return value === 'system' || value === 'zh' || value === 'en'
+}
+
+function ensureLocaleChannel() {
+  if (localeChannel || typeof BroadcastChannel === 'undefined') return
+  localeChannel = new BroadcastChannel(LOCALE_CHANNEL)
+  localeChannel.addEventListener('message', event => {
+    const preference = event.data?.language
+    if (isLanguagePreference(preference)) applyLanguagePreference(preference)
+  })
+}
+
+function broadcastLanguagePreference(preference: LanguagePreference) {
+  ensureLocaleChannel()
+  localeChannel?.postMessage({ language: preference })
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('timeout')), ms)
+    promise.then(
+      value => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        window.clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
 }

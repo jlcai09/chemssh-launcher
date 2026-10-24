@@ -248,6 +248,10 @@ func (s *Server) handleSFTPOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer remote.Close()
+	if err := checkSFTPOpenSyncFileSize(info.Size); err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, err)
+		return
+	}
 	cachePath, err := sftpOpenCachePath(req.Session, req.Path, info.Name)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
@@ -339,6 +343,9 @@ func (s *Server) cacheSFTPFile(sessionID, remotePath string) (string, error) {
 		return "", err
 	}
 	defer remote.Close()
+	if err := checkSFTPOpenSyncFileSize(info.Size); err != nil {
+		return "", err
+	}
 	cachePath, err := sftpOpenCachePath(sessionID, remotePath, info.Name)
 	if err != nil {
 		return "", err
@@ -514,6 +521,10 @@ func (s *Server) handleSFTPCopyRemote(w http.ResponseWriter, r *http.Request) {
 func writeSFTPError(w http.ResponseWriter, err error) {
 	if errors.Is(err, sftpclient.ErrSessionNotFound) {
 		writeError(w, http.StatusGone, err)
+		return
+	}
+	if errors.Is(err, errSFTPOpenFileTooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, err)
 		return
 	}
 	writeError(w, http.StatusBadGateway, fmt.Errorf("SFTP operation failed: %w", err))

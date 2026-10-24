@@ -279,6 +279,8 @@ func (s *Server) routes() {
 
 	// Launcher API endpoints with gzip compression (for JSON responses)
 	s.mux.HandleFunc("/api/profiles", s.apiHandler(gzipHandler(s.handleProfiles)))
+	s.mux.HandleFunc("/api/profiles/reorder", s.apiHandler(gzipHandler(s.handleReorderProfiles)))
+	s.mux.HandleFunc("/api/profiles/duplicate", s.apiHandler(gzipHandler(s.handleDuplicateProfile)))
 	s.mux.HandleFunc("/api/profiles/", s.apiHandler(gzipHandler(s.handleProfileByID)))
 	s.mux.HandleFunc("/api/profile-test", s.apiHandler(gzipHandler(s.handleProfileTest)))
 	s.mux.HandleFunc("/api/session/start", s.apiHandler(gzipHandler(s.handleStart)))
@@ -349,6 +351,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/backend/export", s.apiHandler(s.handleExportProfiles)) // JSON download, no gzip
 	s.mux.HandleFunc("/api/backend/import", s.apiHandler(gzipHandler(s.handleImportProfiles)))
 	s.mux.HandleFunc("/api/backend/clear-cache", s.apiHandler(gzipHandler(s.handleClearCache)))
+	s.mux.HandleFunc("/api/ui-settings", s.apiHandler(gzipHandler(s.handleUISettings)))
 
 	// Misc API
 	s.mux.HandleFunc("/api/version", s.apiHandler(gzipHandler(s.handleVersion)))
@@ -522,6 +525,108 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 	}
+}
+
+func (s *Server) handleReorderProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.rt.Profiles.Reorder(req.IDs); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	profiles, err := s.rt.Profiles.List()
+	writeJSON(w, profiles, err)
+}
+
+func (s *Server) handleDuplicateProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	var req struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	source, err := s.rt.Profiles.Get(req.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	id, err := config.NewID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	clone := source
+	clone.ID = id
+	if name := strings.TrimSpace(req.Name); name != "" {
+		clone.Name = name
+	} else {
+		clone.Name = strings.TrimSpace(source.Name + " (copy)")
+	}
+
+	copiedKeys := make([]string, 0, 3)
+	copySecret := func(key string) (bool, error) {
+		value, ok, err := s.rt.Secrets.Get(source.ID, key)
+		if err != nil || !ok {
+			return false, err
+		}
+		if err := s.rt.Secrets.Set(id, key, value); err != nil {
+			return false, err
+		}
+		copiedKeys = append(copiedKeys, key)
+		return true, nil
+	}
+	rollback := func() {
+		for _, key := range copiedKeys {
+			_ = s.rt.Secrets.Delete(id, key)
+		}
+	}
+
+	hasPassword := false
+	hasPassphrase := false
+	if source.AuthMethod == config.AuthPassword {
+		hasPassword, err = copySecret(secret.KeyPassword)
+	} else if source.AuthMethod == config.AuthPrivateKey {
+		hasPassphrase, err = copySecret(secret.KeyPrivatePassphrase)
+	}
+	if err != nil {
+		rollback()
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	hasToken, err := copySecret(secret.KeySecurityToken)
+	if err != nil {
+		rollback()
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if source.IsLocal() {
+		hasPassword = false
+		hasPassphrase = false
+	}
+	clone.HasPassword = hasPassword
+	clone.HasPrivateKeyPassphrase = hasPassphrase
+	clone.HasSecurityToken = hasToken
+	if err := s.rt.Profiles.Save(clone); err != nil {
+		rollback()
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, clone, nil)
 }
 
 func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
@@ -2294,6 +2399,41 @@ func (s *Server) handleBackendInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := backendInfo()
 	writeJSON(w, info, err)
+}
+
+func (s *Server) handleUISettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := config.LoadUISettings()
+		writeJSON(w, settings, err)
+	case http.MethodPost:
+		var payload struct {
+			Language string `json:"language"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		language, ok := config.NormalizeUILanguage(payload.Language)
+		if !ok {
+			writeError(w, http.StatusBadRequest, errors.New("unsupported UI language"))
+			return
+		}
+		settings, err := config.LoadUISettings()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		settings.Language = language
+		if err := config.SaveUISettings(settings); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		s.localLog.add("UI language set to " + language)
+		writeJSON(w, settings, nil)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
 }
 
 func (s *Server) handleOpenConfigDir(w http.ResponseWriter, r *http.Request) {

@@ -1,66 +1,90 @@
 <template>
   <section class="backend-view">
     <div class="backend-grid">
-      <section class="settings-section">
-        <div class="panel-header">
-          <div>
-            <strong>{{ t('backend.title') }}</strong>
-            <p>{{ t('backend.runningState') }}</p>
-          </div>
-          <div class="header-actions">
-            <el-tooltip :content="t('backend.refresh')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-              <el-button :icon="Refresh" circle @click="refreshAll" />
-            </el-tooltip>
-          </div>
-        </div>
-        <div class="backend-info">
-          <div class="backend-row">
-            <span>{{ t('backend.configDir') }}</span>
-            <code :title="info.config_dir || '-'">{{ info.config_dir || '-' }}</code>
-            <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-              <el-button :icon="CopyDocument" circle @click="copyPath(info.config_dir)" />
-            </el-tooltip>
-            <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-              <el-button :icon="FolderOpened" circle @click="openConfigDir" />
-            </el-tooltip>
-          </div>
-          <div class="backend-row">
-            <span>{{ t('backend.fileCacheDir') }}</span>
-            <code :title="info.sftp_open_cache_dir || '-'">{{ info.sftp_open_cache_dir || '-' }}</code>
-            <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-              <el-button :icon="CopyDocument" circle @click="copyPath(info.sftp_open_cache_dir)" />
-            </el-tooltip>
-            <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-              <el-button :icon="FolderOpened" circle @click="openSftpCacheDir" />
-            </el-tooltip>
-          </div>
-          <div class="backend-row">
-            <span>{{ t('backend.clearPending') }}</span>
-            <el-tag :type="info.clear_pending ? 'warning' : 'success'">{{ info.clear_pending ? t('backend.statusContinue') : t('backend.normal') }}</el-tag>
-          </div>
-        </div>
-        <div class="cache-list">
-          <div v-for="entry in info.cache_entries || []" :key="entry.path" class="cache-entry">
-            <div class="cache-entry-head">
-              <strong>{{ cacheEntryLabel(entry.kind) }}</strong>
-              <el-tag size="small" :type="entry.exists ? 'success' : 'info'">{{ entry.exists ? t('backend.saved') : t('backend.notFound') }}</el-tag>
+      <div class="backend-side">
+        <section class="settings-section backend-preferences">
+          <div class="panel-header">
+            <div>
+              <strong>{{ t('backend.appearance') }}</strong>
+              <p>{{ t('backend.appearanceHint') }}</p>
             </div>
-            <button class="path-button" type="button" @click="copyPath(entry.path)">{{ entry.path || '-' }}</button>
           </div>
-          <p v-if="!(info.cache_entries || []).length" class="empty">{{ t('backend.noCacheEntries') }}</p>
-        </div>
-        <div class="editor-actions backend-actions">
-          <div class="action-group">
-            <el-button :icon="Download" @click="exportProfiles">{{ t('backend.export') }}</el-button>
-            <el-button :icon="Upload" @click="pickImport">{{ t('backend.import') }}</el-button>
+          <div class="backend-info">
+            <div class="backend-row backend-language-row">
+              <span>{{ t('backend.language') }}</span>
+              <el-segmented :model-value="languagePreference" :options="languageOptions" @change="changeLanguage" />
+            </div>
+            <div class="backend-row backend-language-row">
+              <span>{{ t('backend.systemLanguage') }}</span>
+              <code :title="detectedSystemLanguage">{{ detectedSystemLanguage || '-' }}</code>
+            </div>
+            <div class="backend-row">
+              <span>{{ t('backend.version') }}</span>
+              <code :title="appVersion">{{ appVersion || '-' }}</code>
+            </div>
           </div>
-          <div class="action-group danger">
-            <el-button :icon="Delete" type="danger" @click="clearCache">{{ t('backend.clearCache') }}</el-button>
+        </section>
+        <section class="settings-section">
+          <div class="panel-header">
+            <div>
+              <strong>{{ t('backend.title') }}</strong>
+              <p>{{ t('backend.runningState') }}</p>
+            </div>
+            <div class="header-actions">
+              <el-tooltip :content="t('backend.refresh')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                <el-button :icon="Refresh" circle @click="refreshAll" />
+              </el-tooltip>
+            </div>
           </div>
-          <input ref="importInput" class="hidden-input" type="file" accept="application/json,.json" @change="importProfiles" />
-        </div>
-        <el-alert v-if="notice" class="backend-notice" :title="notice" :type="noticeType" show-icon :closable="false" />
-      </section>
+          <div class="backend-info">
+            <div class="backend-row">
+              <span>{{ t('backend.configDir') }}</span>
+              <code :title="info.config_dir || '-'">{{ info.config_dir || '-' }}</code>
+              <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                <el-button :icon="CopyDocument" circle @click="copyPath(info.config_dir)" />
+              </el-tooltip>
+              <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                <el-button :icon="FolderOpened" circle @click="openConfigDir" />
+              </el-tooltip>
+            </div>
+            <div class="backend-row">
+              <span>{{ t('backend.fileCacheDir') }}</span>
+              <code :title="info.sftp_open_cache_dir || '-'">{{ info.sftp_open_cache_dir || '-' }}</code>
+              <el-tooltip :content="t('backend.copyPath')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                <el-button :icon="CopyDocument" circle @click="copyPath(info.sftp_open_cache_dir)" />
+              </el-tooltip>
+              <el-tooltip :content="t('backend.openDir')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                <el-button :icon="FolderOpened" circle @click="openSftpCacheDir" />
+              </el-tooltip>
+            </div>
+            <div class="backend-row">
+              <span>{{ t('backend.clearPending') }}</span>
+              <el-tag :type="info.clear_pending ? 'warning' : 'success'">{{ info.clear_pending ? t('backend.statusContinue') : t('backend.normal') }}</el-tag>
+            </div>
+          </div>
+          <div class="cache-list">
+            <div v-for="entry in info.cache_entries || []" :key="entry.path" class="cache-entry">
+              <div class="cache-entry-head">
+                <strong>{{ cacheEntryLabel(entry.kind) }}</strong>
+                <el-tag size="small" :type="entry.exists ? 'success' : 'info'">{{ entry.exists ? t('backend.saved') : t('backend.notFound') }}</el-tag>
+              </div>
+              <button class="path-button" type="button" @click="copyPath(entry.path)">{{ entry.path || '-' }}</button>
+            </div>
+            <p v-if="!(info.cache_entries || []).length" class="empty">{{ t('backend.noCacheEntries') }}</p>
+          </div>
+          <div class="editor-actions backend-actions">
+            <div class="action-group">
+              <el-button :icon="Download" @click="exportProfiles">{{ t('backend.export') }}</el-button>
+              <el-button :icon="Upload" @click="pickImport">{{ t('backend.import') }}</el-button>
+            </div>
+            <div class="action-group danger">
+              <el-button :icon="Delete" type="danger" @click="clearCache">{{ t('backend.clearCache') }}</el-button>
+            </div>
+            <input ref="importInput" class="hidden-input" type="file" accept="application/json,.json" @change="importProfiles" />
+          </div>
+          <el-alert v-if="notice" class="backend-notice" :title="notice" :type="noticeType" show-icon :closable="false" />
+        </section>
+      </div>
 
       <section class="log-panel backend-log">
         <div class="logs-title">
@@ -76,12 +100,13 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, Download, FolderOpened, Refresh, Upload } from '@element-plus/icons-vue'
 import { api, postJSON } from '../api'
 import { createAutoScroll } from '../autoScroll'
-import { t } from '../i18n'
+import { languagePreference, setLanguagePreference, systemLanguageTag, t } from '../i18n'
+import type { LanguagePreference } from '../i18n'
 
 interface CacheEntry {
   kind: string
@@ -103,6 +128,24 @@ const logScroller = createAutoScroll(() => logRef.value)
 const notice = ref('')
 const noticeType = ref<'success' | 'info' | 'warning' | 'error'>('info')
 const importInput = ref<HTMLInputElement | null>(null)
+const appVersion = ref('')
+const detectedSystemLanguage = systemLanguageTag()
+const languageOptions = computed(() => [
+  { label: t('language.system'), value: 'system' },
+  { label: t('language.zh'), value: 'zh' },
+  { label: t('language.en'), value: 'en' }
+])
+
+async function changeLanguage(value: string | number | boolean) {
+  const preference = String(value)
+  if (preference !== 'system' && preference !== 'zh' && preference !== 'en') return
+  try {
+    await setLanguagePreference(preference as LanguagePreference)
+    setNotice(t('backend.languageSaved'), 'success')
+  } catch {
+    setNotice(t('backend.languageSaveFailed'), 'error')
+  }
+}
 
 function setNotice(message: string, type: typeof noticeType.value = 'info') {
   notice.value = message
@@ -122,6 +165,15 @@ async function refreshLogs() {
 
 async function refreshAll() {
   await Promise.all([refreshBackendInfo(), refreshLogs()])
+}
+
+async function refreshVersion() {
+  try {
+    const data = await api<{ version: string }>('/api/version')
+    appVersion.value = data.version.trim()
+  } catch {
+    appVersion.value = ''
+  }
 }
 
 async function openConfigDir() {
@@ -196,7 +248,7 @@ async function importProfiles(event: Event) {
 }
 
 onMounted(async () => {
-  await refreshAll()
+  await Promise.all([refreshAll(), refreshVersion()])
   window.setInterval(refreshAll, 2500)
 })
 </script>

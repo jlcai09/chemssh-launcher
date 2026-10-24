@@ -10,10 +10,11 @@
           v-for="profile in remoteProfiles"
           :key="profile.id"
           class="terminal-session"
-          :class="{ 'is-active': profile.id === activeProfile?.id }"
+          :class="{ 'is-active': profile.id === selectedProfileID }"
           type="button"
           :title="profileSessionTitle(profile)"
-          @click="openProfileSession(profile)"
+          @click="selectProfile(profile)"
+          @dblclick="openProfileSession(profile)"
         >
           <span class="terminal-session-icon"><el-icon><Connection /></el-icon></span>
           <span class="terminal-session-text">
@@ -98,7 +99,25 @@
       <footer class="terminal-footer">
         <div class="terminal-footer-actions">
           <el-tooltip :content="t('terminal.clear')" placement="top" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-            <el-button :icon="Delete" circle :disabled="!activeTab" @click="clearActiveTab" />
+            <el-button circle :disabled="!activeTab" @click="clearActiveTab">
+              <el-icon>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <g transform="translate(0 -0.6) rotate(-45 12 12)">
+                    <rect x="5.5" y="9.5" width="13" height="5" rx="1.4" />
+                    <path d="M14.4 9.5v5" />
+                  </g>
+                  <path d="M4 19.1h16" stroke-width="1.6" />
+                </svg>
+              </el-icon>
+            </el-button>
           </el-tooltip>
           <span
             class="terminal-upload-ring"
@@ -139,7 +158,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Close, Connection, Delete, Plus, SwitchButton, Upload, UploadFilled } from '@element-plus/icons-vue'
+import { Close, Connection, Plus, SwitchButton, Upload, UploadFilled } from '@element-plus/icons-vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -193,6 +212,7 @@ interface TerminalRuntime {
 const profiles = ref<Profile[]>([])
 const tabs = ref<TerminalTab[]>([])
 const activeTabID = ref('')
+const selectedProfileID = ref('')
 const dropActive = ref(false)
 const stageRef = ref<HTMLElement | null>(null)
 const tabMenu = reactive({ visible: false, x: 0, y: 0, tabID: '' })
@@ -267,7 +287,14 @@ function profileIsConnected(profileID: string) {
   return tabs.value.some(tab => tab.profileID === profileID && tab.status === 'connected')
 }
 
+function selectProfile(profile: Profile) {
+  selectedProfileID.value = profile.id
+  lastProfileID = profile.id
+  persistProfile(profile.id)
+}
+
 async function openProfileSession(profile: Profile) {
+  selectProfile(profile)
   const openTab = tabs.value.find(tab => tab.profileID === profile.id && (tab.status === 'connected' || tab.status === 'connecting'))
   if (openTab) {
     await activateTab(openTab.id)
@@ -534,6 +561,7 @@ async function createTab(profileID = lastProfileID || remoteProfiles.value[0]?.i
   if (profileID) {
     lastProfileID = profileID
     persistProfile(profileID)
+    selectedProfileID.value = profileID
   }
   tabSeq += 1
   const tab = reactive<TerminalTab>({
@@ -555,6 +583,8 @@ async function createTab(profileID = lastProfileID || remoteProfiles.value[0]?.i
 }
 
 async function activateTab(id: string) {
+  const tab = tabs.value.find(item => item.id === id)
+  if (tab?.profileID) selectedProfileID.value = tab.profileID
   if (activeTabID.value === id) return
   activeTabID.value = id
   tabMenu.visible = false

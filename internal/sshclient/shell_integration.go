@@ -136,8 +136,10 @@ dir=$(mktemp -d "${TMPDIR:-/tmp}/chemssh-launcher.XXXXXX" 2>/dev/null) || dir=$(
 mkdir -p "$dir/bin" || exit 1
 printf '%s' '{{SZ_SHIM}}' | base64 -d > "$dir/bin/sz" || exit 1
 printf '%s' '{{RZ_SHIM}}' | base64 -d > "$dir/bin/rz" || exit 1
+printf '%s' '{{VI_SHIM}}' | base64 -d > "$dir/bin/vi" || exit 1
+printf '%s' '{{VIM_SHIM}}' | base64 -d > "$dir/bin/vim" || exit 1
 printf '%s' '{{INIT_SCRIPT}}' | base64 -d > "$dir/init.sh" || exit 1
-chmod 700 "$dir" "$dir/bin" "$dir/bin/sz" "$dir/bin/rz" "$dir/init.sh" || exit 1
+chmod 700 "$dir" "$dir/bin" "$dir/bin/sz" "$dir/bin/rz" "$dir/bin/vi" "$dir/bin/vim" "$dir/init.sh" || exit 1
 if ! "$dir/bin/sz" >/dev/null 2>&1; then
     rm -rf "$dir"
     exit 1
@@ -146,8 +148,44 @@ printf 'CHEMSSH_LAUNCHER_SHELL=%s\nCHEMSSH_LAUNCHER_SHIM=%s\n' "$shell" "$dir"
 `
 	setup = strings.ReplaceAll(setup, "{{SZ_SHIM}}", base64.StdEncoding.EncodeToString([]byte(shellTransferShim("download"))))
 	setup = strings.ReplaceAll(setup, "{{RZ_SHIM}}", base64.StdEncoding.EncodeToString([]byte(shellTransferShim("upload"))))
+	setup = strings.ReplaceAll(setup, "{{VI_SHIM}}", base64.StdEncoding.EncodeToString([]byte(shellVimShim("vi"))))
+	setup = strings.ReplaceAll(setup, "{{VIM_SHIM}}", base64.StdEncoding.EncodeToString([]byte(shellVimShim("vim"))))
 	setup = strings.ReplaceAll(setup, "{{INIT_SCRIPT}}", base64.StdEncoding.EncodeToString([]byte(shellIntegrationInitScript)))
 	return setup
+}
+
+// shellVimShim disables Vim's terminal capability queries, which the browser
+// terminal never answers; without this, vi can block at startup on some hosts.
+func shellVimShim(command string) string {
+	return fmt.Sprintf(`#!/bin/sh
+shim_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+clean_path=
+old_ifs=$IFS
+IFS=:
+for item in $PATH; do
+    [ "$item" = "$shim_dir" ] && continue
+    if [ -z "$clean_path" ]; then
+        clean_path=$item
+    else
+        clean_path=$clean_path:$item
+    fi
+done
+IFS=$old_ifs
+PATH=$clean_path
+export PATH
+
+real_command=$(command -v %s 2>/dev/null)
+if [ -z "$real_command" ]; then
+    echo "%s: command not found" >&2
+    exit 127
+fi
+
+if "$real_command" --version 2>/dev/null | sed -n '1p' | grep -qi 'vim'; then
+    exec "$real_command" --cmd 'set t_RV= t_u7= t_RF= t_RB= t_RK=' "$@"
+fi
+
+exec "$real_command" "$@"
+`, command, command)
 }
 
 func shellTransferShim(direction string) string {

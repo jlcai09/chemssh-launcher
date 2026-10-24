@@ -80,8 +80,10 @@ chemssh-launcher --version
 - 在同一个远程 shell session 中执行多行 pre-start/start 命令。
 - SSH 本地端口转发、本地/远程端口检查、本地可用端口建议。
 - 系统浏览器模式和可选 Windows WebView2 模式。
+- 多标签 `/shell` 工作区，第一个固定标签页即启动器页面；点击 `+` 打开空白标签页，并提供启动器、终端、SFTP、后台四个入口。
 - 面向内嵌 ChemSSH 的同源代理（`/<profile-name>/chemssh`，裸 `/chemssh` 亦可用），包括 WebView2 友好的文件拖拽。
 - 远程 profile 和本地调试 profile。
+- 服务器配置侧栏支持拖拽排序；右键可复制、删除配置，或将远程服务器直接用 SFTP 打开。
 - 按 profile 记录日志，同时提供 launcher/backend 日志。
 - 系统凭证管理器保存 secret，加密 vault 兜底，OpenSSH 兼容 `known_hosts`。
 - 独立 SSH 调试终端 `/terminal`，无需先安装 ChemSSH；采用类似 Xshell 的布局，左侧服务器栏可直接连接。
@@ -93,11 +95,14 @@ chemssh-launcher --version
 - 传输队列、进度、速度/ETA、文件夹分组、暂停、继续、取消。
 - 远程文件打开到本地缓存，本地编辑后自动同步回远程。
 - 支持系统文件图标，无法获取时使用 fallback 图标。
-- Backend 页面可查看配置/缓存路径、导入/导出 profile、清理缓存。
+- Backend 页面可查看界面语言和版本、配置/缓存路径，导入/导出 profile、清理缓存。
+- 界面语言默认跟随系统，也可以固定为中文或 English；设置会在下次启动时保留。
 
 ## Profile
 
-Profile 保存在本机，分为远程 profile 和本地 profile。
+Profile 保存在本机，分为远程 profile 和本地 profile。保存后的配置以卡片形式显示在启动器左侧：拖拽卡片可以调整顺序，新顺序会随 profile 存储一起持久化。右键卡片可以复制配置（包括已保存的 secret）、删除配置，或将该服务器用 SFTP 打开；用 SFTP 打开会复用已经显示 SFTP 页面的 `/shell` 标签页，把该服务器作为窗格标签页追加进去，只有当前没有打开的 SFTP 标签页时才会新建一个。本地 profile 不支持该操作。
+
+`复制配置` 会在不暴露明文的前提下复制连接设置以及已保存的密码、私钥口令和安全令牌；副本会追加到列表末尾并自动选中以便编辑。
 
 ### 远程 Profile
 
@@ -152,13 +157,13 @@ Launcher 会检查启动命令的**最后一行**：如果该行还没有 `--hos
 
 可以在安装 ChemSSH 之前用它查看服务器、检查路径、加载模块或执行简单命令。Launcher 会建立独立的 SSH 连接并申请远程 PTY（`xterm-256color`）；认证和 host key 校验沿用 profile 与 `known_hosts` 策略。终端尺寸变化会同步到远程，断开连接、删除 profile 或退出 Launcher 时会关闭会话。本地 profile 不提供 SSH 终端。
 
-终端页面采用类似 Xshell 的布局：左侧服务器栏列出已保存的远程 profile，点击即可连接；该服务器已有会话时直接切换到对应标签页，否则复用当前空闲标签页或新建标签页。窗口较窄时服务器栏会收成小图标列。清屏、上传按钮以及 `ssh://user@host:port` 地址和连接状态位于终端底部的状态栏。
+终端页面采用类似 Xshell 的布局：左侧服务器栏列出已保存的远程 profile，单击选中，双击连接；该服务器已有会话时直接切换到对应标签页，否则复用当前空闲标签页或新建标签页。窗口较窄时服务器栏会收成小图标列。清屏、上传按钮以及 `ssh://user@host:port` 地址和连接状态位于终端底部的状态栏。
 
 每个标签页各自维护独立的 SSH shell 与传输会话。点击标签栏中的 `+` 新建标签页，右键标签页可以复制、关闭或全部关闭，双击标签页也会直接复制。复制标签页会用同一个 profile 建立新连接，并进入原标签页所在的目录，方便在同一位置并行操作。向左或向右拖拽标签页可以调整它们的顺序。
 
 可以从系统文件管理器将文件或文件夹拖到终端上，通过 SFTP 上传，也可以点击底部状态栏左侧的上传按钮手动选择文件；上传时按钮外圈会显示进度环和百分比数字。Launcher 会从提示符标记跟踪 shell 当前工作目录（无法获取时回退到远程主目录），因此上传会跟随当前所在目录；缺少的相对子目录会自动创建，遇到同名项目会先询问。终端使用的 SFTP 会话与当前连接绑定，断开终端时释放。
 
-Launcher 还会在远程 shell 的 `PATH` 中安装临时的 `sz`/`rz` shim，与 ChemSSH 本体的终端集成逻辑一致：执行 `rz` 会打开本地文件选择器并上传到当前目录，执行 `sz <文件>` 会通过 SFTP 下载这些文件。shim 发出传输标记后立即退出，因此不会让终端停在等待状态。如果无法安装 shell 集成，则会拦截原生 ZMODEM 特征并发送 Ctrl-C，保证终端仍可使用。拖拽和 SFTP 页面仍是推荐的传输方式。
+Launcher 还会在远程 shell 的 `PATH` 中安装临时的 `sz`/`rz` shim，与 ChemSSH 本体的终端集成逻辑一致：执行 `rz` 会打开本地文件选择器并上传到当前目录，执行 `sz <文件>` 会通过 SFTP 下载这些文件。shim 发出传输标记后立即退出，因此不会让终端停在等待状态。如果无法安装 shell 集成，则会拦截原生 ZMODEM 特征并发送 Ctrl-C，保证终端仍可使用。临时的 `vi`/`vim` wrapper 会绕开 shim 目录找到真实的编辑器，并关闭 Vim 的终端能力查询，与 ChemSSH 本体一致，避免编辑器在浏览器终端中卡住。拖拽和 SFTP 页面仍是推荐的传输方式。
 
 ## SFTP 与本地文件
 
@@ -168,7 +173,7 @@ SFTP 页面与 ChemSSH 启动流程解耦，可以从 Launcher 打开，也可�
 /sftp
 ```
 
-页面左右两侧各自维护多个标签页。每个标签页可以浏览本地文件系统，或通过已保存远程 profile 建立 SSH/SFTP 连接。远程 SFTP 标签页需要远程 profile 和 host key 校验，但不会启动 ChemSSH、执行 start command、创建 tunnel，也不依赖 ChemSSH health check。右键标签页可以复制、关闭或全部关闭，双击标签页也会直接复制；复制远程标签页会重新连接同一个 profile 并打开相同目录。向左或向右拖拽标签页可以调整顺序，把标签页拖到另一侧窗口的标签栏或文件区域即可移动到另一侧。全部关闭后可通过 `+` 重新打开。`+` 菜单是一个扁平列表，包含本地文件系统与所有已保存的远程服务器；点击任意一项即在当前侧打开对应标签页，本地从用户主目录开始、远程从远程主目录开始，不需要输入路径或二次确认。
+页面左右两侧各自维护多个标签页。每个标签页可以浏览本地文件系统，或通过已保存远程 profile 建立 SSH/SFTP 连接。远程 SFTP 标签页需要远程 profile 和 host key 校验，但不会启动 ChemSSH、执行 start command、创建 tunnel，也不依赖 ChemSSH health check。右键标签页可以复制、关闭或全部关闭，双击标签页也会直接复制；复制远程标签页会重新连接同一个 profile 并打开相同目录。向左或向右拖拽标签页可以调整顺序，把标签页拖到另一侧窗口的标签栏或文件区域即可移动到另一侧。全部关闭后可通过 `+` 重新打开。`+` 菜单是一个扁平列表，包含本地文件系统与所有已保存的远程服务器；点击任意一项即在当前侧打开对应标签页，本地从用户主目录开始、远程从远程主目录开始，不需要输入路径或二次确认。启动器中的“用 SFTP 打开”会复用已打开的 `/sftp` shell 标签页，在其右侧窗格追加该服务器的远程标签页并自动连接远程主目录；若该服务器已有标签页则直接切到前台，没有打开的 SFTP 标签页时才访问 `/sftp?profile=<id>&name=<name>` 新建一个。
 
 选中文件或目录后按 `Delete` 可以直接删除：本地标签页会把选中项移入系统回收站且不弹确认框，远程标签页的行为与右键删除一致，会先弹出确认。
 
@@ -214,6 +219,8 @@ Bridge 会限制在当前 ChemSSH workspace 内；workspace 外路径会被拒�
 
 WebView2 模式会在内嵌窗口中打开 `/shell`。普通 WebView2 模式会禁用 DevTools 快捷键并拦截 `Ctrl+Shift+C`；只有调试时才应使用 `--devtools`。如果仍有传输任务运行，WebView2 关闭拦截可以提示用户。
 
+`/shell` 是标签页工作区，而不是另一个应用页面：第一个固定标签页加载 `/` 启动器，`/shell` 不会在标签页内再次打开。点击 `+` 会打开空白标签页，并提供启动器、终端、SFTP、后台四个入口，也可以在地址栏输入应用路径或外部地址。界面语言在 Backend → 界面中设置。
+
 WebView2 模式下，ChemSSH 通过 Launcher 同源代理打开：
 
 ```text
@@ -257,7 +264,7 @@ SSH host key 保存为 OpenSSH 兼容格式：
 - macOS: `~/Library/Application Support/ChemSSHLauncher/known_hosts`
 - Linux: `~/.config/chemssh-launcher/known_hosts`
 
-配置目录中还保存 `client_identity.json`：Launcher 的稳定 client id，代理 ChemSSH 时通过 `X-ChemSSH-Client-Id` 头发送（终端 WebSocket 走 `client_id` 查询参数），让 ChemSSH 按客户端隔离会话缓存。
+配置目录中还保存 `client_identity.json`：Launcher 的稳定 client id，代理 ChemSSH 时通过 `X-ChemSSH-Client-Id` 头发送（终端 WebSocket 走 `client_id` 查询参数），让 ChemSSH 按客户端隔离会话缓存。`settings.json` 保存界面偏好，例如界面语言（`system`、`zh` 或 `en`）。
 
 WebView2 数据目录和临时 SFTP 打开缓存目录可以在 Backend 页面查看。Windows 上缓存清理可能被文件锁阻塞；Launcher 会记录 pending marker，并在下次启动时继续尝试。
 
@@ -282,7 +289,8 @@ Launcher 的本地 GUI API 对写操作（非 GET 请求）有额外保护：每
 chemssh-launcher executable
   Go GUI server on 127.0.0.1:<random>
     Vue app: /, /shell, /terminal, /sftp, /launcher-logs
-    Profile/session APIs: /api/profiles, /api/session/*, /api/session/shell/*
+    Profile/session APIs: /api/profiles, /api/profiles/reorder, /api/profiles/duplicate, /api/session/*, /api/session/shell/*
+    UI settings API: /api/ui-settings
     SFTP/local file APIs: /api/sftp/*, /api/local/*
     ChemSSH proxy: /<profile-name>/chemssh (bare /chemssh also accepted)
     ChemSSH bridge: /api/chemssh-bridge/*
@@ -409,7 +417,7 @@ chemssh-launcher start <name-or-id>
 internal/version/VERSION
 ```
 
-`go run ./tools/build` 会把版本同步到 Windows 资源信息中。版本号会显示在 GUI 顶部标题栏（左上角品牌区），也可以用命令查看：
+`go run ./tools/build` 会把版本同步到 Windows 资源信息中。版本号会显示在 Backend 页面，也可以用命令查看：
 
 ```bash
 chemssh-launcher --version

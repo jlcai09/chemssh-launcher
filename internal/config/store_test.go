@@ -65,6 +65,55 @@ func TestFileStoreDelete(t *testing.T) {
 	}
 }
 
+func TestFileStoreReorder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "profiles.json")
+	store := NewFileStore(path)
+	for _, id := range []string{"a", "b", "c"} {
+		profile := NewProfileDefaults()
+		profile.ID = id
+		profile.Name = strings.ToUpper(id)
+		if err := store.Save(profile); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.Reorder([]string{"b", "c", "a"}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{list[0].ID, list[1].ID, list[2].ID}; strings.Join(got, ",") != "b,c,a" {
+		t.Fatalf("unexpected order after reorder: %v", got)
+	}
+
+	if err := store.Reorder([]string{"c"}); err != nil {
+		t.Fatal(err)
+	}
+	list, err = store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{list[0].ID, list[1].ID, list[2].ID}; strings.Join(got, ",") != "c,b,a" {
+		t.Fatalf("omitted profiles should keep their relative order: %v", got)
+	}
+
+	if err := store.Reorder([]string{"c", "missing"}); err == nil {
+		t.Fatal("expected unknown profile id to fail")
+	}
+	if err := store.Reorder([]string{"c", "c"}); err == nil {
+		t.Fatal("expected duplicate profile id to fail")
+	}
+	list, err = store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{list[0].ID, list[1].ID, list[2].ID}; strings.Join(got, ",") != "c,b,a" {
+		t.Fatalf("failed reorder should not change the saved order: %v", got)
+	}
+}
+
 func TestProfileBrowserAndHealthURLsAreSeparate(t *testing.T) {
 	profile := NewProfileDefaults()
 	profile.LocalURLPath = "chemssh"

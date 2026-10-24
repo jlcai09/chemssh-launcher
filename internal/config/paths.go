@@ -34,6 +34,14 @@ func DefaultProfilesPath() (string, error) {
 	return filepath.Join(dir, "profiles.json"), nil
 }
 
+func DefaultSettingsPath() (string, error) {
+	dir, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "settings.json"), nil
+}
+
 func DefaultVaultPath() (string, error) {
 	dir, err := DefaultDir()
 	if err != nil {

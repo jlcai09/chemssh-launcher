@@ -36,9 +36,21 @@
           v-for="profile in profiles"
           :key="profile.id"
           class="profile-card"
-          :class="{ 'is-active': current.id === profile.id }"
+          :class="{
+            'is-active': current.id === profile.id,
+            'is-dragging': draggingProfileID === profile.id,
+            'is-drop-before': profileDropTarget.id === profile.id && profileDropTarget.position === 'before',
+            'is-drop-after': profileDropTarget.id === profile.id && profileDropTarget.position === 'after'
+          }"
           type="button"
+          draggable="true"
           @click="selectProfile(profile)"
+          @contextmenu.prevent.stop="openProfileMenu(profile, $event)"
+          @dragstart="startProfileDrag(profile, $event)"
+          @dragover="handleProfileDragOver(profile, $event)"
+          @dragleave="handleProfileDragLeave(profile, $event)"
+          @drop.prevent.stop="dropProfile(profile)"
+          @dragend="finishProfileDrag"
         >
           <span class="state-dot" :class="{ running: runningProfileIds.has(profile.id) }" />
           <span>
@@ -185,6 +197,20 @@
         </section>
       </div>
     </section>
+
+    <Teleport to="body">
+      <div
+        v-if="profileMenu.visible"
+        class="sftp-context-menu profile-context-menu"
+        :style="{ left: `${profileMenu.x}px`, top: `${profileMenu.y}px` }"
+        role="menu"
+      >
+        <button type="button" role="menuitem" @click="duplicateProfileFromMenu">{{ t('launcher.duplicateProfile') }}</button>
+        <button type="button" role="menuitem" class="is-danger" @click="deleteProfileFromMenu">{{ t('launcher.actions.delete') }}</button>
+        <span class="sftp-context-separator" />
+        <button type="button" role="menuitem" :disabled="menuProfileIsLocal" @click="openMenuProfileInSftp">{{ t('launcher.openSftp') }}</button>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -205,6 +231,15 @@ const draftSnapshot = ref<Partial<Profile>>({})
 const draftSecrets = ref({ password: '', passphrase: '', securityToken: '' })
 const activeProfileId = ref('')
 const runningProfileIds = ref(new Set<string>())
+const draggingProfileID = ref('')
+const profileDropTarget = reactive<{ id: string; position: 'before' | 'after' }>({ id: '', position: 'before' })
+const profileMenu = reactive<{ visible: boolean; x: number; y: number; profileID: string }>({
+  visible: false,
+  x: 0,
+  y: 0,
+  profileID: ''
+})
+let suppressProfileClickUntil = 0
 const logs = ref<string[]>([])
 const logRef = ref<HTMLElement | null>(null)
 const logScroller = createAutoScroll(() => logRef.value)
@@ -215,6 +250,8 @@ const passwordAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const passphraseAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const securityTokenAction = ref<'keep' | 'replace' | 'clear'>('keep')
 const isLocalProfile = computed(() => current.kind === 'local')
+const menuProfile = computed(() => profiles.value.find(profile => profile.id === profileMenu.profileID))
+const menuProfileIsLocal = computed(() => menuProfile.value?.kind === 'local')
 const draftActive = computed(() => draftOpen.value && !current.id)
 const draftName = computed(() => (draftActive.value ? current.name : draftSnapshot.value.name) || t('launcher.unsaved'))
 const draftSummary = computed(() => {
@@ -331,10 +368,137 @@ function newProfile() {
 }
 
 function selectProfile(profile: Profile) {
+  if (Date.now() < suppressProfileClickUntil) return
   if (profile.id === current.id) return
   snapshotDraft()
   applyProfile(profile)
   // Log stream will auto-reconnect via watch on current.id
+}
+
+function startProfileDrag(profile: Profile, event: DragEvent) {
+  draggingProfileID.value = profile.id
+  profileDropTarget.id = ''
+  profileDropTarget.position = 'before'
+  suppressProfileClickUntil = Date.now() + 300
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', profile.id)
+  }
+}
+
+function handleProfileDragOver(profile: Profile, event: DragEvent) {
+  if (!draggingProfileID.value || draggingProfileID.value === profile.id) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  profileDropTarget.id = profile.id
+  profileDropTarget.position = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+}
+
+function handleProfileDragLeave(profile: Profile, event: DragEvent) {
+  const currentTarget = event.currentTarget as HTMLElement
+  if (event.relatedTarget instanceof Node && currentTarget.contains(event.relatedTarget)) return
+  if (profileDropTarget.id === profile.id) profileDropTarget.id = ''
+}
+
+function finishProfileDrag() {
+  draggingProfileID.value = ''
+  profileDropTarget.id = ''
+}
+
+async function dropProfile(target: Profile) {
+  const sourceID = draggingProfileID.value
+  const targetID = profileDropTarget.id === target.id ? target.id : ''
+  const position = profileDropTarget.position
+  finishProfileDrag()
+  if (!sourceID || !targetID || sourceID === targetID) return
+
+  const ids = profiles.value.map(profile => profile.id)
+  const from = ids.indexOf(sourceID)
+  if (from < 0) return
+  ids.splice(from, 1)
+  let to = ids.indexOf(targetID)
+  if (to < 0) return
+  if (position === 'after') to += 1
+  ids.splice(to, 0, sourceID)
+
+  const previous = profiles.value.map(profile => profile.id)
+  if (ids.every((id, index) => id === previous[index])) return
+
+  const byID = new Map(profiles.value.map(profile => [profile.id, profile]))
+  profiles.value = ids
+    .map(id => byID.get(id))
+    .filter((profile): profile is Profile => Boolean(profile))
+  try {
+    await postJSON('/api/profiles/reorder', { ids })
+  } catch (error) {
+    await loadProfiles()
+    const message = (error as Error).message
+    ElMessage.error(message ? `${t('launcher.reorderFailed')}: ${message}` : t('launcher.reorderFailed'))
+  }
+}
+
+function openProfileMenu(profile: Profile, event: MouseEvent) {
+  suppressProfileClickUntil = 0
+  selectProfile(profile)
+  const menuWidth = 190
+  const menuHeight = 122
+  profileMenu.profileID = profile.id
+  profileMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8))
+  profileMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8))
+  profileMenu.visible = true
+}
+
+function closeProfileMenu() {
+  if (!profileMenu.visible) return
+  profileMenu.visible = false
+  profileMenu.profileID = ''
+}
+
+function handleProfileMenuDocumentClick(event: MouseEvent) {
+  const target = event.target
+  if (target instanceof HTMLElement && target.closest('.profile-context-menu')) return
+  closeProfileMenu()
+}
+
+function handleProfileMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeProfileMenu()
+}
+
+async function duplicateProfileFromMenu() {
+  const profile = menuProfile.value
+  closeProfileMenu()
+  if (!profile) return
+  try {
+    const name = t('launcher.copyName', { name: profile.name || t('launcher.unnamed') })
+    const created = await postJSON<Profile>('/api/profiles/duplicate', { id: profile.id, name })
+    await loadProfiles()
+    applyProfile(created)
+    await refreshStatus()
+    ElMessage.success(t('launcher.profileDuplicated'))
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+async function deleteProfileFromMenu() {
+  const profile = menuProfile.value
+  closeProfileMenu()
+  if (profile) await deleteProfileByID(profile)
+}
+
+function openMenuProfileInSftp() {
+  const profile = menuProfile.value
+  closeProfileMenu()
+  if (!profile || profile.kind === 'local' || !profile.id) return
+  const name = (profile.name || profile.ssh_host || '').trim()
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ type: 'chemssh-launcher:open-sftp', profile: profile.id, name }, window.location.origin)
+    return
+  }
+  const params = new URLSearchParams({ profile: profile.id })
+  if (name) params.set('name', name)
+  window.open(`/sftp?${params.toString()}`, '_blank')
 }
 
 async function loadProfiles() {
@@ -370,12 +534,27 @@ async function saveProfile() {
 }
 
 async function deleteProfile() {
-  if (!current.id) return
-  await ElMessageBox.confirm(t('launcher.confirmDelete', { name: current.name || t('launcher.unnamed') }), t('launcher.confirmTitle'), { type: 'warning' })
-  await api(`/api/profiles/${current.id}`, { method: 'DELETE' })
-  applyProfile({})
+  const profile = profiles.value.find(item => item.id === current.id)
+  if (profile) await deleteProfileByID(profile)
+}
+
+async function deleteProfileByID(profile: Profile) {
+  if (!profile.id) return
+  try {
+    await ElMessageBox.confirm(t('launcher.confirmDelete', { name: profile.name || t('launcher.unnamed') }), t('launcher.confirmTitle'), { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await api(`/api/profiles/${profile.id}`, { method: 'DELETE' })
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+    return
+  }
+  if (current.id === profile.id) applyProfile({})
   await loadProfiles()
   if (draftOpen.value) restoreDraft()
+  await refreshStatus()
   ElMessage.success(t('launcher.profileDeleted'))
 }
 
@@ -570,6 +749,10 @@ onMounted(async () => {
 
   // 监听页面可见性变化
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  document.addEventListener('click', handleProfileMenuDocumentClick)
+  window.addEventListener('keydown', handleProfileMenuKeydown)
+  window.addEventListener('scroll', closeProfileMenu, true)
+  window.addEventListener('resize', closeProfileMenu)
 })
 
 // 清理定时器和连接
@@ -579,5 +762,9 @@ onBeforeUnmount(() => {
   }
   disconnectLogStream()
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  document.removeEventListener('click', handleProfileMenuDocumentClick)
+  window.removeEventListener('keydown', handleProfileMenuKeydown)
+  window.removeEventListener('scroll', closeProfileMenu, true)
+  window.removeEventListener('resize', closeProfileMenu)
 })
 </script>

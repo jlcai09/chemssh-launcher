@@ -9,7 +9,6 @@ import {
   ElDropdownMenu,
   ElForm,
   ElFormItem,
-  ElHeader,
   ElIcon,
   ElInput,
   ElInputNumber,
@@ -24,6 +23,7 @@ import {
 import 'element-plus/dist/index.css'
 import './styles.css'
 import App from './App.vue'
+import { initLocale } from './i18n'
 
 const app = createApp(App)
 
@@ -37,7 +37,6 @@ const components = [
   ElDropdownMenu,
   ElForm,
   ElFormItem,
-  ElHeader,
   ElIcon,
   ElInput,
   ElInputNumber,
@@ -53,4 +52,9 @@ for (const component of components) {
   app.component(component.name!, component)
 }
 
-app.mount('#app')
+async function bootstrap() {
+  await initLocale()
+  app.mount('#app')
+}
+
+void bootstrap()

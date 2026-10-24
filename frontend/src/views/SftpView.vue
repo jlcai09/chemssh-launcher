@@ -43,7 +43,12 @@
             @drop.prevent.stop="handleTabDrop(paneName, tab.id)"
             @dragend="finishTabDrag"
           >
-            <el-icon><FolderOpened v-if="tab.kind === 'local'" /><Connection v-else /></el-icon>
+            <el-icon v-if="tab.kind === 'local'"><FolderOpened /></el-icon>
+            <span
+              v-else
+              class="xftp-tab-connection"
+              :class="tab.session ? 'is-connected' : 'is-disconnected'"
+            />
             <span>{{ tabLabel(tab) }}</span>
             <span class="xftp-tab-close" role="button" tabindex="-1" @click.stop="closeTab(paneName, tab.id)">
               <el-icon><Close /></el-icon>
@@ -262,8 +267,6 @@
                 role="row"
                 tabindex="0"
                 draggable="false"
-                data-file-role="parent"
-                :data-file-path="parentDirectoryEntry(paneName)?.path || ''"
                 @mousedown.left.stop
                 @click.prevent="handleParentRowClick(paneName, $event)"
                 @keydown.enter.prevent="openParentDirectory(paneName)"
@@ -304,8 +307,6 @@
                 role="row"
                 tabindex="0"
                 draggable="true"
-                data-file-role="item"
-                :data-file-path="entry.path"
                 @mousedown.left="beginSelect(paneName, index, entry, $event)"
                 @click.prevent="handleRowClick(paneName, entry, $event)"
                 @contextmenu.prevent="openFileContextMenu(paneName, index, entry, $event)"
@@ -776,7 +777,7 @@ const LONG_PRESS_MS = 430
 const SELECT_DRAG_THRESHOLD = 4
 const ROW_DOUBLE_CLICK_MS = 500
 const ROW_DOUBLE_CLICK_DISTANCE = 6
-const DEFERRED_OPEN_MAX_AGE = 800
+const REMOTE_OPEN_SYNC_MAX_BYTES = 100 * 1024 * 1024
 const DEFAULT_SIZE_COLUMN_WIDTH = 88
 const DEFAULT_TIME_COLUMN_WIDTH = 152
 const MIN_NAME_COLUMN_WIDTH = 160
@@ -888,9 +889,7 @@ let pressStartX = 0
 let pressStartY = 0
 let longPressTimer: number | null = null
 type RowClickGesture = { time: number; x: number; y: number }
-type DeferredOpenGesture = RowClickGesture & { tabID: string }
 const lastRowClicks: Record<PaneName, RowClickGesture | null> = { left: null, right: null }
-const deferredOpenGestures: Record<PaneName, DeferredOpenGesture | null> = { left: null, right: null }
 let blankDragStartX = 0
 let blankDragStartY = 0
 let blankDragCurrentX = 0
@@ -1819,6 +1818,34 @@ async function openRemoteTab(paneName: PaneName, profile: Profile, path: string)
   }
 }
 
+// A server profile launched from the launcher reuses this page: focus the pane
+// tab that already holds the session, otherwise append one to the right pane.
+async function openProfileTab(profileID: string) {
+  if (!profileID) return
+  const profile = remoteProfiles.value.find(item => item.id === profileID)
+  if (!profile) {
+    ElMessage.warning(t('sftp.profileNotFound'))
+    return
+  }
+  for (const paneName of paneNames) {
+    const existing = panes[paneName].tabs.find(tab => tab.kind === 'remote' && tab.profileID === profileID)
+    if (existing) {
+      activateTab(paneName, existing.id)
+      return
+    }
+  }
+  await openRemoteTab('right', profile, '.')
+  await nextTick()
+  updateVirtualMetrics('right')
+}
+
+function handleShellMessage(event: MessageEvent) {
+  if (event.origin !== window.location.origin) return
+  const data = event.data as { type?: string; profile?: unknown } | null
+  if (!data || data.type !== 'chemssh-sftp:open-profile') return
+  void openProfileTab(String(data.profile || ''))
+}
+
 async function closeTab(paneName: PaneName, tabID: string) {
   clearPaneGestures(paneName)
   const pane = panes[paneName]
@@ -2044,6 +2071,16 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
     const resolvedPath = await resolveTabPath(tab, tab.path)
     if (!isLatest()) return
     tab.path = resolvedPath
+    // 进入新目录时立刻清空旧列表，避免加载期间仍显示上一级内容；
+    // 同一路径的刷新保留旧行，防止新建/删除后闪烁。
+    if (resolvedPath !== tab.loadedPath) {
+      tab.entries = rawFileEntries([])
+      const body = panes[paneName].bodyRef
+      if (body) {
+        body.scrollTop = 0
+        panes[paneName].bodyScrollTop = 0
+      }
+    }
     const data = tab.kind === 'local'
       ? await api<{ path: string; entries: FileEntry[] }>(`/api/local/list?path=${encodeURIComponent(tab.path)}`)
       : await api<{ path: string; entries: FileEntry[] }>(`/api/sftp/list?session=${encodeURIComponent(tab.session || '')}&path=${encodeURIComponent(tab.path)}`)
@@ -2140,7 +2177,6 @@ function recordDirectoryHistory(tab: FileTab, previousPath: string, nextPath: st
 
 function clearPaneGestures(paneName: PaneName) {
   lastRowClicks[paneName] = null
-  deferredOpenGestures[paneName] = null
 }
 
 function clearAllPaneGestures() {
@@ -2160,46 +2196,9 @@ function consumeRowDoubleClick(paneName: PaneName, event: MouseEvent) {
   return isDouble
 }
 
-// 第二次双击落在“正在加载的那个目录”行上时，屏幕上的行还是上一份列表，
-// 直接打开只会命中旧目标。记住屏幕位置，等本次列表渲染后再按位置重新解析。
-function queueDeferredOpenGesture(paneName: PaneName, tab: FileTab, event: MouseEvent) {
-  deferredOpenGestures[paneName] = { tabID: tab.id, time: performance.now(), x: event.clientX, y: event.clientY }
-}
-
-function resolveRowAtPoint(paneName: PaneName, x: number, y: number) {
-  const element = document.elementFromPoint(x, y)
-  const row = element instanceof Element ? element.closest<HTMLElement>('.file-row') : null
-  if (!row || !panes[paneName].bodyRef?.contains(row)) return null
-  const path = row.dataset.filePath
-  if (!path) return null
-  return { role: row.dataset.fileRole === 'parent' ? 'parent' : 'item', path }
-}
-
-function resolveDeferredOpenGesture(paneName: PaneName) {
-  const gesture = deferredOpenGestures[paneName]
-  if (!gesture) return
-  deferredOpenGestures[paneName] = null
-  if (performance.now() - gesture.time > DEFERRED_OPEN_MAX_AGE) return
-  const row = resolveRowAtPoint(paneName, gesture.x, gesture.y)
-  if (!row) return
-  const tab = activeTab(paneName)
-  if (!tab || tab.loading || tab.id !== gesture.tabID) return
-  if (row.role === 'parent') {
-    void openParentDirectory(paneName)
-    return
-  }
-  const entry = visibleEntries(paneName).find(candidate => candidate.path === row.path)
-  if (entry && entry.path !== tab.path) void openEntry(paneName, entry)
-}
-
 function handleRowClick(paneName: PaneName, entry: FileEntry, event: MouseEvent) {
   if (event.button !== 0) return
   if (!consumeRowDoubleClick(paneName, event)) return
-  const tab = activeTab(paneName)
-  if (tab?.loading && entry.is_dir && entry.path === tab.path) {
-    queueDeferredOpenGesture(paneName, tab, event)
-    return
-  }
   void openEntry(paneName, entry)
 }
 
@@ -2207,15 +2206,6 @@ function handleParentRowClick(paneName: PaneName, event: MouseEvent) {
   if (event.button !== 0) return
   if (!consumeRowDoubleClick(paneName, event)) return
   void openParentDirectory(paneName)
-}
-
-for (const paneName of paneNames) {
-  watch(
-    () => activeTab(paneName)?.loading,
-    (loading, previousLoading) => {
-      if (previousLoading && !loading) void nextTick(() => resolveDeferredOpenGesture(paneName))
-    }
-  )
 }
 
 function beginSelect(paneName: PaneName, index: number, entry: FileEntry, event: MouseEvent) {
@@ -3016,8 +3006,15 @@ async function openFile(paneName: PaneName, entry: FileEntry) {
     return
   }
   if (!tab.session) return
+  if (rejectOversizedRemoteOpen(entry)) return
   const result = await postJSON<{ path: string }>('/api/sftp/open', { session: tab.session, path: entry.path })
   log(`打开远程文件缓存：${entry.path} -> ${result.path}`)
+}
+
+function rejectOversizedRemoteOpen(entry: FileEntry) {
+  if (entry.size <= REMOTE_OPEN_SYNC_MAX_BYTES) return false
+  ElMessage.warning(t('sftp.openTooLarge'))
+  return true
 }
 
 async function openTextFile(paneName: PaneName, entry: FileEntry) {
@@ -3029,6 +3026,7 @@ async function openTextFile(paneName: PaneName, entry: FileEntry) {
     return
   }
   if (!tab.session) return
+  if (rejectOversizedRemoteOpen(entry)) return
   const result = await postJSON<{ path: string }>('/api/sftp/open-text', { session: tab.session, path: entry.path })
   log(`用记事本编辑远程文件缓存：${entry.path} -> ${result.path}`)
 }
@@ -3590,6 +3588,7 @@ function handleDeleteKey(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  const requestedProfileID = new URLSearchParams(window.location.search).get('profile') || ''
   if (typeof ResizeObserver !== 'undefined') {
     scrollResizeObserver = new ResizeObserver(() => {
       paneNames.forEach(paneName => updateVirtualMetrics(paneName))
@@ -3602,6 +3601,7 @@ onMounted(async () => {
     observeScrollElement(transferListRef.value)
   }
   window.addEventListener('mouseup', finishSelection)
+  window.addEventListener('message', handleShellMessage)
   document.addEventListener('click', handleContextMenuDocumentClick)
   window.addEventListener('keydown', handleContextMenuKeydown)
   window.addEventListener('keydown', handleDeleteKey)
@@ -3624,6 +3624,10 @@ onMounted(async () => {
   await nextTick()
   paneNames.forEach(paneName => updateVirtualMetrics(paneName))
   updateTransferScrollbars()
+  if (requestedProfileID) await openProfileTab(requestedProfileID)
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: 'chemssh-sftp:ready' }, window.location.origin)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -3634,6 +3638,7 @@ onBeforeUnmount(() => {
   scrollResizeObserver?.disconnect()
   scrollResizeObserver = null
   window.removeEventListener('mouseup', finishSelection)
+  window.removeEventListener('message', handleShellMessage)
   document.removeEventListener('click', handleContextMenuDocumentClick)
   window.removeEventListener('keydown', handleContextMenuKeydown)
   window.removeEventListener('keydown', handleDeleteKey)

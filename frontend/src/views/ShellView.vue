@@ -14,27 +14,27 @@
           @dragover.prevent="moveBefore(tab.id)"
           @dragend="draggingID = ''"
         >
-          <span>{{ tab.title }}</span>
+          <span>{{ tabLabel(tab) }}</span>
           <el-icon v-if="!tab.pinned" class="browser-tab-close" @click.stop="closeTab(tab.id)"><Close /></el-icon>
         </button>
-        <el-tooltip content="新建标签页" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-          <el-button :icon="Plus" circle @click="createTab('新标签页', 'about:blank')" />
+        <el-tooltip :content="t('shell.newTab')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-button :icon="Plus" circle @click="createTab('', 'about:blank')" />
         </el-tooltip>
       </div>
       <div class="browser-tools">
-        <el-tooltip content="后退" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+        <el-tooltip :content="t('shell.back')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="ArrowLeft" circle :disabled="!canBack" @click="goBack" />
         </el-tooltip>
-        <el-tooltip content="前进" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+        <el-tooltip :content="t('shell.forward')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="ArrowRight" circle :disabled="!canForward" @click="goForward" />
         </el-tooltip>
-        <el-tooltip content="刷新" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+        <el-tooltip :content="t('shell.reload')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="Refresh" circle @click="reloadActive" />
         </el-tooltip>
         <form class="address-form" @submit.prevent="navigateActive(address)">
-          <el-input v-model="address" placeholder="输入地址或本地路径" />
+          <el-input v-model="address" :placeholder="t('shell.addressPlaceholder')" />
         </form>
-        <el-tooltip content="下载历史" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+        <el-tooltip :content="t('shell.downloads')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="Download" circle @click="openDownloadsPanel" />
         </el-tooltip>
       </div>
@@ -43,15 +43,16 @@
     <main class="browser-pages">
       <section v-for="tab in tabs" :key="tab.id" class="browser-page" :class="{ active: tab.id === activeID }">
         <div v-if="tab.url === 'about:blank'" class="blank-page">
-          <strong>新标签页</strong>
+          <strong>{{ t('shell.blankTitle') }}</strong>
+          <p class="blank-hint">{{ t('shell.blankHint') }}</p>
           <div class="quick-links">
-            <el-button :icon="VideoPlay" type="primary" @click="navigateTab(tab.id, '/')">启动器</el-button>
-            <el-button :icon="Monitor" @click="navigateTab(tab.id, '/terminal')">终端</el-button>
-            <el-button :icon="FolderOpened" @click="navigateTab(tab.id, '/sftp')">SFTP</el-button>
-            <el-button :icon="Operation" @click="navigateTab(tab.id, '/launcher-logs')">后台</el-button>
+            <el-button :icon="VideoPlay" type="primary" @click="navigateTab(tab.id, '/')">{{ t('app.launcher') }}</el-button>
+            <el-button :icon="Monitor" @click="navigateTab(tab.id, '/terminal')">{{ t('app.terminal') }}</el-button>
+            <el-button :icon="FolderOpened" @click="navigateTab(tab.id, '/sftp')">{{ t('app.sftp') }}</el-button>
+            <el-button :icon="Operation" @click="navigateTab(tab.id, '/launcher-logs')">{{ t('app.backend') }}</el-button>
           </div>
         </div>
-        <iframe v-else :src="tab.url" :title="tab.title" @load="syncLoadedURL(tab.id)" />
+        <iframe v-else :ref="el => setTabFrame(tab.id, el)" :src="tab.url" :title="tabLabel(tab)" @load="syncLoadedURL(tab.id)" />
       </section>
     </main>
   </section>
@@ -60,14 +61,23 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ArrowLeft, ArrowRight, Close, Download, FolderOpened, Monitor, Operation, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { t } from '../i18n'
+
+type PageTitleKey = 'app.launcher' | 'app.terminal' | 'app.sftp' | 'app.backend' | 'shell.blankTitle'
 
 interface BrowserTab {
   id: string
   title: string
+  titleKey: PageTitleKey | ''
   url: string
   pinned: boolean
   history: string[]
   historyIndex: number
+}
+
+interface TabTitle {
+  title: string
+  titleKey: PageTitleKey | ''
 }
 
 declare global {
@@ -100,6 +110,37 @@ let suppressAutoOpenUntil = 0
 let sessionStatusPrimed = false
 let nextID = 1
 
+const tabFrames = new Map<string, HTMLIFrameElement>()
+// A page is only addressable once it announces it is ready: booting takes an
+// async settings fetch, so the iframe load event fires before it can answer.
+const readyTabs = new Set<string>()
+const pendingSftpProfiles = new Map<string, string[]>()
+
+function setTabFrame(id: string, element: unknown) {
+  if (element instanceof HTMLIFrameElement) tabFrames.set(id, element)
+  else tabFrames.delete(id)
+}
+
+function forgetTab(id: string) {
+  tabFrames.delete(id)
+  readyTabs.delete(id)
+  pendingSftpProfiles.delete(id)
+}
+
+function postToTab(id: string, message: Record<string, unknown>) {
+  tabFrames.get(id)?.contentWindow?.postMessage(message, window.location.origin)
+}
+
+function markTabReady(source: Window | null) {
+  const tab = tabs.find(item => tabFrames.get(item.id)?.contentWindow === source)
+  if (!tab) return
+  readyTabs.add(tab.id)
+  const queued = pendingSftpProfiles.get(tab.id)
+  if (!queued) return
+  pendingSftpProfiles.delete(tab.id)
+  queued.forEach(profileID => postToTab(tab.id, { type: 'chemssh-sftp:open-profile', profile: profileID }))
+}
+
 const activeTab = computed(() => tabs.find(tab => tab.id === activeID.value))
 const orderedTabs = computed(() => {
   const byID = new Map(tabs.map(tab => [tab.id, tab]))
@@ -130,44 +171,83 @@ function defaultSchemeForAddress(text: string) {
   return host.startsWith('127.') ? 'http' : 'https'
 }
 
+// A shell tab must never point back at the shell itself, so same-origin
+// /shell addresses fall back to the launcher page.
+function normalizeShellURL(value: string) {
+  if (!value || value === 'about:blank') return value
+  try {
+    const parsed = new URL(value, window.location.origin)
+    if (parsed.origin !== window.location.origin) return value
+    if (parsed.pathname === '/shell' || parsed.pathname === '/shell/') {
+      return new URL('/', parsed.origin).href
+    }
+  } catch {
+    // Leave malformed addresses for the iframe to report.
+  }
+  return value
+}
+
 function absoluteURL(value: string) {
   const text = normalizeAddressInput(value)
   if (!text) return 'about:blank'
   if (text === 'about:blank') return text
-  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(text)) return text
-  if (text.startsWith('/')) return new URL(text, window.location.origin).href
-  if (looksLikeNetworkAddress(text)) return `${defaultSchemeForAddress(text)}://${text}`
-  return new URL(text, window.location.origin).href
+  let finalURL = ''
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(text)) {
+    finalURL = text
+  } else if (text.startsWith('/')) {
+    finalURL = new URL(text, window.location.origin).href
+  } else if (looksLikeNetworkAddress(text)) {
+    finalURL = `${defaultSchemeForAddress(text)}://${text}`
+  } else {
+    finalURL = new URL(text, window.location.origin).href
+  }
+  return normalizeShellURL(finalURL)
 }
 
-function shortTitle(url: string) {
-  if (url === 'about:blank') return '新标签页'
+function titleForURL(url: string): TabTitle {
+  if (url === 'about:blank') return { title: '', titleKey: 'shell.blankTitle' }
   try {
     const parsed = new URL(url)
     if (parsed.origin === window.location.origin) {
-      if (parsed.pathname === '/') return '启动器'
-      if (parsed.pathname === '/terminal') return '终端'
-      if (parsed.pathname === '/sftp') return 'SFTP'
-      if (parsed.pathname === '/launcher-logs') return '后台'
+      if (parsed.pathname === '/') return { title: '', titleKey: 'app.launcher' }
+      if (parsed.pathname === '/terminal') return { title: '', titleKey: 'app.terminal' }
+      if (parsed.pathname === '/sftp') {
+        const profileName = parsed.searchParams.get('name')
+        if (parsed.searchParams.get('profile') && profileName) return { title: `SFTP · ${profileName}`, titleKey: '' }
+        return { title: '', titleKey: 'app.sftp' }
+      }
+      if (parsed.pathname === '/launcher-logs') return { title: '', titleKey: 'app.backend' }
       const parts = parsed.pathname.split('/').filter(Boolean)
-      if (parts.length >= 2 && parts[1] === 'chemssh') return decodeURIComponent(parts[0])
+      if (parts.length >= 2 && parts[1] === 'chemssh') return { title: decodeURIComponent(parts[0]), titleKey: '' }
     }
-    return parsed.hostname || url
+    return { title: parsed.hostname || url, titleKey: '' }
   } catch {
-    return url
+    return { title: url, titleKey: '' }
   }
+}
+
+function tabLabel(tab: BrowserTab) {
+  return tab.titleKey ? t(tab.titleKey) : tab.title
+}
+
+function applyTabTitle(tab: BrowserTab, preferredTitle = '') {
+  const meta = titleForURL(tab.url)
+  tab.titleKey = meta.titleKey
+  tab.title = meta.titleKey ? '' : (preferredTitle || meta.title)
 }
 
 function createTab(title: string, url: string, pinned = false, focus = true) {
   const finalURL = absoluteURL(url)
   const tab: BrowserTab = {
     id: `tab-${nextID++}`,
-    title: title || shortTitle(finalURL),
+    title: '',
+    titleKey: '',
     url: finalURL,
     pinned,
     history: [finalURL],
     historyIndex: 0
   }
+  applyTabTitle(tab, title)
   tabs.push(tab)
   tabOrder.value.push(tab.id)
   if (focus) activate(tab.id)
@@ -191,6 +271,7 @@ function closeTab(id: string) {
     ? (tabOrder.value[orderIndex - 1] || tabOrder.value[orderIndex + 1] || '')
     : (tabs[Math.max(0, index - 1)]?.id || tabs[0]?.id || '')
   tabs.splice(index, 1)
+  forgetTab(id)
   tabOrder.value = tabOrder.value.filter(tabID => tabID !== id)
   if (activeID.value === id) activate(nextActiveID)
 }
@@ -200,7 +281,8 @@ function navigateTab(id: string, url: string, addHistory = true) {
   if (!tab) return
   const finalURL = absoluteURL(url)
   tab.url = finalURL
-  tab.title = shortTitle(finalURL)
+  readyTabs.delete(id)
+  applyTabTitle(tab)
   if (addHistory) {
     tab.history = tab.history.slice(0, tab.historyIndex + 1)
     tab.history.push(finalURL)
@@ -217,6 +299,8 @@ function reloadActive() {
   const tab = activeTab.value
   if (!tab) return
   const url = tab.url
+  readyTabs.delete(tab.id)
+  pendingSftpProfiles.delete(tab.id)
   tab.url = 'about:blank'
   window.setTimeout(() => {
     tab.url = url
@@ -251,7 +335,38 @@ function moveBefore(targetID: string) {
 function syncLoadedURL(id: string) {
   const tab = tabs.find(item => item.id === id)
   if (!tab) return
-  tab.title = shortTitle(tab.url)
+  applyTabTitle(tab)
+}
+
+function isSftpTabURL(url: string) {
+  try {
+    const parsed = new URL(url, window.location.origin)
+    return parsed.origin === window.location.origin && parsed.pathname === '/sftp'
+  } catch {
+    return false
+  }
+}
+
+// A server profile opens inside the SFTP page that is already on screen, so
+// repeated launches grow that page's pane tabs instead of stacking shell tabs.
+function openSftpProfile(profileID: string, profileName: string) {
+  const sftpTabs = tabs.filter(tab => isSftpTabURL(tab.url))
+  const existing = sftpTabs.find(tab => tab.id === activeID.value) || sftpTabs[0]
+  if (existing) {
+    activate(existing.id)
+    if (readyTabs.has(existing.id)) {
+      postToTab(existing.id, { type: 'chemssh-sftp:open-profile', profile: profileID })
+    } else {
+      const queued = pendingSftpProfiles.get(existing.id) || []
+      queued.push(profileID)
+      pendingSftpProfiles.set(existing.id, queued)
+    }
+    return
+  }
+  const url = new URL('/sftp', window.location.origin)
+  url.searchParams.set('profile', profileID)
+  if (profileName) url.searchParams.set('name', profileName)
+  createTab(profileName, url.href)
 }
 
 function findTabByURL(url: string) {
@@ -277,7 +392,7 @@ function isDismissedSession(url: string, openSeq: number) {
 function openOrFocus(title: string, url: string) {
   const existing = findTabByURL(url)
   if (existing) {
-    existing.title = title || existing.title
+    if (title && !existing.titleKey) existing.title = title
     activate(existing.id)
     return
   }
@@ -337,12 +452,21 @@ async function pollSession() {
 }
 
 onMounted(() => {
-  createTab('启动器', '/', true, true)
+  createTab('', '/', true, true)
   pollSession()
   window.setInterval(pollSession, 1500)
   window.addEventListener('message', event => {
     const data = event.data || {}
-    if (data.type === 'chemssh-launcher:new-tab' && data.url) openOrFocus(shortTitle(data.url), data.url)
+    if (data.type === 'chemssh-sftp:ready') {
+      markTabReady(event.source as Window | null)
+    }
+    if (data.type === 'chemssh-launcher:new-tab' && data.url) {
+      const finalURL = absoluteURL(data.url)
+      openOrFocus(titleForURL(finalURL).title, finalURL)
+    }
+    if (data.type === 'chemssh-launcher:open-sftp' && data.profile) {
+      openSftpProfile(String(data.profile), String(data.name || ''))
+    }
     if (data.type === 'chemssh-launcher:close-downloads') closeDownloadsPanel()
     if (data.type === 'chemssh-launcher:suppress-auto-open') suppressAutoOpenUntil = Date.now() + 10000
   })

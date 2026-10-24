@@ -2,6 +2,7 @@ package gui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,9 +14,19 @@ import (
 )
 
 const (
-	sftpOpenSyncDebounce   = 500 * time.Millisecond // 防抖时间：快速响应
-	sftpOpenSyncRetryDelay = 3 * time.Second
+	sftpOpenSyncDebounce          = 500 * time.Millisecond // 防抖时间：快速响应
+	sftpOpenSyncRetryDelay        = 3 * time.Second
+	sftpOpenSyncMaxFileSize int64 = 100 << 20
 )
+
+var errSFTPOpenFileTooLarge = errors.New("file is too large to open with sync (limit 100 MB)")
+
+func checkSFTPOpenSyncFileSize(size int64) error {
+	if size <= sftpOpenSyncMaxFileSize {
+		return nil
+	}
+	return fmt.Errorf("%w: %d bytes", errSFTPOpenFileTooLarge, size)
+}
 
 type sftpOpenSyncManager struct {
 	mu       sync.Mutex
@@ -91,6 +102,9 @@ func (m *sftpOpenSyncManager) Register(sessionID, remotePath, localPath string) 
 	}
 	if info.IsDir() {
 		return errors.New("cannot sync a directory cache entry")
+	}
+	if err := checkSFTPOpenSyncFileSize(info.Size()); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
