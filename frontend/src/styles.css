@@ -1206,6 +1206,16 @@ p,
   color: #5d7485;
 }
 
+.file-parent-row.is-move-drop-target,
+.file-parent-row.is-move-drop-target:hover {
+  color: #103f50;
+  background: linear-gradient(90deg, #d7eef5 0%, #f2fbfd 100%);
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    inset 0 0 0 1.5px rgba(23, 107, 135, 0.45),
+    0 6px 14px rgba(23, 107, 135, 0.12);
+}
+
 .file-cell {
   min-width: 0;
   padding: 0 8px;

@@ -1418,13 +1418,15 @@ const chemsshLoadingHTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
 <title>ChemSSH - Loading</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
+html,body{background:#fff}
 body{display:flex;align-items:center;justify-content:center;min-height:100vh;
-  background:#f5f6fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#333}
-.card{text-align:center;padding:48px 64px;background:#fff;border-radius:12px;
-  box-shadow:0 2px 12px rgba(0,0,0,.08)}
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#333}
+.card{text-align:center;padding:48px 64px;background:#fff;border:1px solid rgba(0,0,0,.06);border-radius:12px;
+  box-shadow:0 2px 12px rgba(0,0,0,.06)}
 .spinner{width:40px;height:40px;margin:0 auto 20px;border:4px solid #e0e0e0;
   border-top-color:#4a90d9;border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}

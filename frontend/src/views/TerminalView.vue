@@ -15,6 +15,7 @@
           :title="profileSessionTitle(profile)"
           @click="selectProfile(profile)"
           @dblclick="openProfileSession(profile)"
+          @contextmenu.prevent.stop="openProfileMenu(profile, $event)"
         >
           <span class="terminal-session-icon"><el-icon><Connection /></el-icon></span>
           <span class="terminal-session-text">
@@ -152,6 +153,17 @@
       <button type="button" role="menuitem" @click="runTabAction('close')">{{ t('terminal.tabClose') }}</button>
       <button type="button" role="menuitem" class="is-danger" @click="runTabAction('closeAll')">{{ t('terminal.tabCloseAll') }}</button>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="profileMenu.visible"
+        class="sftp-context-menu profile-context-menu"
+        :style="{ left: `${profileMenu.x}px`, top: `${profileMenu.y}px` }"
+        role="menu"
+        @contextmenu.prevent
+      >
+        <button type="button" role="menuitem" @click="openMenuProfileInSftp">{{ t('launcher.openSftp') }}</button>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -216,6 +228,7 @@ const selectedProfileID = ref('')
 const dropActive = ref(false)
 const stageRef = ref<HTMLElement | null>(null)
 const tabMenu = reactive({ visible: false, x: 0, y: 0, tabID: '' })
+const profileMenu = reactive({ visible: false, x: 0, y: 0, profileID: '' })
 const tabDrag = reactive({ active: false, tabID: '', targetID: '', position: 'before' as 'before' | 'after' })
 
 const runtimes = new Map<string, TerminalRuntime>()
@@ -233,6 +246,7 @@ const ZMODEM_SIGNATURES = [
 ]
 
 const remoteProfiles = computed(() => profiles.value.filter(profile => profile.kind !== 'local'))
+const menuProfile = computed(() => profiles.value.find(profile => profile.id === profileMenu.profileID) || null)
 const activeTab = computed(() => tabs.value.find(tab => tab.id === activeTabID.value) || null)
 const activeProfile = computed(() => remoteProfiles.value.find(profile => profile.id === activeTab.value?.profileID) || null)
 const connectionAddress = computed(() => activeProfile.value ? profileSessionURL(activeProfile.value) : '')
@@ -701,6 +715,7 @@ function finishTabDrag() {
 function openTabMenu(tab: TerminalTab, event: MouseEvent) {
   const menuWidth = 190
   const menuHeight = 130
+  closeProfileMenu()
   tabMenu.tabID = tab.id
   tabMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8))
   tabMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8))
@@ -729,6 +744,53 @@ function handleTabMenuDismiss(event: Event) {
 
 function handleTabMenuKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') tabMenu.visible = false
+}
+
+function openProfileMenu(profile: Profile, event: MouseEvent) {
+  const menuWidth = 190
+  const menuHeight = 56
+  selectProfile(profile)
+  tabMenu.visible = false
+  profileMenu.profileID = profile.id
+  profileMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8))
+  profileMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8))
+  profileMenu.visible = true
+}
+
+function closeProfileMenu() {
+  if (!profileMenu.visible) return
+  profileMenu.visible = false
+  profileMenu.profileID = ''
+}
+
+function handleProfileMenuDismiss(event: Event) {
+  if (!profileMenu.visible) return
+  if (event instanceof MouseEvent && event.button === 2) return
+  const target = event.target
+  if (target instanceof HTMLElement && target.closest('.profile-context-menu')) return
+  closeProfileMenu()
+}
+
+function handleProfileMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeProfileMenu()
+}
+
+function openProfileInSftp(profile: Profile) {
+  if (!profile.id || profile.kind === 'local') return
+  const name = (profile.name || profile.ssh_host || '').trim()
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ type: 'chemssh-launcher:open-sftp', profile: profile.id, name }, window.location.origin)
+    return
+  }
+  const params = new URLSearchParams({ profile: profile.id })
+  if (name) params.set('name', name)
+  window.open(`/sftp?${params.toString()}`, '_blank')
+}
+
+function openMenuProfileInSftp() {
+  const profile = menuProfile.value
+  closeProfileMenu()
+  if (profile) openProfileInSftp(profile)
 }
 
 async function openShell(tab: TerminalTab) {
@@ -1347,6 +1409,9 @@ onMounted(async () => {
   document.addEventListener('click', handleTabMenuDismiss)
   window.addEventListener('keydown', handleTabMenuKeydown)
   window.addEventListener('scroll', handleTabMenuDismiss, true)
+  document.addEventListener('click', handleProfileMenuDismiss)
+  window.addEventListener('keydown', handleProfileMenuKeydown)
+  window.addEventListener('scroll', handleProfileMenuDismiss, true)
   activateCurrentTerminal()
 })
 
@@ -1356,6 +1421,9 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', handleTabMenuDismiss)
   window.removeEventListener('keydown', handleTabMenuKeydown)
   window.removeEventListener('scroll', handleTabMenuDismiss, true)
+  document.removeEventListener('click', handleProfileMenuDismiss)
+  window.removeEventListener('keydown', handleProfileMenuKeydown)
+  window.removeEventListener('scroll', handleProfileMenuDismiss, true)
   for (const tab of [...tabs.value]) {
     void shutdownTab(tab)
   }

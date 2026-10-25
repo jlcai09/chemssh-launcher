@@ -22,6 +22,7 @@ import {
 } from 'element-plus'
 import 'element-plus/dist/index.css'
 import './styles.css'
+import './lumen.css'
 import App from './App.vue'
 import { initLocale } from './i18n'
 

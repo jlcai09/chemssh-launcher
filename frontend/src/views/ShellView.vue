@@ -1,6 +1,23 @@
 <template>
   <section class="browser-shell">
     <header class="browser-chrome">
+      <div class="browser-tools">
+        <el-tooltip :content="t('shell.back')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-button :icon="ArrowLeft" circle :disabled="!canBack" @click="goBack" />
+        </el-tooltip>
+        <el-tooltip :content="t('shell.forward')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-button :icon="ArrowRight" circle :disabled="!canForward" @click="goForward" />
+        </el-tooltip>
+        <el-tooltip :content="t('shell.reload')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-button :icon="Refresh" circle @click="reloadActive" />
+        </el-tooltip>
+        <form class="address-form" @submit.prevent="navigateActive(address)">
+          <el-input v-model="address" :placeholder="t('shell.addressPlaceholder')" />
+        </form>
+        <el-tooltip :content="t('shell.downloads')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-button :icon="Download" circle @click="openDownloadsPanel" />
+        </el-tooltip>
+      </div>
       <div class="browser-tabs">
         <button
           v-for="tab in orderedTabs"
@@ -19,23 +36,6 @@
         </button>
         <el-tooltip :content="t('shell.newTab')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
           <el-button :icon="Plus" circle @click="createTab('', 'about:blank')" />
-        </el-tooltip>
-      </div>
-      <div class="browser-tools">
-        <el-tooltip :content="t('shell.back')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-          <el-button :icon="ArrowLeft" circle :disabled="!canBack" @click="goBack" />
-        </el-tooltip>
-        <el-tooltip :content="t('shell.forward')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-          <el-button :icon="ArrowRight" circle :disabled="!canForward" @click="goForward" />
-        </el-tooltip>
-        <el-tooltip :content="t('shell.reload')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-          <el-button :icon="Refresh" circle @click="reloadActive" />
-        </el-tooltip>
-        <form class="address-form" @submit.prevent="navigateActive(address)">
-          <el-input v-model="address" :placeholder="t('shell.addressPlaceholder')" />
-        </form>
-        <el-tooltip :content="t('shell.downloads')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-          <el-button :icon="Download" circle @click="openDownloadsPanel" />
         </el-tooltip>
       </div>
     </header>
@@ -211,11 +211,7 @@ function titleForURL(url: string): TabTitle {
     if (parsed.origin === window.location.origin) {
       if (parsed.pathname === '/') return { title: '', titleKey: 'app.launcher' }
       if (parsed.pathname === '/terminal') return { title: '', titleKey: 'app.terminal' }
-      if (parsed.pathname === '/sftp') {
-        const profileName = parsed.searchParams.get('name')
-        if (parsed.searchParams.get('profile') && profileName) return { title: `SFTP · ${profileName}`, titleKey: '' }
-        return { title: '', titleKey: 'app.sftp' }
-      }
+      if (parsed.pathname === '/sftp') return { title: '', titleKey: 'app.sftp' }
       if (parsed.pathname === '/launcher-logs') return { title: '', titleKey: 'app.backend' }
       const parts = parsed.pathname.split('/').filter(Boolean)
       if (parts.length >= 2 && parts[1] === 'chemssh') return { title: decodeURIComponent(parts[0]), titleKey: '' }

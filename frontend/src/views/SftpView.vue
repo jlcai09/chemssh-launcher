@@ -264,12 +264,17 @@
               <div
                 v-if="parentDirectoryEntry(paneName)"
                 class="file-row file-parent-row is-directory"
+                :class="{ 'is-move-drop-target': isParentDropTarget(paneName) }"
                 role="row"
                 tabindex="0"
                 draggable="false"
                 @mousedown.left.stop
                 @click.prevent="handleParentRowClick(paneName, $event)"
                 @keydown.enter.prevent="openParentDirectory(paneName)"
+                @dragenter="handleParentDragOver(paneName, $event)"
+                @dragover="handleParentDragOver(paneName, $event)"
+                @dragleave="handleParentDragLeave(paneName, $event)"
+                @drop="handleParentDrop(paneName, $event)"
               >
                 <span class="file-cell file-icon-cell">
                   <img
@@ -296,6 +301,7 @@
               <div
                 v-for="{ entry, index } in virtualRows(paneName)"
                 :key="entry.path"
+                :data-file-index="index"
                 class="file-row"
                 :class="{
                   'is-directory': entry.is_dir,
@@ -636,6 +642,8 @@ interface PaneState {
   bodyRef: HTMLElement | null
   bodyScrollTop: number
   bodyViewportHeight: number
+  rowSlotHeight: number
+  parentRowSlotHeight: number
   sizeColumnWidth: number
   timeColumnWidth: number
   sortKey: SortKey
@@ -789,7 +797,6 @@ const FILE_ICON_COLUMN_WIDTH = 34
 const FILE_COLUMN_RESIZER_WIDTH = 10
 const FLOATING_SCROLLBAR_MIN_THUMB = 36
 const FILE_ROW_SLOT_HEIGHT = 40
-const FILE_BODY_VERTICAL_PADDING = 4
 const VIRTUAL_ROW_OVERSCAN = 10
 const TRANSFER_PROGRESS_POLL_MS = 80
 const DIRECTORY_HISTORY_LIMIT = 20
@@ -890,6 +897,7 @@ let pressStartY = 0
 let longPressTimer: number | null = null
 type RowClickGesture = { time: number; x: number; y: number }
 const lastRowClicks: Record<PaneName, RowClickGesture | null> = { left: null, right: null }
+let pendingSelectionCollapse: { pane: PaneName; path: string } | null = null
 let blankDragStartX = 0
 let blankDragStartY = 0
 let blankDragCurrentX = 0
@@ -953,6 +961,8 @@ function makePane(): PaneState {
     bodyRef: null,
     bodyScrollTop: 0,
     bodyViewportHeight: 0,
+    rowSlotHeight: FILE_ROW_SLOT_HEIGHT,
+    parentRowSlotHeight: FILE_ROW_SLOT_HEIGHT,
     sizeColumnWidth: DEFAULT_SIZE_COLUMN_WIDTH,
     timeColumnWidth: DEFAULT_TIME_COLUMN_WIDTH,
     sortKey: 'name',
@@ -1072,7 +1082,10 @@ function setBodyRef(paneName: PaneName, el: unknown) {
   if (panes[paneName].bodyRef === nextEl) return
   panes[paneName].bodyRef = nextEl
   observeScrollElement(nextEl)
-  nextTick(() => updateVirtualMetrics(paneName))
+  nextTick(() => {
+    measureRowMetrics(paneName)
+    updateVirtualMetrics(paneName)
+  })
 }
 
 function setTransferListRef(el: unknown) {
@@ -1313,7 +1326,32 @@ function rawFileEntries(entries: FileEntry[] | undefined): FileEntry[] {
 }
 
 function parentSlotHeight(paneName: PaneName) {
-  return parentDirectoryEntry(paneName) ? FILE_ROW_SLOT_HEIGHT : 0
+  return parentDirectoryEntry(paneName) ? panes[paneName].parentRowSlotHeight : 0
+}
+
+function measureRowMetrics(paneName: PaneName) {
+  const pane = panes[paneName]
+  const body = pane.bodyRef
+  if (!body) return
+  const rows = body.querySelectorAll<HTMLElement>('.file-row:not(.file-parent-row)')
+  const first = rows[0]
+  if (!first) return
+  const rowStyle = getComputedStyle(first)
+  const rowGap = Math.max(parseFloat(rowStyle.marginTop) || 0, parseFloat(rowStyle.marginBottom) || 0)
+  let rowSlot = first.getBoundingClientRect().height + rowGap
+  if (rows.length > 1) {
+    const measured = rows[1].getBoundingClientRect().top - first.getBoundingClientRect().top
+    if (measured > 0) rowSlot = measured
+  }
+  let parentSlot = 0
+  const parent = body.querySelector<HTMLElement>('.file-parent-row')
+  if (parent) {
+    const parentStyle = getComputedStyle(parent)
+    const parentGap = Math.max(parseFloat(parentStyle.marginBottom) || 0, parseFloat(rowStyle.marginTop) || 0)
+    parentSlot = (parseFloat(parentStyle.marginTop) || 0) + parent.getBoundingClientRect().height + parentGap
+  }
+  if (pane.rowSlotHeight !== rowSlot) pane.rowSlotHeight = rowSlot
+  if (pane.parentRowSlotHeight !== parentSlot) pane.parentRowSlotHeight = parentSlot
 }
 
 function virtualRange(paneName: PaneName) {
@@ -1321,10 +1359,11 @@ function virtualRange(paneName: PaneName) {
   if (count === 0) return { start: 0, end: 0 }
 
   const pane = panes[paneName]
+  const slotHeight = pane.rowSlotHeight
   const viewportHeight = pane.bodyViewportHeight || pane.bodyRef?.clientHeight || 0
   const itemScrollTop = Math.max(0, pane.bodyScrollTop - parentSlotHeight(paneName))
-  const visibleSlots = Math.max(1, Math.ceil(viewportHeight / FILE_ROW_SLOT_HEIGHT))
-  const firstVisible = clamp(Math.floor(itemScrollTop / FILE_ROW_SLOT_HEIGHT), 0, Math.max(0, count - 1))
+  const visibleSlots = Math.max(1, Math.ceil(viewportHeight / slotHeight))
+  const firstVisible = clamp(Math.floor(itemScrollTop / slotHeight), 0, Math.max(0, count - 1))
   const lastVisible = Math.min(count, firstVisible + visibleSlots)
 
   return {
@@ -1343,12 +1382,12 @@ function virtualRows(paneName: PaneName): VirtualFileRow[] {
 }
 
 function topSpacerHeight(paneName: PaneName) {
-  return virtualRange(paneName).start * FILE_ROW_SLOT_HEIGHT
+  return virtualRange(paneName).start * panes[paneName].rowSlotHeight
 }
 
 function bottomSpacerHeight(paneName: PaneName) {
   const range = virtualRange(paneName)
-  return Math.max(0, (visibleEntries(paneName).length - range.end) * FILE_ROW_SLOT_HEIGHT)
+  return Math.max(0, (visibleEntries(paneName).length - range.end) * panes[paneName].rowSlotHeight)
 }
 
 function sortEntries(paneName: PaneName, entries: FileEntry[]) {
@@ -2101,7 +2140,10 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
   } finally {
     if (isLatest()) {
       tab.loading = false
-      nextTick(() => updateVirtualMetrics(paneName))
+      nextTick(() => {
+        measureRowMetrics(paneName)
+        updateVirtualMetrics(paneName)
+      })
     }
   }
 }
@@ -2177,6 +2219,7 @@ function recordDirectoryHistory(tab: FileTab, previousPath: string, nextPath: st
 
 function clearPaneGestures(paneName: PaneName) {
   lastRowClicks[paneName] = null
+  if (pendingSelectionCollapse?.pane === paneName) pendingSelectionCollapse = null
 }
 
 function clearAllPaneGestures() {
@@ -2198,7 +2241,17 @@ function consumeRowDoubleClick(paneName: PaneName, event: MouseEvent) {
 
 function handleRowClick(paneName: PaneName, entry: FileEntry, event: MouseEvent) {
   if (event.button !== 0) return
-  if (!consumeRowDoubleClick(paneName, event)) return
+  if (!consumeRowDoubleClick(paneName, event)) {
+    const pending = pendingSelectionCollapse
+    pendingSelectionCollapse = null
+    if (!pending || pending.pane !== paneName || pending.path !== entry.path) return
+    const tab = activeTab(paneName)
+    if (!tab) return
+    tab.selected = [entry]
+    tab.anchorPath = entry.path
+    return
+  }
+  pendingSelectionCollapse = null
   void openEntry(paneName, entry)
 }
 
@@ -2213,6 +2266,7 @@ function beginSelect(paneName: PaneName, index: number, entry: FileEntry, event:
   if (!tab) return
   event.stopPropagation()
   finishFileDrag()
+  pendingSelectionCollapse = null
   const items = visibleEntries(paneName)
   if (event.shiftKey) {
     event.preventDefault()
@@ -2231,6 +2285,8 @@ function beginSelect(paneName: PaneName, index: number, entry: FileEntry, event:
     return
   }
   if (isSelected(paneName, entry) && tab.selected.length > 1) {
+    // Delay collapsing until mouseup: dragging the group must keep the selection intact.
+    pendingSelectionCollapse = { pane: paneName, path: entry.path }
     tab.anchorPath = entry.path
     startLongPress(paneName, index, event)
     return
@@ -2353,22 +2409,15 @@ function updateBlankDragSelection() {
 
   const body = panes[paneName].bodyRef
   if (body && items.length > 0) {
-    const bodyRect = body.getBoundingClientRect()
-    const contentTop = bodyRect.top + FILE_BODY_VERTICAL_PADDING + parentSlotHeight(paneName) - body.scrollTop
-    const contentBottom = contentTop + items.length * FILE_ROW_SLOT_HEIGHT
-    const intersectsHorizontally = right >= bodyRect.left && left <= bodyRect.right
-
-    if (intersectsHorizontally && bottom >= contentTop && top <= contentBottom) {
-      const firstIndex = clamp(Math.floor((top - contentTop) / FILE_ROW_SLOT_HEIGHT), 0, items.length - 1)
-      const lastIndex = clamp(Math.floor((bottom - contentTop) / FILE_ROW_SLOT_HEIGHT), 0, items.length - 1)
-
-      for (let index = firstIndex; index <= lastIndex; index += 1) {
-        const entry = items[index]
-        if (!entry) continue
-        selectedPaths.add(entry.path)
-        selectedItems.push(entry)
-      }
-    }
+    // Hit-test rendered rows so selection follows the theme's real row height.
+    body.querySelectorAll<HTMLElement>('.file-row[data-file-index]').forEach(row => {
+      const rect = row.getBoundingClientRect()
+      if (rect.right <= left || rect.left >= right || rect.bottom <= top || rect.top >= bottom) return
+      const entry = items[Number(row.dataset.fileIndex)]
+      if (!entry) return
+      selectedPaths.add(entry.path)
+      selectedItems.push(entry)
+    })
   }
 
   blankDragPathSet.value = selectedPaths
@@ -3228,7 +3277,66 @@ async function handleFolderDrop(paneName: PaneName, entry: FileEntry, event: Dra
     await uploadEntries(paneName, await collectDropUploadEntries(event), entry.path)
     return
   }
-  if (payload) await dropInternalFiles(paneName, JSON.stringify(payload), entry.path)
+  if (!payload) return
+  if (payload.pane === paneName) {
+    try {
+      await moveEntriesToFolderPath(paneName, payload, entry.path)
+    } finally {
+      finishFileDrag()
+    }
+    return
+  }
+  await dropInternalFiles(paneName, JSON.stringify(payload), entry.path)
+}
+
+function isParentDropTarget(paneName: PaneName) {
+  const parent = parentDirectoryEntry(paneName)
+  return Boolean(parent && folderDropTarget.value?.pane === paneName && folderDropTarget.value.path === parent.path)
+}
+
+function parentMovePayload(paneName: PaneName, event: DragEvent) {
+  if (hasExternalFiles(event) || !hasAppDrag(event)) return null
+  const payload = folderDragPayload(event)
+  if (!payload || payload.pane !== paneName || payload.paths.length === 0) return null
+  const tab = activeTab(paneName)
+  if (!tab || tab.id !== payload.tabID) return null
+  return payload
+}
+
+function handleParentDragOver(paneName: PaneName, event: DragEvent) {
+  const payload = parentMovePayload(paneName, event)
+  const parent = parentDirectoryEntry(paneName)
+  if (!payload || !parent) {
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'
+    if (isParentDropTarget(paneName)) folderDropTarget.value = null
+    return
+  }
+  event.preventDefault()
+  event.stopPropagation()
+  folderDropTarget.value = { pane: paneName, path: parent.path }
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
+function handleParentDragLeave(paneName: PaneName, event: DragEvent) {
+  if (!isParentDropTarget(paneName)) return
+  const row = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  const related = event.relatedTarget instanceof Node ? event.relatedTarget : null
+  if (row && related && row.contains(related)) return
+  folderDropTarget.value = null
+}
+
+async function handleParentDrop(paneName: PaneName, event: DragEvent) {
+  const payload = parentMovePayload(paneName, event)
+  if (!payload) return
+  event.preventDefault()
+  event.stopPropagation()
+  folderDropTarget.value = null
+  panes[paneName].dropActive = false
+  try {
+    await moveEntriesToParent(paneName, payload)
+  } finally {
+    finishFileDrag()
+  }
 }
 
 function isValidFolderTransferTarget(targetPane: PaneName, target: FileEntry, payload: DragPayload | null) {
@@ -3353,6 +3461,60 @@ async function dropInternalFiles(targetPane: PaneName, payloadText: string, targ
   const entriesByPath = new Map(source.entries.map(entry => [entry.path, entry]))
   const entries = payload.paths.map(path => entriesByPath.get(path)).filter((entry): entry is FileEntry => Boolean(entry))
   await transferEntries(payload.pane, targetPane, entries, targetPathOverride)
+}
+
+async function moveEntriesToParent(paneName: PaneName, payload: DragPayload) {
+  const parent = parentDirectoryEntry(paneName)
+  if (!parent) return
+  await moveEntriesToFolderPath(paneName, payload, parent.path)
+}
+
+async function moveEntriesToFolderPath(paneName: PaneName, payload: DragPayload, targetPath: string) {
+  const tab = activeTab(paneName)
+  if (!tab || tab.id !== payload.tabID) return
+  if (tab.kind === 'remote' && !tab.session) return
+  const targetKey = normalizeComparablePath(targetPath)
+  const entriesByPath = new Map(tab.entries.map(entry => [entry.path, entry]))
+  const entries = payload.paths
+    .map(path => entriesByPath.get(path))
+    .filter((entry): entry is FileEntry => Boolean(entry))
+    .filter(entry => {
+      const sourceKey = normalizeComparablePath(entry.path)
+      if (sourceKey === targetKey) return false
+      return !(entry.is_dir && isPathInside(targetKey, sourceKey))
+    })
+  if (entries.length === 0) return
+
+  let existingNames: Set<string>
+  try {
+    const listing = await listTabDirectory(tab, targetPath)
+    existingNames = new Set(listing.entries.map(entry => entry.name))
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+    return
+  }
+
+  const blocked = entries.filter(entry => existingNames.has(entry.name))
+  const movable = entries.filter(entry => !existingNames.has(entry.name))
+  if (blocked.length > 0) {
+    ElMessage.warning(`目标目录已存在同名项目，已跳过：${blocked.map(entry => entry.name).join('、')}`)
+  }
+  let moved = 0
+  for (const entry of movable) {
+    const newPath = joinPath(targetPath, entry.name, tab.kind)
+    try {
+      if (tab.kind === 'local') {
+        await postJSON('/api/local/rename', { path: entry.path, new_path: newPath })
+      } else {
+        await postJSON('/api/sftp/rename', { session: tab.session, path: entry.path, new_path: newPath })
+      }
+      moved += 1
+      log(`移动：${entry.path} -> ${newPath}`)
+    } catch (error) {
+      ElMessage.error(`${entry.name}：${(error as Error).message}`)
+    }
+  }
+  if (moved > 0) await loadTab(paneName, tab)
 }
 
 async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetPathOverride?: string) {
@@ -3622,7 +3784,10 @@ onMounted(async () => {
   })
   await refreshAll()
   await nextTick()
-  paneNames.forEach(paneName => updateVirtualMetrics(paneName))
+  paneNames.forEach(paneName => {
+    measureRowMetrics(paneName)
+    updateVirtualMetrics(paneName)
+  })
   updateTransferScrollbars()
   if (requestedProfileID) await openProfileTab(requestedProfileID)
   if (window.parent !== window) {
