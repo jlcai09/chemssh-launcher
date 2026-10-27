@@ -22,6 +22,7 @@ import (
 	"chemssh-launcher/internal/config"
 	appruntime "chemssh-launcher/internal/runtime"
 	"chemssh-launcher/internal/secret"
+	"chemssh-launcher/internal/sshclient"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -189,6 +190,129 @@ func TestStatusPhaseIsPausedAfterStopForwarding(t *testing.T) {
 	}
 	if status["url"] != "" {
 		t.Fatalf("url = %v while forwarding is stopped, want empty", status["url"])
+	}
+}
+
+func TestLocalProxyStatusReportsActiveChannelWithBridge(t *testing.T) {
+	server := NewServer(&appruntime.Runtime{})
+	profile := proxyTestProfile("proxy-active")
+	channel := proxyTestChannel("/home/user/.chemssh-launcher/terminal-proxy-8888.json")
+	session := &activeSession{
+		id:           profile.ID,
+		name:         profile.Name,
+		profile:      profile,
+		forwarding:   true,
+		ready:        true,
+		remotePID:    4242,
+		proxyChannel: channel,
+	}
+	server.mu.Lock()
+	server.setSessionLocked(session)
+	server.mu.Unlock()
+
+	proxy := sessionLocalProxyStatus(t, fetchSessionStatus(t, server, profile.ID))
+	if proxy["enabled"] != true || proxy["active"] != true || proxy["bridge"] != true {
+		t.Fatalf("local_proxy = %+v, want enabled, active and bridge", proxy)
+	}
+	if proxy["proxy_url"] != channel.ProxyURL {
+		t.Fatalf("proxy_url = %v, want %s", proxy["proxy_url"], channel.ProxyURL)
+	}
+	if proxy["error"] != "" {
+		t.Fatalf("error = %v, want empty", proxy["error"])
+	}
+}
+
+func TestLocalProxyStatusReportsDegradedChannel(t *testing.T) {
+	server := NewServer(&appruntime.Runtime{})
+	profile := proxyTestProfile("proxy-degraded")
+	session := &activeSession{
+		id:         profile.ID,
+		name:       profile.Name,
+		profile:    profile,
+		forwarding: true,
+		ready:      true,
+		remotePID:  4242,
+		proxyErr:   "local network channel unavailable; starting without it: denied",
+	}
+	server.mu.Lock()
+	server.setSessionLocked(session)
+	server.mu.Unlock()
+
+	proxy := sessionLocalProxyStatus(t, fetchSessionStatus(t, server, profile.ID))
+	if proxy["enabled"] != true || proxy["active"] != false || proxy["bridge"] != false {
+		t.Fatalf("local_proxy = %+v, want enabled but inactive without bridge", proxy)
+	}
+	if proxy["error"] == "" {
+		t.Fatalf("error is empty, want the degradation reason")
+	}
+}
+
+func TestLocalProxyStatusStaysInactiveForLocalProfiles(t *testing.T) {
+	server := NewServer(&appruntime.Runtime{})
+	profile := proxyTestProfile("proxy-local")
+	profile.Kind = config.ProfileKindLocal
+	session := &activeSession{id: profile.ID, name: profile.Name, profile: profile, forwarding: true, ready: true}
+	server.mu.Lock()
+	server.setSessionLocked(session)
+	server.mu.Unlock()
+
+	proxy := sessionLocalProxyStatus(t, fetchSessionStatus(t, server, profile.ID))
+	if proxy["enabled"] != false || proxy["active"] != false {
+		t.Fatalf("local_proxy = %+v, want disabled for a local profile", proxy)
+	}
+}
+
+func TestStopForwardingKeepsProxyChannelWhileServiceRuns(t *testing.T) {
+	server := NewServer(&appruntime.Runtime{})
+	profile := proxyTestProfile("proxy-paused")
+	session := &activeSession{
+		id:           profile.ID,
+		name:         profile.Name,
+		profile:      profile,
+		forwarding:   true,
+		ready:        true,
+		remotePID:    4242,
+		proxyChannel: proxyTestChannel("/home/user/.chemssh-launcher/terminal-proxy-8888.json"),
+	}
+	server.mu.Lock()
+	server.setSessionLocked(session)
+	server.mu.Unlock()
+
+	server.stopForwarding(profile.ID)
+
+	if session.proxyChannel == nil {
+		t.Fatal("proxy channel was closed while the remote service is still running")
+	}
+	proxy := sessionLocalProxyStatus(t, fetchSessionStatus(t, server, profile.ID))
+	if proxy["active"] != true || proxy["bridge"] != true {
+		t.Fatalf("local_proxy = %+v after pausing, want the channel to stay active", proxy)
+	}
+}
+
+func TestStopSessionResourcesClosesProxyChannel(t *testing.T) {
+	server := NewServer(&appruntime.Runtime{})
+	profile := proxyTestProfile("proxy-stopped")
+	session := &activeSession{
+		id:           profile.ID,
+		name:         profile.Name,
+		profile:      profile,
+		forwarding:   true,
+		ready:        true,
+		remotePID:    4242,
+		proxyChannel: proxyTestChannel("/home/user/.chemssh-launcher/terminal-proxy-8888.json"),
+	}
+	server.mu.Lock()
+	server.setSessionLocked(session)
+	server.mu.Unlock()
+
+	server.stopSessionResources(session, true)
+
+	if session.proxyChannel != nil || session.proxyErr != "" {
+		t.Fatalf("proxy channel = %v, proxyErr = %q; want both cleared", session.proxyChannel, session.proxyErr)
+	}
+	proxy := sessionLocalProxyStatus(t, fetchSessionStatus(t, server, profile.ID))
+	if proxy["active"] != false || proxy["bridge"] != false || proxy["proxy_url"] != "" {
+		t.Fatalf("local_proxy = %+v after stop, want an inactive payload", proxy)
 	}
 }
 
@@ -424,6 +548,34 @@ func statusFailureMessage(t *testing.T, status map[string]any) string {
 		t.Fatalf("last_failure.at is empty: %+v", failure)
 	}
 	return message
+}
+
+func sessionLocalProxyStatus(t *testing.T, status map[string]any) map[string]any {
+	t.Helper()
+	proxy, ok := status["local_proxy"].(map[string]any)
+	if !ok {
+		t.Fatalf("local_proxy = %v, want an object", status["local_proxy"])
+	}
+	return proxy
+}
+
+func proxyTestProfile(id string) config.Profile {
+	profile := config.NewProfileDefaults()
+	profile.ID = id
+	profile.Name = id
+	profile.LocalProxy.Enabled = true
+	return profile
+}
+
+// proxyTestChannel builds a channel without a live tunnel; Close is a no-op for
+// it, so lifecycle tests can assert on the pointer instead of on network state.
+func proxyTestChannel(bridgePath string) *sshclient.LocalProxyChannel {
+	return &sshclient.LocalProxyChannel{
+		ProxyAddr:  "127.0.0.1:40123",
+		ProxyURL:   "http://127.0.0.1:40123",
+		NoProxy:    config.DefaultLocalProxyNoProxy,
+		BridgePath: bridgePath,
+	}
 }
 
 // startScriptedSSHServer starts a minimal SSH server that accepts any password

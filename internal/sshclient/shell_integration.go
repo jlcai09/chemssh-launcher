@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"chemssh-launcher/internal/config"
+
 	"golang.org/x/crypto/ssh"
 )
 
@@ -27,17 +29,39 @@ func (s *shellIntegration) initPath() string {
 	return s.shimDir + "/init.sh"
 }
 
-func interactiveShellCommand(integration *shellIntegration) string {
+func interactiveShellCommand(integration *shellIntegration, proxyEnv []config.EnvPair) string {
 	if integration == nil {
 		return ""
 	}
 	if integration.bash {
-		return fmt.Sprintf("exec %s --rcfile %s -i", shellQuote(integration.shellPath), shellQuote(integration.initPath()))
+		prefix := ""
+		if len(proxyEnv) > 0 {
+			prefix = "env " + envAssignments(proxyEnv) + " "
+		}
+		return fmt.Sprintf("exec %s%s --rcfile %s -i", prefix, shellQuote(integration.shellPath), shellQuote(integration.initPath()))
 	}
-	return fmt.Sprintf("exec env PATH=%s:\"$PATH\" %s -l", shellQuote(integration.binDir()), shellQuote(integration.shellPath))
+	// `exec` treats a leading assignment as the command name, so the login-shell
+	// path always has to go through `env`; only the proxy assignments are optional.
+	assignments := envAssignments(proxyEnv)
+	if assignments != "" {
+		assignments += " "
+	}
+	return fmt.Sprintf("exec env %sPATH=%s:\"$PATH\" %s -l", assignments, shellQuote(integration.binDir()), shellQuote(integration.shellPath))
 }
 
-func prepareShellIntegration(client *ssh.Client) (*shellIntegration, error) {
+func proxyLoginShellCommand(proxyEnv []config.EnvPair) string {
+	return fmt.Sprintf("exec env %s \"$SHELL\" -l", envAssignments(proxyEnv))
+}
+
+func envAssignments(env []config.EnvPair) string {
+	parts := make([]string, 0, len(env))
+	for _, pair := range env {
+		parts = append(parts, pair.Key+"="+shellQuote(pair.Value))
+	}
+	return strings.Join(parts, " ")
+}
+
+func prepareShellIntegration(client *ssh.Client, proxyEnv []config.EnvPair) (*shellIntegration, error) {
 	if client == nil {
 		return nil, errors.New("ssh client is not available")
 	}
@@ -47,7 +71,7 @@ func prepareShellIntegration(client *ssh.Client) (*shellIntegration, error) {
 	}
 	defer session.Close()
 
-	command := "echo '" + base64.StdEncoding.EncodeToString([]byte(shellIntegrationSetupScript)) + "' | base64 -d | /bin/sh"
+	command := "echo '" + base64.StdEncoding.EncodeToString([]byte(buildShellIntegrationSetupScript(proxyEnv))) + "' | base64 -d | /bin/sh"
 	type result struct {
 		output []byte
 		err    error
@@ -118,9 +142,7 @@ func cleanupShellIntegration(client *ssh.Client, integration *shellIntegration) 
 	}
 }
 
-var shellIntegrationSetupScript = buildShellIntegrationSetupScript()
-
-func buildShellIntegrationSetupScript() string {
+func buildShellIntegrationSetupScript(proxyEnv []config.EnvPair) string {
 	setup := `set -e
 shell=${SHELL:-}
 if [ -z "$shell" ]; then
@@ -150,7 +172,20 @@ printf 'CHEMSSH_LAUNCHER_SHELL=%s\nCHEMSSH_LAUNCHER_SHIM=%s\n' "$shell" "$dir"
 	setup = strings.ReplaceAll(setup, "{{RZ_SHIM}}", base64.StdEncoding.EncodeToString([]byte(shellTransferShim("upload"))))
 	setup = strings.ReplaceAll(setup, "{{VI_SHIM}}", base64.StdEncoding.EncodeToString([]byte(shellVimShim("vi"))))
 	setup = strings.ReplaceAll(setup, "{{VIM_SHIM}}", base64.StdEncoding.EncodeToString([]byte(shellVimShim("vim"))))
-	setup = strings.ReplaceAll(setup, "{{INIT_SCRIPT}}", base64.StdEncoding.EncodeToString([]byte(shellIntegrationInitScript)))
+	initScript := shellIntegrationInitScript
+	if len(proxyEnv) > 0 {
+		var extra strings.Builder
+		extra.WriteString("\n# Launcher proxy environment, applied after login profiles so it wins.\n")
+		for _, pair := range proxyEnv {
+			extra.WriteString("export ")
+			extra.WriteString(pair.Key)
+			extra.WriteByte('=')
+			extra.WriteString(shellQuote(pair.Value))
+			extra.WriteByte('\n')
+		}
+		initScript += extra.String()
+	}
+	setup = strings.ReplaceAll(setup, "{{INIT_SCRIPT}}", base64.StdEncoding.EncodeToString([]byte(initScript)))
 	return setup
 }
 

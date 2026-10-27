@@ -150,6 +150,9 @@ func (s *FileStore) load() (fileData, error) {
 	if data.Profiles == nil {
 		data.Profiles = []Profile{}
 	}
+	for i := range data.Profiles {
+		data.Profiles[i].LocalProxy = data.Profiles[i].LocalProxy.Normalized()
+	}
 	return data, nil
 }
 

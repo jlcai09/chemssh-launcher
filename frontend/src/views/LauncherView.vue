@@ -182,6 +182,19 @@
             <el-checkbox v-model="current.open_browser">{{ t('launcher.openBrowser') }}</el-checkbox>
           </section>
 
+          <section v-if="!isLocalProfile" class="form-section">
+            <div class="form-section-head">
+              <h3>{{ t('launcher.localProxy') }}</h3>
+              <el-checkbox v-model="current.local_proxy.enabled">{{ t('launcher.localProxyEnable') }}</el-checkbox>
+            </div>
+            <div v-if="current.local_proxy.enabled" class="form-grid">
+              <el-form-item :label="t('launcher.localProxyHost')"><el-input v-model="current.local_proxy.host" :placeholder="t('launcher.placeholder.localHost')" /></el-form-item>
+              <el-form-item :label="t('launcher.localProxyPort')"><el-input-number v-model="current.local_proxy.port" :min="1" :max="65535" /></el-form-item>
+              <el-form-item class="span-2" :label="t('launcher.localProxyNoProxy')"><el-input v-model="current.local_proxy.no_proxy" /></el-form-item>
+            </div>
+            <p class="field-hint">{{ t('launcher.localProxyHint') }}</p>
+          </section>
+
           <section class="form-section">
             <h3>{{ isLocalProfile ? t('launcher.localCommands') : t('launcher.remoteCommands') }}</h3>
             <el-form-item :label="t('launcher.preStartCommands')">
@@ -267,6 +280,11 @@
                 <span class="route-icon"><el-icon><Cpu /></el-icon></span>
                 <span><b>{{ remoteAddress }}</b><small>{{ t('launcher.chemsshService') }}</small></span>
               </div>
+            </div>
+
+            <div v-if="sessionProxyStatus?.enabled" class="session-proxy" :class="proxyStatusTone">
+              <el-icon><WarningFilled v-if="proxyStatusTone === 'is-warn'" /><Connection v-else /></el-icon>
+              <span>{{ sessionProxyText }}</span>
             </div>
 
             <div class="session-metrics">
@@ -394,18 +412,27 @@
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowRight, CaretRight, Check, Clock, Close, CloseBold, Connection, Cpu, Delete, DocumentCopy, Download, FolderOpened, Lock, Monitor, MoreFilled, Plus, Refresh, Search, Setting, SwitchButton, WarningFilled } from '@element-plus/icons-vue'
-import { api, postJSON, putJSON, type Profile } from '../api'
+import { api, postJSON, putJSON, type LocalProxy, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import { t } from '../i18n'
 
 type SessionPhase = 'stopped' | 'starting' | 'ready' | 'paused' | 'failed'
 
+interface LocalProxyStatus {
+  enabled: boolean
+  active: boolean
+  proxy_url: string
+  bridge: boolean
+  error: string
+}
+
 interface SessionStatus {
   running: boolean
   open_seq?: number
   phase: SessionPhase
   last_failure?: { message: string; at: string } | null
+  local_proxy?: LocalProxyStatus
 }
 
 const defaults = ref<Profile | null>(null)
@@ -489,6 +516,24 @@ const sessionHeadline = computed(() => {
   return phaseLabel.value
 })
 const sessionPill = computed(() => (current.id ? phaseShortLabel.value : t('launcher.idle')))
+const sessionProxyStatus = computed<LocalProxyStatus | null>(() => (current.id ? currentStatus.value?.local_proxy || null : null))
+const proxyStatusTone = computed(() => {
+  const status = sessionProxyStatus.value
+  if (!status?.enabled) return ''
+  if (status.active) return status.bridge ? 'is-ok' : 'is-warn'
+  return status.error ? 'is-warn' : ''
+})
+const sessionProxyText = computed(() => {
+  const status = sessionProxyStatus.value
+  if (!status?.enabled) return ''
+  if (status.active) {
+    return status.bridge
+      ? t('launcher.proxyReady', { url: status.proxy_url })
+      : t('launcher.proxyReadyNoBridge', { url: status.proxy_url })
+  }
+  if (status.error) return t('launcher.proxyDegraded', { error: status.error })
+  return t('launcher.proxyInactive')
+})
 const visibleLogs = computed(() => {
   const query = logQuery.value.trim().toLowerCase()
   if (!query) return logs.value
@@ -546,6 +591,14 @@ function handleToolbarCommand(command: string | number | object) {
   else if (action === 'stop-service') void stopService()
 }
 
+function localProxyChanged(left?: LocalProxy, right?: LocalProxy) {
+  const fallback = defaults.value?.local_proxy
+  const a = left ?? fallback
+  const b = right ?? fallback
+  if (!a || !b) return false
+  return a.enabled !== b.enabled || a.host !== b.host || a.port !== b.port || a.no_proxy !== b.no_proxy
+}
+
 const isDirty = computed(() => {
   if (!defaults.value) return false
   const source: Partial<Profile> = current.id
@@ -563,6 +616,7 @@ const isDirty = computed(() => {
     const right = target[key] ?? defaults.value[key] ?? ''
     if (left !== right) return true
   }
+  if (localProxyChanged(source.local_proxy, target.local_proxy)) return true
   if (passwordInput.value) return true
   if (passphraseInput.value) return true
   if (securityTokenInput.value) return true
@@ -572,6 +626,10 @@ const isDirty = computed(() => {
 function applyProfile(profile: Partial<Profile>) {
   Object.assign(current, defaults.value, profile)
   current.kind = current.kind || 'remote'
+  current.local_proxy = {
+    ...(defaults.value?.local_proxy || { enabled: false, host: '127.0.0.1', port: 7890, no_proxy: 'localhost,127.0.0.1,::1' }),
+    ...(profile.local_proxy || {})
+  }
   passwordInput.value = ''
   passphraseInput.value = ''
   securityTokenInput.value = ''
@@ -594,6 +652,7 @@ function setProfileKind(kind: string | number | boolean) {
     current.has_private_key_passphrase = false
     current.remote_host = ''
     current.remote_port = 0
+    current.local_proxy.enabled = false
     current.pre_start_commands = ''
     current.start_command = ''
     if (!current.name) current.name = t('launcher.kindLocal')
@@ -613,7 +672,7 @@ function profileSummary(profile: Partial<Profile>) {
 
 function snapshotDraft() {
   if (!draftOpen.value || current.id) return
-  draftSnapshot.value = { ...current }
+  draftSnapshot.value = { ...current, local_proxy: { ...current.local_proxy } }
   draftSecrets.value = {
     password: passwordInput.value,
     passphrase: passphraseInput.value,

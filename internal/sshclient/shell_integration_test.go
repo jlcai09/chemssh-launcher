@@ -5,14 +5,85 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"chemssh-launcher/internal/config"
 )
 
+func TestShellIntegrationInitScriptAppliesProxyEnvAfterProfiles(t *testing.T) {
+	env := config.ProxyEnvPairs("http://127.0.0.1:41000", "localhost,127.0.0.1")
+	script := buildShellIntegrationSetupScript(env)
+	re := regexp.MustCompile(`printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > "\$dir/init\.sh"`)
+	match := re.FindStringSubmatch(script)
+	if len(match) != 2 {
+		t.Fatal("setup script does not embed an init script")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(match[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	initScript := string(decoded)
+	profileIndex := strings.Index(initScript, "${HOME}/.bash_profile")
+	exportIndex := strings.Index(initScript, "export http_proxy=http://127.0.0.1:41000")
+	if exportIndex < 0 || profileIndex < 0 || exportIndex < profileIndex {
+		t.Fatalf("proxy exports must follow login profiles\n%s", initScript)
+	}
+	if !strings.Contains(initScript, "export no_proxy='localhost,127.0.0.1'") {
+		t.Fatalf("init script is missing no_proxy\n%s", initScript)
+	}
+}
+
+func TestInteractiveShellCommandWrapsProxyEnv(t *testing.T) {
+	integration := &shellIntegration{shellPath: "/bin/bash", shimDir: "/tmp/chemssh", bash: true}
+	env := config.ProxyEnvPairs("http://127.0.0.1:41000", "")
+	command := interactiveShellCommand(integration, env)
+	wantPrefix := "exec env http_proxy=http://127.0.0.1:41000 https_proxy=http://127.0.0.1:41000 all_proxy=http://127.0.0.1:41000"
+	if !strings.HasPrefix(command, wantPrefix) {
+		t.Fatalf("command = %q, want prefix %q", command, wantPrefix)
+	}
+	if !strings.HasSuffix(command, "--rcfile /tmp/chemssh/init.sh -i") {
+		t.Fatalf("command = %q", command)
+	}
+}
+
+func TestInteractiveShellCommandKeepsEnvForLoginShell(t *testing.T) {
+	integration := &shellIntegration{shellPath: "/bin/zsh", shimDir: "/tmp/chemssh"}
+
+	// After exec, a leading PATH=... is read as the command name, so the login
+	// shell path has to keep env even when no proxy env is injected.
+	command := interactiveShellCommand(integration, nil)
+	want := `exec env PATH=/tmp/chemssh/bin:"$PATH" /bin/zsh -l`
+	if command != want {
+		t.Fatalf("command = %q, want %q", command, want)
+	}
+
+	env := config.ProxyEnvPairs("http://127.0.0.1:41000", "")
+	command = interactiveShellCommand(integration, env)
+	if !strings.HasPrefix(command, "exec env http_proxy=http://127.0.0.1:41000") {
+		t.Fatalf("command = %q, want the proxy assignments after env", command)
+	}
+	if !strings.HasSuffix(command, `PATH=/tmp/chemssh/bin:"$PATH" /bin/zsh -l`) {
+		t.Fatalf("command = %q, want the shim PATH and login shell", command)
+	}
+}
+
+func TestProxyLoginShellCommandExpandsShell(t *testing.T) {
+	env := config.ProxyEnvPairs("http://127.0.0.1:41000", "")
+	command := proxyLoginShellCommand(env)
+	if !strings.HasPrefix(command, "exec env http_proxy=http://127.0.0.1:41000") {
+		t.Fatalf("command = %q", command)
+	}
+	if !strings.HasSuffix(command, `"$SHELL" -l`) {
+		t.Fatalf("command = %q", command)
+	}
+}
+
 func TestShellIntegrationSetupInstallsVimShims(t *testing.T) {
-	script := buildShellIntegrationSetupScript()
+	script := buildShellIntegrationSetupScript(nil)
 	for _, command := range []string{"sz", "rz", "vi", "vim"} {
 		if !strings.Contains(script, `"$dir/bin/`+command+`"`) {
 			t.Errorf("setup script does not install %s", command)

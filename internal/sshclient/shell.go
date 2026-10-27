@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sync"
@@ -20,8 +21,11 @@ type InteractiveShell struct {
 	Stdin            io.WriteCloser
 	Output           io.Reader
 	IntegrationError error
+	ProxyURL         string
+	ProxyError       string
 
 	integration  *shellIntegration
+	proxyChannel *LocalProxyChannel
 	outputWriter *io.PipeWriter
 	writeMu      sync.Mutex
 	closeOnce    sync.Once
@@ -39,7 +43,29 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 	if rows <= 0 {
 		rows = 24
 	}
-	integration, integrationErr := prepareShellIntegration(client)
+
+	var proxyChannel *LocalProxyChannel
+	var proxyURL, proxyErrText string
+	var proxyEnv []config.EnvPair
+	if profile.ProxyActive() {
+		channel, channelErr := StartTerminalProxyChannel(context.Background(), client, profile)
+		if channelErr != nil {
+			proxyErrText = "local network channel unavailable; this terminal started without it: " + channelErr.Error()
+		} else if channel != nil {
+			proxyChannel = channel
+			proxyURL = channel.ProxyURL
+			proxyEnv = channel.Env
+		}
+	}
+	fail := func(err error) (*InteractiveShell, error) {
+		if proxyChannel != nil {
+			proxyChannel.Close()
+		}
+		_ = client.Close()
+		return nil, err
+	}
+
+	integration, integrationErr := prepareShellIntegration(client, proxyEnv)
 	if integrationErr != nil {
 		integration = nil
 	}
@@ -72,22 +98,39 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 	session, stdin, err := openSession()
 	if err != nil {
 		_ = outputWriter.Close()
-		_ = client.Close()
-		return nil, err
+		return fail(err)
 	}
 
 	integrationStarted := false
+	proxyEnvApplied := len(proxyEnv) == 0
+	var proxyApplyErr error
 	if integration != nil {
-		if startErr := session.Start(interactiveShellCommand(integration)); startErr == nil {
+		if startErr := session.Start(interactiveShellCommand(integration, proxyEnv)); startErr == nil {
 			integrationStarted = true
+			proxyEnvApplied = true
 		} else {
 			integrationErr = fmt.Errorf("start shell integration: %w", startErr)
 			_ = session.Close()
 			session, stdin, err = openSession()
 			if err != nil {
 				_ = outputWriter.Close()
-				_ = client.Close()
-				return nil, err
+				return fail(err)
+			}
+		}
+	}
+	if !integrationStarted && len(proxyEnv) > 0 {
+		// Without the integration rcfile the shell cannot be told about the
+		// proxy after its profiles run, so at least export it before spawning.
+		if startErr := session.Start(proxyLoginShellCommand(proxyEnv)); startErr == nil {
+			integrationStarted = true
+			proxyEnvApplied = true
+		} else {
+			proxyApplyErr = startErr
+			_ = session.Close()
+			session, stdin, err = openSession()
+			if err != nil {
+				_ = outputWriter.Close()
+				return fail(err)
 			}
 		}
 	}
@@ -95,8 +138,20 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 		if err := session.Shell(); err != nil {
 			_ = outputWriter.Close()
 			_ = session.Close()
-			_ = client.Close()
-			return nil, fmt.Errorf("start remote shell: %w", err)
+			return fail(fmt.Errorf("start remote shell: %w", err))
+		}
+		if !proxyEnvApplied {
+			proxyErrText = "the remote shell started without the local proxy environment"
+			if proxyApplyErr != nil {
+				proxyErrText += ": " + proxyApplyErr.Error()
+			}
+			// Nothing in this shell can use the reverse channel, so release the
+			// remote loopback listener instead of keeping it until the tab closes.
+			if proxyChannel != nil {
+				proxyChannel.Close()
+				proxyChannel = nil
+				proxyURL = ""
+			}
 		}
 	}
 
@@ -106,7 +161,10 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 		Stdin:            stdin,
 		Output:           outputReader,
 		IntegrationError: integrationErr,
+		ProxyURL:         proxyURL,
+		ProxyError:       proxyErrText,
 		integration:      integration,
+		proxyChannel:     proxyChannel,
 		outputWriter:     outputWriter,
 	}
 	go func() {
@@ -141,6 +199,9 @@ func (s *InteractiveShell) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		if s.proxyChannel != nil {
+			s.proxyChannel.Close()
+		}
 		if s.Stdin != nil {
 			_ = s.Stdin.Close()
 		}

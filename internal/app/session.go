@@ -28,14 +28,34 @@ func (a *App) Start(ctx context.Context, profile config.Profile) error {
 	}
 	defer client.Close()
 
-	check, err := sshclient.RunCheckPortCommand(client, profile, a.Stdout, a.Stderr)
+	var proxyEnv []config.EnvPair
+	proxyChannel, err := sshclient.StartLocalProxyChannel(ctx, client, profile)
+	if err != nil {
+		a.warn("local network channel unavailable; continuing without it: " + err.Error())
+	} else if proxyChannel != nil {
+		defer func() {
+			proxyChannel.Close()
+			if err := sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath); err != nil {
+				a.warn("could not remove the ChemSSH proxy bridge file: " + err.Error())
+			}
+		}()
+		proxyEnv = proxyChannel.Env
+		if proxyChannel.BridgeErr != nil {
+			a.warn("ChemSSH terminal proxy bridge not written; only the remote command and launcher terminals use the proxy: " + proxyChannel.BridgeErr.Error())
+		}
+		if a.Stdout != nil {
+			_, _ = a.Stdout.Write([]byte("local network channel: " + proxyChannel.ProxyURL + " (remote loopback)\n"))
+		}
+	}
+
+	check, err := sshclient.RunCheckPortCommand(client, profile, proxyEnv, a.Stdout, a.Stderr)
 	if err != nil {
 		return err
 	}
 
 	var process *sshclient.RemoteProcess
 	if !check.Reusable {
-		process, err = sshclient.StartRemoteCommand(client, profile, a.Stdout, a.Stderr)
+		process, err = sshclient.StartRemoteCommand(client, profile, proxyEnv, a.Stdout, a.Stderr)
 		if err != nil {
 			return err
 		}

@@ -103,6 +103,8 @@ type activeSession struct {
 	process       *sshclient.RemoteProcess
 	localProcess  *exec.Cmd
 	tunnel        *sshclient.Tunnel
+	proxyChannel  *sshclient.LocalProxyChannel
+	proxyErr      string
 	healthStop    context.CancelFunc
 	forwarding    bool
 	ready         bool
@@ -791,13 +793,32 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, sessionLog io.Writer) {
 	defer s.clearStartPending(p.ID)
-	if s.profileRetired(p.ID) {
+
+	var proxyChannel *sshclient.LocalProxyChannel
+	sessionStarted := false
+	defer func() {
+		if sessionStarted {
+			return
+		}
+		if proxyChannel != nil {
+			proxyChannel.Close()
+			_ = sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath)
+		}
 		_ = client.Close()
+	}()
+
+	if s.profileRetired(p.ID) {
 		return
 	}
-	check, err := sshclient.RunCheckPortCommand(client, p, sessionLog, sessionLog)
+
+	proxyChannel, proxyErrText := s.startSessionProxyChannel(p, client)
+	var proxyEnv []config.EnvPair
+	if proxyChannel != nil {
+		proxyEnv = proxyChannel.Env
+	}
+
+	check, err := sshclient.RunCheckPortCommand(client, p, proxyEnv, sessionLog, sessionLog)
 	if err != nil {
-		_ = client.Close()
 		s.profileLog(p.ID, "ChemSSH port check failed for "+p.Name+": "+err.Error())
 		s.recordSessionFailure(p.ID, "ChemSSH port check failed: "+err.Error())
 		return
@@ -811,22 +832,19 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, s
 	s.mu.Lock()
 	if s.retiredProfiles[p.ID] {
 		s.mu.Unlock()
-		_ = client.Close()
 		return
 	}
 	if s.sessionForProfileLocked(p.ID) != nil {
 		s.mu.Unlock()
-		_ = client.Close()
 		s.profileLog(p.ID, "a session is already running")
 		return
 	}
 
 	var process *sshclient.RemoteProcess
 	if !check.Reusable {
-		process, err = sshclient.StartRemoteCommand(client, p, sessionLog, sessionLog)
+		process, err = sshclient.StartRemoteCommand(client, p, proxyEnv, sessionLog, sessionLog)
 		if err != nil {
 			s.mu.Unlock()
-			_ = client.Close()
 			s.profileLog(p.ID, "failed to start remote command: "+err.Error())
 			s.recordSessionFailure(p.ID, "failed to start remote command: "+err.Error())
 			return
@@ -838,7 +856,6 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, s
 			_ = process.Stop()
 		}
 		s.mu.Unlock()
-		_ = client.Close()
 		s.profileLog(p.ID, "failed to start tunnel: "+err.Error())
 		s.recordSessionFailure(p.ID, "failed to start tunnel: "+err.Error())
 		return
@@ -846,16 +863,22 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, s
 
 	healthCtx, healthStop := context.WithCancel(context.Background())
 	session := &activeSession{
-		id:         p.ID,
-		name:       p.Name,
-		profile:    p,
-		client:     client,
-		process:    process,
-		tunnel:     tunnel,
-		healthStop: healthStop,
-		forwarding: true,
+		id:           p.ID,
+		name:         p.Name,
+		profile:      p,
+		client:       client,
+		process:      process,
+		tunnel:       tunnel,
+		proxyChannel: proxyChannel,
+		proxyErr:     proxyErrText,
+		healthStop:   healthStop,
+		forwarding:   true,
 	}
 	s.setSessionLocked(session)
+	// Mark the session as owned before releasing the lock; a concurrent stop can
+	// otherwise clean up the channel while the deferred cleanup still thinks the
+	// start failed and closes it a second time.
+	sessionStarted = true
 	s.mu.Unlock()
 
 	s.profileLog(p.ID, "starting "+p.Name+" at "+p.BrowserURL())
@@ -863,6 +886,23 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, s
 		go s.watchRemoteProcess(session)
 	}
 	go s.waitForRemoteHealth(session, p, healthCtx)
+}
+
+func (s *Server) startSessionProxyChannel(p config.Profile, client *ssh.Client) (*sshclient.LocalProxyChannel, string) {
+	if !p.ProxyActive() {
+		return nil, ""
+	}
+	channel, err := sshclient.StartLocalProxyChannel(context.Background(), client, p)
+	if err != nil {
+		message := "local network channel unavailable; starting without it: " + err.Error()
+		s.profileLog(p.ID, "warning: "+message)
+		return nil, message
+	}
+	s.profileLog(p.ID, "local network channel ready: "+channel.ProxyURL+" on the remote loopback for "+p.LocalProxy.Normalized().Address())
+	if channel.BridgeErr != nil {
+		s.profileLog(p.ID, "warning: ChemSSH terminal proxy bridge not written; remote commands and launcher terminals still receive the proxy environment: "+channel.BridgeErr.Error())
+	}
+	return channel, ""
 }
 
 func (s *Server) startLocalSession(w http.ResponseWriter, p config.Profile) {
@@ -1131,11 +1171,21 @@ func (s *Server) restartForwardingIfPaused(p config.Profile) (bool, error) {
 		s.mu.Unlock()
 		return true, errors.New("session is still running, but its SSH connection is no longer available")
 	}
+	needsProxyChannel := p.ProxyActive() && session.proxyChannel == nil
 	s.mu.Unlock()
 
 	s.profileLog(p.ID, "service is already running; restarting forwarding only for "+p.Name)
+	var proxyChannel *sshclient.LocalProxyChannel
+	var proxyErrText string
+	if needsProxyChannel {
+		proxyChannel, proxyErrText = s.startSessionProxyChannel(p, client)
+	}
 	tunnel, err := sshclient.StartTunnel(context.Background(), client, p)
 	if err != nil {
+		if proxyChannel != nil {
+			proxyChannel.Close()
+			_ = sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath)
+		}
 		return true, err
 	}
 	healthCtx, healthStop := context.WithCancel(context.Background())
@@ -1145,10 +1195,20 @@ func (s *Server) restartForwardingIfPaused(p config.Profile) (bool, error) {
 		s.mu.Unlock()
 		healthStop()
 		_ = tunnel.Close()
+		if proxyChannel != nil {
+			proxyChannel.Close()
+			_ = sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath)
+		}
 		return true, errors.New("a session is already running")
 	}
 	session.profile = p
 	session.tunnel = tunnel
+	if proxyChannel != nil {
+		session.proxyChannel = proxyChannel
+		session.proxyErr = proxyErrText
+	} else if proxyErrText != "" {
+		session.proxyErr = proxyErrText
+	}
 	session.healthStop = healthStop
 	session.forwarding = true
 	session.ready = false
@@ -1946,7 +2006,7 @@ func (s *Server) handleProfileTest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.profileLog(p.ID, "SSH connection OK for "+p.Name)
 	testLog := s.profileLogWriter(p.ID)
-	if _, err := sshclient.RunCheckPortCommand(client, p, testLog, testLog); err != nil {
+	if _, err := sshclient.RunCheckPortCommand(client, p, nil, testLog, testLog); err != nil {
 		_ = client.Close()
 		s.profileLog(p.ID, "ChemSSH port check failed for "+p.Name+": "+err.Error())
 		writeError(w, http.StatusConflict, err)
@@ -1993,9 +2053,12 @@ func (s *Server) watchRemoteProcess(session *activeSession) {
 	}
 	s.removeSessionLocked(session)
 	tunnel := session.tunnel
+	proxyChannel := session.proxyChannel
 	client := session.client
 	healthStop := session.healthStop
 	session.tunnel = nil
+	session.proxyChannel = nil
+	session.proxyErr = ""
 	session.client = nil
 	session.healthStop = nil
 	session.forwarding = false
@@ -2010,6 +2073,10 @@ func (s *Server) watchRemoteProcess(session *activeSession) {
 	}
 	if tunnel != nil {
 		_ = tunnel.Close()
+	}
+	if proxyChannel != nil {
+		proxyChannel.Close()
+		_ = sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath)
 	}
 	if client != nil {
 		_ = client.Close()
@@ -2066,7 +2133,10 @@ func (s *Server) stopForwarding(profileID string) {
 	session.forwarding = false
 	session.ready = false
 	clearSession := session.process == nil && session.localProcess == nil && session.remotePID <= 0 && client == nil
+	var proxyChannel *sshclient.LocalProxyChannel
 	if clearSession {
+		proxyChannel = session.proxyChannel
+		session.proxyChannel = nil
 		s.removeSessionLocked(session)
 		session.client = nil
 	}
@@ -2079,6 +2149,10 @@ func (s *Server) stopForwarding(profileID string) {
 	}
 	if tunnel != nil {
 		_ = tunnel.Close()
+	}
+	if proxyChannel != nil {
+		proxyChannel.Close()
+		_ = sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath)
 	}
 	if session.profile.IsLocal() {
 		if clearSession {
@@ -2122,12 +2196,15 @@ func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
 	s.removeSessionLocked(session)
 	session.stopping = true
 	tunnel := session.tunnel
+	proxyChannel := session.proxyChannel
 	process := session.process
 	localProcess := session.localProcess
 	client := session.client
 	healthStop := session.healthStop
 	profile := session.profile
 	session.tunnel = nil
+	session.proxyChannel = nil
+	session.proxyErr = ""
 	session.process = nil
 	session.localProcess = nil
 	session.client = nil
@@ -2142,6 +2219,10 @@ func (s *Server) stopSessionResources(session *activeSession, stopRemote bool) {
 	}
 	if tunnel != nil {
 		_ = tunnel.Close()
+	}
+	if proxyChannel != nil {
+		proxyChannel.Close()
+		_ = sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath)
 	}
 	if profile.IsLocal() {
 		if stopRemote && localProcess != nil {
@@ -2226,10 +2307,14 @@ func (s *Server) stopLocalLauncherResources(session *activeSession) {
 	s.removeSessionLocked(session)
 	session.stopping = true
 	tunnel := session.tunnel
+	proxyChannel := session.proxyChannel
+	client := session.client
 	localProcess := session.localProcess
 	healthStop := session.healthStop
 	profile := session.profile
 	session.tunnel = nil
+	session.proxyChannel = nil
+	session.proxyErr = ""
 	session.process = nil
 	session.localProcess = nil
 	session.client = nil
@@ -2244,6 +2329,10 @@ func (s *Server) stopLocalLauncherResources(session *activeSession) {
 	}
 	if tunnel != nil {
 		_ = tunnel.Close()
+	}
+	if proxyChannel != nil {
+		proxyChannel.Close()
+		_ = sshclient.RemoveProxyBridge(client, proxyChannel.BridgePath)
 	}
 	if profile.IsLocal() && localProcess != nil {
 		stopLocalProcess(localProcess)
@@ -2383,11 +2472,25 @@ func sessionStatusPayload(session *activeSession, pendingStart bool, failure *se
 	ready := false
 	name := ""
 	openSeq := uint64(0)
+	localProxy := map[string]any{
+		"enabled":   false,
+		"active":    false,
+		"proxy_url": "",
+		"bridge":    false,
+		"error":     "",
+	}
 	if running {
 		forwarding = session.forwarding
 		ready = session.forwarding && session.ready
 		name = session.name
 		openSeq = session.openSeq
+		localProxy["enabled"] = session.profile.ProxyActive()
+		localProxy["error"] = session.proxyErr
+		if session.proxyChannel != nil {
+			localProxy["active"] = true
+			localProxy["proxy_url"] = session.proxyChannel.ProxyURL
+			localProxy["bridge"] = session.proxyChannel.BridgePath != ""
+		}
 	}
 	return map[string]any{
 		"running":      running,
@@ -2397,6 +2500,7 @@ func sessionStatusPayload(session *activeSession, pendingStart bool, failure *se
 		"ready":        ready,
 		"phase":        deriveSessionPhase(running, forwarding, ready, pendingStart, failure != nil),
 		"last_failure": failure,
+		"local_proxy":  localProxy,
 	}
 }
 

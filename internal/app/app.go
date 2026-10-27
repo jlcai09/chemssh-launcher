@@ -17,3 +17,10 @@ type App struct {
 func New(profiles config.ProfileStore, secrets secret.Store, stdout, stderr io.Writer) *App {
 	return &App{Profiles: profiles, Secrets: secrets, Stdout: stdout, Stderr: stderr}
 }
+
+func (a *App) warn(message string) {
+	if a.Stderr == nil {
+		return
+	}
+	_, _ = a.Stderr.Write([]byte("warning: " + message + "\n"))
+}

@@ -187,7 +187,7 @@ func testProfile(idOrName string, in io.Reader, out io.Writer, profiles config.P
 	}
 	defer client.Close()
 	fmt.Fprintln(out, "SSH connection OK")
-	if _, err := sshclient.RunCheckPortCommand(client, p, out, out); err != nil {
+	if _, err := sshclient.RunCheckPortCommand(client, p, nil, out, out); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "ChemSSH port check OK: %s\n", p.RemoteAddress())

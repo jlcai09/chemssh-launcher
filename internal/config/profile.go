@@ -25,26 +25,27 @@ export VIRTUAL_ENV_DISABLE_PROMPT=1
 chemssh --config config.yaml`
 
 type Profile struct {
-	ID                      string `json:"id"`
-	Kind                    string `json:"kind"`
-	Name                    string `json:"name"`
-	SSHHost                 string `json:"ssh_host"`
-	SSHPort                 int    `json:"ssh_port"`
-	SSHUser                 string `json:"ssh_user"`
-	AuthMethod              string `json:"auth_method"`
-	HasPassword             bool   `json:"has_password"`
-	PrivateKeyPath          string `json:"private_key_path"`
-	HasPrivateKeyPassphrase bool   `json:"has_private_key_passphrase"`
-	RemoteHost              string `json:"remote_host"`
-	RemotePort              int    `json:"remote_port"`
-	LocalHost               string `json:"local_host"`
-	LocalPort               int    `json:"local_port"`
-	LocalURLPath            string `json:"local_url_path"`
-	PreStartCommands        string `json:"pre_start_commands"`
-	StartCommand            string `json:"start_command"`
-	HealthCheckURL          string `json:"health_check_url"`
-	OpenBrowser             bool   `json:"open_browser"`
-	HasSecurityToken        bool   `json:"has_security_token"`
+	ID                      string     `json:"id"`
+	Kind                    string     `json:"kind"`
+	Name                    string     `json:"name"`
+	SSHHost                 string     `json:"ssh_host"`
+	SSHPort                 int        `json:"ssh_port"`
+	SSHUser                 string     `json:"ssh_user"`
+	AuthMethod              string     `json:"auth_method"`
+	HasPassword             bool       `json:"has_password"`
+	PrivateKeyPath          string     `json:"private_key_path"`
+	HasPrivateKeyPassphrase bool       `json:"has_private_key_passphrase"`
+	RemoteHost              string     `json:"remote_host"`
+	RemotePort              int        `json:"remote_port"`
+	LocalHost               string     `json:"local_host"`
+	LocalPort               int        `json:"local_port"`
+	LocalURLPath            string     `json:"local_url_path"`
+	PreStartCommands        string     `json:"pre_start_commands"`
+	StartCommand            string     `json:"start_command"`
+	HealthCheckURL          string     `json:"health_check_url"`
+	OpenBrowser             bool       `json:"open_browser"`
+	HasSecurityToken        bool       `json:"has_security_token"`
+	LocalProxy              LocalProxy `json:"local_proxy"`
 }
 
 func NewProfileDefaults() Profile {
@@ -59,6 +60,7 @@ func NewProfileDefaults() Profile {
 		LocalURLPath: "/",
 		StartCommand: DefaultStartCommand,
 		OpenBrowser:  true,
+		LocalProxy:   DefaultLocalProxy(),
 	}
 }
 
@@ -130,6 +132,14 @@ func (p Profile) Validate() error {
 	if p.LocalPort < 1 || p.LocalPort > 65535 {
 		return invalidProfile("local bind port must be between 1 and 65535")
 	}
+	if p.LocalProxy.Enabled {
+		if strings.TrimSpace(p.LocalProxy.Host) == "" {
+			return invalidProfile("local proxy host is required when the local network channel is enabled")
+		}
+		if p.LocalProxy.Port < 1 || p.LocalProxy.Port > 65535 {
+			return invalidProfile("local proxy port must be between 1 and 65535")
+		}
+	}
 	return nil
 }
 
@@ -156,6 +166,9 @@ func (p Profile) Warnings() []string {
 	if p.LocalHost == p.SSHHost && p.LocalPort == p.SSHPort {
 		warnings = append(warnings, "local bind "+p.LocalAddress()+" is the SSH endpoint itself; the tunnel listener cannot share the SSH port")
 	}
+	if p.LocalProxy.Enabled && !p.LocalProxy.Normalized().IsLoopback() {
+		warnings = append(warnings, "local proxy host "+p.LocalProxy.Host+" is not loopback; verify it is reachable from the launcher machine")
+	}
 	return warnings
 }
 
@@ -168,6 +181,12 @@ func (p Profile) EffectiveKind() string {
 
 func (p Profile) IsLocal() bool {
 	return p.EffectiveKind() == ProfileKindLocal
+}
+
+// ProxyActive reports whether the session should open the reverse channel to
+// the local proxy. Local profiles have no SSH transport to carry it.
+func (p Profile) ProxyActive() bool {
+	return p.LocalProxy.Enabled && !p.IsLocal()
 }
 
 func (p Profile) BrowserURL() string {

@@ -223,6 +223,11 @@ func (s *Server) handleShellOpen(w http.ResponseWriter, r *http.Request) {
 	if shell.IntegrationError != nil {
 		s.profileLog(profile.ID, "SSH terminal shell integration unavailable: "+shell.IntegrationError.Error())
 	}
+	if shell.ProxyError != "" {
+		s.profileLog(profile.ID, "warning: "+shell.ProxyError)
+	} else if shell.ProxyURL != "" {
+		s.profileLog(profile.ID, "SSH terminal local network channel ready: "+shell.ProxyURL)
+	}
 	session, err := s.shells.add(profile, shell)
 	if err != nil {
 		_ = shell.Close()
@@ -230,7 +235,13 @@ func (s *Server) handleShellOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.profileLog(profile.ID, "SSH terminal opened for "+profile.Name)
-	writeJSON(w, map[string]any{"id": session.id, "profile_id": profile.ID, "name": profile.Name}, nil)
+	writeJSON(w, map[string]any{
+		"id":          session.id,
+		"profile_id":  profile.ID,
+		"name":        profile.Name,
+		"proxy_url":   shell.ProxyURL,
+		"proxy_error": shell.ProxyError,
+	}, nil)
 }
 
 func (s *Server) handleShellOutput(w http.ResponseWriter, r *http.Request) {

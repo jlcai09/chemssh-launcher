@@ -8,9 +8,10 @@ import (
 	"chemssh-launcher/internal/config"
 )
 
-func AssembleRemoteCommand(profile config.Profile) string {
+func AssembleRemoteCommand(profile config.Profile, proxyEnv []config.EnvPair) string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
+	writeProxyExports(&b, proxyEnv)
 	if strings.TrimSpace(profile.PreStartCommands) != "" {
 		b.WriteString(strings.TrimRight(profile.PreStartCommands, "\r\n"))
 		b.WriteByte('\n')
@@ -58,9 +59,10 @@ func AssembleKillPIDCommand(pid int) string {
 	}, "\n")
 }
 
-func AssembleCheckPortCommand(profile config.Profile) string {
+func AssembleCheckPortCommand(profile config.Profile, proxyEnv []config.EnvPair) string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
+	writeProxyExports(&b, proxyEnv)
 	if strings.TrimSpace(profile.PreStartCommands) != "" {
 		b.WriteString(strings.TrimRight(profile.PreStartCommands, "\r\n"))
 		b.WriteByte('\n')
@@ -172,6 +174,16 @@ func shellQuote(value string) string {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func writeProxyExports(b *strings.Builder, proxyEnv []config.EnvPair) {
+	for _, pair := range proxyEnv {
+		b.WriteString("export ")
+		b.WriteString(pair.Key)
+		b.WriteByte('=')
+		b.WriteString(shellQuote(pair.Value))
+		b.WriteByte('\n')
+	}
 }
 
 func backgroundLastCommand(command string) string {

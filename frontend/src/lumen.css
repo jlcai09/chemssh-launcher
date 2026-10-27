@@ -1105,6 +1105,32 @@ body {
   box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.13);
 }
 
+.lumen-window .session-proxy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 0 2px;
+  color: #8e8e93;
+  font-family: var(--lumen-mono);
+  font-size: calc(9.5px * var(--lumen-ui-scale));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.lumen-window .session-proxy > .el-icon {
+  flex: none;
+  font-size: calc(11px * var(--lumen-ui-scale));
+}
+
+.lumen-window .session-proxy.is-ok {
+  color: #2f8c55;
+}
+
+.lumen-window .session-proxy.is-warn {
+  color: #b06a00;
+}
+
 .session-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1186,13 +1212,22 @@ body {
   border-top: 0;
 }
 
-.lumen-window .form-section > h3 {
+.lumen-window .form-section > h3,
+.lumen-window .form-section-head > h3 {
   margin: 0;
   color: #8e8e93;
   font-size: calc(10.5px * var(--lumen-ui-scale));
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.lumen-window .form-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
 }
 
 .lumen-window .form-section-collapsible {
@@ -3704,6 +3739,14 @@ body {
 .lumen-window .field-warning > .el-icon {
   flex: none;
   margin-top: 1px;
+}
+
+.lumen-window .field-hint {
+  margin: 0;
+  color: #98989d;
+  font-family: var(--lumen-sans);
+  font-size: calc(10.5px * var(--lumen-ui-scale));
+  line-height: 1.5;
 }
 
 .discard-changes-dialog {

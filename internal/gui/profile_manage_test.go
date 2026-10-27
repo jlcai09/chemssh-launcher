@@ -13,6 +13,21 @@ import (
 	"chemssh-launcher/internal/secret"
 )
 
+func TestNormalizeImportedLocalProfileDropsLocalProxy(t *testing.T) {
+	profile := config.NewLocalProfileDefaults()
+	profile.ID = "local-import"
+	profile.Name = "Local Import"
+	profile.LocalProxy.Enabled = true
+
+	normalized := normalizeImportedProfile(profile)
+	if normalized.LocalProxy.Enabled {
+		t.Fatalf("imported local profile kept the local network proxy enabled: %+v", normalized.LocalProxy)
+	}
+	if !normalized.LocalProxy.Normalized().IsLoopback() {
+		t.Fatalf("imported local proxy lost its loopback default: %+v", normalized.LocalProxy)
+	}
+}
+
 func TestHandleDuplicateProfileCopiesSettingsAndSecrets(t *testing.T) {
 	profiles := config.NewFileStore(filepath.Join(t.TempDir(), "profiles.json"))
 	secrets := secret.NewMemoryStore()

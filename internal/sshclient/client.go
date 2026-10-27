@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +24,7 @@ func DialWithHostKeyPolicy(profile config.Profile, secrets secret.Store, policy 
 	if err != nil {
 		return nil, err
 	}
-	address := fmt.Sprintf("%s:%d", profile.SSHHost, profile.SSHPort)
+	address := net.JoinHostPort(profile.SSHHost, strconv.Itoa(profile.SSHPort))
 	dialer := &net.Dialer{
 		Timeout:       15 * time.Second,
 		FallbackDelay: 300 * time.Millisecond,
@@ -60,7 +61,7 @@ type RemoteProcess struct {
 	closed  chan struct{}
 }
 
-func StartRemoteCommand(client *ssh.Client, profile config.Profile, stdout, stderr io.Writer) (*RemoteProcess, error) {
+func StartRemoteCommand(client *ssh.Client, profile config.Profile, proxyEnv []config.EnvPair, stdout, stderr io.Writer) (*RemoteProcess, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return nil, err
@@ -83,7 +84,7 @@ func StartRemoteCommand(client *ssh.Client, profile config.Profile, stdout, stde
 		session.Close()
 		return nil, err
 	}
-	if _, err := io.WriteString(stdin, AssembleRemoteCommand(profile)); err != nil {
+	if _, err := io.WriteString(stdin, AssembleRemoteCommand(profile, proxyEnv)); err != nil {
 		session.Close()
 		return nil, err
 	}
@@ -102,7 +103,7 @@ type CheckPortResult struct {
 	Output   string
 }
 
-func RunCheckPortCommand(client *ssh.Client, profile config.Profile, stdout, stderr io.Writer) (CheckPortResult, error) {
+func RunCheckPortCommand(client *ssh.Client, profile config.Profile, proxyEnv []config.EnvPair, stdout, stderr io.Writer) (CheckPortResult, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return CheckPortResult{}, err
@@ -126,7 +127,7 @@ func RunCheckPortCommand(client *ssh.Client, profile config.Profile, stdout, std
 	if err := session.Start("bash -s"); err != nil {
 		return CheckPortResult{}, err
 	}
-	if _, err := io.WriteString(stdin, AssembleCheckPortCommand(profile)); err != nil {
+	if _, err := io.WriteString(stdin, AssembleCheckPortCommand(profile, proxyEnv)); err != nil {
 		_ = stdin.Close()
 		return CheckPortResult{}, err
 	}

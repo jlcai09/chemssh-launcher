@@ -79,6 +79,7 @@ chemssh-launcher --version
 - 通过 SSH 启动远程 ChemSSH，支持密码和私钥认证。
 - 在同一个远程 shell session 中执行多行 pre-start/start 命令。
 - SSH 本地端口转发、本地/远程端口检查、本地可用端口建议。
+- 可选反向通道：让远程机器使用本机运行的网络代理，包括 ChemSSH 自己的终端标签页（见 [本机网络代理](#本机网络代理)）。
 - 系统浏览器模式和可选 Windows WebView2 模式。
 - 多标签 `/shell` 工作区，第一个固定标签页即启动器页面；点击 `+` 打开空白标签页，并提供启动器、终端、SFTP、后台四个入口。
 - 面向内嵌 ChemSSH 的同源代理（`/<profile-name>/chemssh`，裸 `/chemssh` 亦可用），包括 WebView2 友好的文件拖拽。
@@ -115,6 +116,7 @@ Profile 保存在本机，分为远程 profile 和本地 profile。保存后的�
 - `Remote Host`、`Remote Port`：ChemSSH 在远程机器上的监听地址。
 - `Local Host`、`Local Port`：本地 tunnel 的监听地址。
 - `Local URL Path`：本地浏览器打开的路径。
+- `Local Network Proxy`：把本机运行的网络代理反向转发到远端回环，供远端进程使用（见 [本机网络代理](#本机网络代理)）。
 - `Pre-start Commands`：启动前执行的可选命令。
 - `Start Command`：启动 ChemSSH 的命令。
 - `Health Check URL`：可选覆盖值；留空时检查本地浏览器 URL。
@@ -196,6 +198,67 @@ SFTP 页面与 ChemSSH 启动流程解耦，可以从 Launcher 打开，也可�
 通过 `Open` 或 `Open in text editor` 打开的远程文件会先下载到本地缓存目录，再使用系统文件关联打开；`Open in text editor` 在 Windows 使用记事本、macOS 使用 TextEdit、Linux 使用系统默认应用（xdg-open）。只要 SFTP session 仍保持连接，Launcher 会监控缓存文件变化并同步上传回原远程路径。缓存是临时的，Launcher 退出时会尽量清理。
 
 目录传输通过前端展开为文件任务实现。部分后端路径仍只支持单文件复制，因此这类传输会直接报"不支持目录传输"的错误，而不是自动展开。
+
+## 本机网络代理
+
+ChemSSH 在远端只监听 `127.0.0.1`，因此只存在于本机的代理在远端无法直接访问。在远程 profile 中勾选 `Local Network Proxy`，Launcher 会用反向端口转发沿已建立的 SSH 连接把它送过去：
+
+```text
+远端 127.0.0.1:<服务器分配端口>  ->  ssh  ->  本机 <Proxy Host>:<Proxy Port>
+```
+
+Launcher 向 SSH 服务器申请一个只绑定服务器回环的监听端口（端口传 `0`，由服务器分配），两端都不会绑定 `0.0.0.0`。得到的 `http://127.0.0.1:<服务器分配端口>` 就是远端程序使用的代理地址。
+
+字段：
+
+- `Local Network Proxy`：是否启用反向通道。仅远程 profile 可用；本地 profile 没有可承载它的 SSH 连接。
+- `Proxy Host`、`Proxy Port`：本机代理地址。默认 `127.0.0.1` 和 `7890`。
+- `No Proxy`：`no_proxy` 与 `NO_PROXY` 的值。默认 `localhost,127.0.0.1,::1`；清空后不再输出这两个变量。
+
+通道建立后，以下变量指向反向监听端口：`http_proxy`、`https_proxy`、`all_proxy`、`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`，以及 `no_proxy` / `NO_PROXY`。远端已有的同名变量会被覆盖，而不是追加。
+
+谁继承这些变量：
+
+- ChemSSH 端口探测命令和启动命令：`export` 写在 `set -e` 之后、你的 pre-start 命令之前，因此 `cd`、`source`、`conda activate`、`module load` 都会保留它们。
+- Launcher 的 SSH 调试终端：每个 shell 单独建立一条反向监听。`bash` 走 `--rcfile`，`export` 追加在 `/etc/profile` 和 `~/.bash_profile` 之后执行，因此优先级高于登录 profile。非 bash 登录 shell 通过启动前的 `env` 获得变量，其登录 profile 仍可能覆盖。
+- ChemSSH 的终端标签页（包括复用已有 ChemSSH 后再新开的标签页）：通过下面的桥接文件。
+
+### ChemSSH 终端桥接文件
+
+每个 session 会通过 SFTP 写一个文件，权限 `0600`：
+
+```text
+$HOME/.chemssh-launcher/terminal-proxy-<chemssh 端口>.json
+```
+
+内容为 v1 JSON：
+
+```json
+{
+  "version": 1,
+  "proxy_url": "http://127.0.0.1:<服务器分配端口>",
+  "no_proxy": "localhost,127.0.0.1,::1",
+  "env": {
+    "http_proxy": "http://127.0.0.1:<服务器分配端口>",
+    "https_proxy": "http://127.0.0.1:<服务器分配端口>",
+    "all_proxy": "http://127.0.0.1:<服务器分配端口>",
+    "HTTP_PROXY": "http://127.0.0.1:<服务器分配端口>",
+    "HTTPS_PROXY": "http://127.0.0.1:<服务器分配端口>",
+    "ALL_PROXY": "http://127.0.0.1:<服务器分配端口>",
+    "no_proxy": "localhost,127.0.0.1,::1",
+    "NO_PROXY": "localhost,127.0.0.1,::1"
+  }
+}
+```
+
+文件名用的是 ChemSSH 实际监听的端口，可能来自 `--port` 而不是配置文件。ChemSSH 每次创建终端 session 时读取并校验：版本必须为 `1`，`proxy_url` 必须是 http 且主机为回环地址、端口在 `1-65535`，端点必须能建立 TCP 连接，env 键只允许上面这些变量，值不得含 NUL 字符。任何一项不通过都按"没有代理"处理——终端照常启动，不报错。
+
+生命周期：
+
+- 暂停转发（远端 ChemSSH 仍在运行）时保留反向监听和桥接文件。
+- 停止 session、停止 Launcher 资源、远端进程异常退出时，关闭监听、删除桥接文件（`.chemssh-launcher` 目录本身保留）、关闭 SSH 连接。
+- 桥接文件写失败只记 warning，session 仍会变为就绪：远程命令和 Launcher 终端拿到代理，但 ChemSSH 自己的终端不会同步。
+- 反向通道完全建不起来时，session 仍然正常启动（不做反向转发），警告会出现在 profile 日志、会话卡片和终端页面。
 
 ## ChemSSH Bridge
 
@@ -279,6 +342,8 @@ ChemSSH Launcher 依赖 SSH 完成认证、加密、host key 校验和本地端�
 首次连接服务器时，GUI/CLI 会显示 host key 类型和 SHA256 指纹。请只在你已经通过可信来源确认后再信任，例如服务器管理员或一台已经信任该服务器的 SSH 客户端。如果已保存的 host key 后续变化，GUI 会阻止连接并同时显示旧指纹和新指纹；只有在你核对新指纹并明确确认后，才会替换 `known_hosts` 中的旧密钥。CLI 仍会拒绝指纹变化的连接。
 
 如果把 `Local Host` 绑定到非 loopback 地址，例如 `0.0.0.0`，可能会把 tunnel 或本地 ChemSSH 目标暴露给其他机器。Launcher 会在 tunnel 表单里给出提示，在会话启动时写入 profile 日志，CLI 保存配置时也会打印警告；但这个设置仍由使用者负责。
+
+反向代理通道与 `Local Host` 无关：监听建在远端回环上、端口由服务器分配，不会暴露给其他机器，也不会静默绑定 `0.0.0.0`。注入的环境里只有不带凭据的 `http://127.0.0.1:<port>`，Launcher 不保存任何代理密码。建议保留 `No Proxy`，让回环和内部地址继续直连。
 
 Launcher 的本地 GUI API 对写操作（非 GET 请求）有额外保护：每次启动生成随机 token 写入 `chemssh_launcher_token` cookie，写请求必须同时携带匹配的 `X-ChemSSH-Launcher-Token` 头，并校验 Origin/Sec-Fetch-Site。Launcher 自带前端会自行带上该头；通过代理打开的 ChemSSH 页面由 Launcher 注入的脚本从 cookie 读取并补头，因此 bridge 写接口（例如本地打开文件）无需额外配置。
 

@@ -19,6 +19,14 @@ export interface Profile {
   health_check_url: string
   open_browser: boolean
   has_security_token: boolean
+  local_proxy: LocalProxy
+}
+
+export interface LocalProxy {
+  enabled: boolean
+  host: string
+  port: number
+  no_proxy: string
 }
 
 export interface FileEntry {

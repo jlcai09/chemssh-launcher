@@ -1044,19 +1044,21 @@ function openMenuProfileInSftp() {
   if (profile) openProfileInSftp(profile)
 }
 
+type ShellOpenResponse = { id: string; proxy_url?: string; proxy_error?: string }
+
 async function openShell(tab: TerminalTab) {
   const size = terminalSize(tab)
   const payload = { profile_id: tab.profileID, cols: size.cols, rows: size.rows }
+  let opened: ShellOpenResponse
   try {
-    const opened = await postJSON<{ id: string }>('/api/session/shell/open', payload)
-    return { id: opened.id, ...size }
+    opened = await postJSON<ShellOpenResponse>('/api/session/shell/open', payload)
   } catch (error) {
     const hostKey = hostKeyFromError(error)
     if (!hostKey) throw error
     const trust = await confirmHostKey(hostKey)
-    const opened = await postJSON<{ id: string }>('/api/session/shell/open', { ...payload, ...trust })
-    return { id: opened.id, ...size }
+    opened = await postJSON<ShellOpenResponse>('/api/session/shell/open', { ...payload, ...trust })
   }
+  return { id: opened.id, proxyError: opened.proxy_error || '', ...size }
 }
 
 async function connectSftp(tab: TerminalTab) {
@@ -1489,6 +1491,7 @@ async function connect(tab: TerminalTab, cdPath = '') {
     }
     runtime.sessionID = opened.id
     tab.status = 'connected'
+    if (opened.proxyError) writeNotice(tab, t('terminal.proxyDegraded', { error: opened.proxyError }))
     runtime.lastCols = opened.cols
     runtime.lastRows = opened.rows
     if (cdPath.startsWith('/')) {

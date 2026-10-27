@@ -2,6 +2,7 @@ package sshclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -18,13 +19,13 @@ import (
 const tunnelBufferSize = 256 * 1024
 
 type Tunnel struct {
-	listener net.Listener
-	client   *ssh.Client
-	remote   string
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	conns    map[net.Conn]struct{}
-	wg       sync.WaitGroup
+	listener   net.Listener
+	dialTarget func(context.Context) (net.Conn, error)
+	label      string
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	conns      map[net.Conn]struct{}
+	wg         sync.WaitGroup
 }
 
 func StartTunnel(ctx context.Context, client *ssh.Client, profile config.Profile) (*Tunnel, error) {
@@ -35,16 +36,45 @@ func StartTunnel(ctx context.Context, client *ssh.Client, profile config.Profile
 		return nil, err
 	}
 
+	t := newTunnel(ctx, cancel, ln, "tunnel", func(context.Context) (net.Conn, error) {
+		return client.Dial("tcp", profile.RemoteAddress())
+	})
+	return t, nil
+}
+
+// StartReverseTunnel asks the SSH server to listen on its loopback on a free
+// port and forwards each accepted connection to target on the launcher machine.
+// It returns the server-side address that remote programs can dial.
+func StartReverseTunnel(ctx context.Context, client *ssh.Client, target string) (*Tunnel, string, error) {
+	if client == nil {
+		return nil, "", errors.New("ssh client is required for a reverse tunnel")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	ln, err := client.ListenTCP(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		cancel()
+		return nil, "", err
+	}
+
+	dial := func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", target)
+	}
+	t := newTunnel(ctx, cancel, ln, "reverse tunnel", dial)
+	return t, ln.Addr().String(), nil
+}
+
+func newTunnel(ctx context.Context, cancel context.CancelFunc, ln net.Listener, label string, dial func(context.Context) (net.Conn, error)) *Tunnel {
 	t := &Tunnel{
-		listener: ln,
-		client:   client,
-		remote:   profile.RemoteAddress(),
-		cancel:   cancel,
-		conns:    make(map[net.Conn]struct{}),
+		listener:   ln,
+		dialTarget: dial,
+		label:      label,
+		cancel:     cancel,
+		conns:      make(map[net.Conn]struct{}),
 	}
 	t.wg.Add(1)
 	go t.accept(ctx)
-	return t, nil
+	return t
 }
 
 func (t *Tunnel) Close() error {
@@ -59,7 +89,7 @@ func (t *Tunnel) Close() error {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		log.Printf("tunnel close timed out; background connections will finish asynchronously")
+		log.Printf("%s close timed out; background connections will finish asynchronously", t.label)
 	}
 	return err
 }
@@ -73,24 +103,24 @@ func (t *Tunnel) accept(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			default:
-				log.Printf("tunnel accept error: %v", err)
+				log.Printf("%s accept error: %v", t.label, err)
 				continue
 			}
 		}
 		t.addConn(local)
 		t.wg.Add(1)
-		go t.handle(local)
+		go t.handle(ctx, local)
 	}
 }
 
-func (t *Tunnel) handle(local net.Conn) {
+func (t *Tunnel) handle(ctx context.Context, local net.Conn) {
 	defer t.wg.Done()
 	defer t.removeConn(local)
 	defer local.Close()
 
-	remote, err := t.client.Dial("tcp", t.remote)
+	remote, err := t.dialTarget(ctx)
 	if err != nil {
-		log.Printf("tunnel dial error: %v", err)
+		log.Printf("%s dial error: %v", t.label, err)
 		return
 	}
 	t.addConn(remote)

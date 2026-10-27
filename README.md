@@ -79,6 +79,7 @@ If the remote ChemSSH port is already serving a reusable ChemSSH instance, the l
 - Remote ChemSSH startup over SSH with password or private-key authentication.
 - Multi-line pre-start and start commands executed in one remote shell session.
 - SSH local port forwarding with local/remote port checks and suggested local fallback ports.
+- Optional reverse channel that lets the remote machine use a proxy running on your computer, including ChemSSH's own terminal tabs (see [Local Network Proxy](#local-network-proxy)).
 - Browser mode and optional Windows WebView2 mode.
 - Tabbed `/shell` workspace whose pinned first tab is the launcher page; `+` opens a blank tab with shortcuts to Launcher, Terminal, SFTP, and Backend.
 - Same-origin launcher proxy for embedded ChemSSH (`/<profile-name>/chemssh`; the bare `/chemssh` path works too), including WebView2-friendly file dragging.
@@ -115,6 +116,7 @@ Important fields:
 - `Remote Host`, `Remote Port`: where ChemSSH listens on the remote machine.
 - `Local Host`, `Local Port`: where the local tunnel listens.
 - `Local URL Path`: path opened in the browser after the local host/port.
+- `Local Network Proxy`: reverse-forwards a proxy that runs on this computer so remote processes can use it (see [Local Network Proxy](#local-network-proxy)).
 - `Pre-start Commands`: optional commands run before the start command.
 - `Start Command`: command that starts ChemSSH.
 - `Health Check URL`: optional override; when empty, the launcher checks the local browser URL.
@@ -196,6 +198,67 @@ Single-file copies (local to remote, remote to remote, and local to local) resum
 Remote files opened through `Open` or `Open in text editor` are downloaded to a local cache directory and opened with the OS file association; `Open in text editor` uses Notepad on Windows, TextEdit on macOS, and the system default app (xdg-open) on Linux. They are watched for changes and uploaded back to the remote path while the SFTP session remains connected. This cache is temporary and is cleaned when the launcher exits when possible.
 
 Directory transfer support is implemented by expanding directories into file tasks. Some backend paths still only copy individual files, so such a transfer fails with a directory-transfer error instead of being expanded.
+
+## Local Network Proxy
+
+ChemSSH binds to `127.0.0.1` on the remote machine, so a proxy that only exists on your own computer is out of reach there. Enabling `Local Network Proxy` in a remote profile carries that proxy over the existing SSH connection with reverse port forwarding:
+
+```text
+remote 127.0.0.1:<assigned port>  ->  ssh  ->  <Proxy Host>:<Proxy Port> on this computer
+```
+
+The launcher asks the SSH server for a listener on its own loopback (port `0`), so the server assigns a free port and nothing is bound to `0.0.0.0` on either side. The resulting `http://127.0.0.1:<assigned port>` is the proxy URL that remote programs dial.
+
+Fields:
+
+- `Local Network Proxy`: enable the reverse channel. Remote profiles only; local profiles have no SSH transport to carry it.
+- `Proxy Host`, `Proxy Port`: the proxy on this computer. Defaults: `127.0.0.1` and `7890`.
+- `No Proxy`: value of `no_proxy` and `NO_PROXY`. Default: `localhost,127.0.0.1,::1`. Clear it to stop emitting both variables.
+
+While the channel is up, these variables point at the reverse listener: `http_proxy`, `https_proxy`, `all_proxy`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `no_proxy` / `NO_PROXY`. An existing variable of the same name on the remote side is replaced, not appended.
+
+Who inherits them:
+
+- The ChemSSH port check and the start command: the `export` lines are written right after `set -e` and before your pre-start commands, so `cd`, `source`, `conda activate`, and `module load` keep them.
+- The launcher's SSH debug terminal: every shell gets its own reverse listener. For `bash` the exports are appended to the `--rcfile` after `/etc/profile` and `~/.bash_profile` have run, so they win over a login profile. A non-bash login shell receives the variables through `env` before it starts, so a login profile can still override them there.
+- ChemSSH's terminal tabs — including tabs opened later in a reused ChemSSH instance — through the bridge file below.
+
+### ChemSSH terminal bridge
+
+For each session, the launcher writes one file over SFTP:
+
+```text
+$HOME/.chemssh-launcher/terminal-proxy-<chemssh-port>.json
+```
+
+with mode `0600` and this v1 payload:
+
+```json
+{
+  "version": 1,
+  "proxy_url": "http://127.0.0.1:<assigned port>",
+  "no_proxy": "localhost,127.0.0.1,::1",
+  "env": {
+    "http_proxy": "http://127.0.0.1:<assigned port>",
+    "https_proxy": "http://127.0.0.1:<assigned port>",
+    "all_proxy": "http://127.0.0.1:<assigned port>",
+    "HTTP_PROXY": "http://127.0.0.1:<assigned port>",
+    "HTTPS_PROXY": "http://127.0.0.1:<assigned port>",
+    "ALL_PROXY": "http://127.0.0.1:<assigned port>",
+    "no_proxy": "localhost,127.0.0.1,::1",
+    "NO_PROXY": "localhost,127.0.0.1,::1"
+  }
+}
+```
+
+The file is named after the ChemSSH port that is actually listening, which can come from `--port` instead of the config file. ChemSSH reads it whenever it creates a terminal session and validates it: version `1`, an `http` URL with a loopback host and a port in `1-65535`, a reachable endpoint, env keys limited to the variables above, and values without NUL bytes. Anything else is treated as "no proxy" — the terminal still starts, no error is raised.
+
+Lifecycle:
+
+- Pausing forwarding keeps the reverse listener and the bridge file while the remote ChemSSH keeps running.
+- Stopping the session, stopping launcher resources, or the remote command exiting with an error closes the listener, removes the bridge file (the `.chemssh-launcher` directory itself stays), and closes the SSH connection.
+- If the bridge file cannot be written, the launcher logs a warning and the session still becomes ready: the remote command and launcher terminals get the proxy, but ChemSSH's own tabs are not synchronized.
+- If the reverse channel cannot be created at all, the session starts anyway without it. The warning shows up in the profile log, on the session card, and on the terminal page.
 
 ## ChemSSH Bridge
 
@@ -279,6 +342,8 @@ ChemSSH Launcher relies on SSH for authentication, encryption, host-key verifica
 On the first connection to a server, the GUI/CLI shows the host key type and SHA256 fingerprint. Trust it only after comparing it with a reliable source, such as a server administrator or an existing trusted SSH client. If a saved host key changes later, the GUI blocks the connection and shows both the saved and the new fingerprint; the old key is replaced in `known_hosts` only after you verify the new fingerprint and explicitly confirm. The CLI continues to reject changed keys.
 
 Binding `Local Host` to anything other than loopback, such as `0.0.0.0`, can expose the tunnel or local ChemSSH target to other machines. The launcher warns about it in the tunnel form, writes a warning to the profile log when the session starts, and prints one from the CLI when the profile is saved; the setting is still your responsibility.
+
+The reverse proxy channel is independent of `Local Host`: its listener is created on the remote loopback with a server-assigned port, so it is never exposed to other machines and never binds `0.0.0.0`. The injected environment carries only a plain `http://127.0.0.1:<port>` URL with no credentials, and the launcher stores no proxy password. Keep `No Proxy` populated so loopback and internal addresses bypass the proxy.
 
 The launcher's local GUI API additionally protects write operations (non-GET requests): every launch generates a random token, stores it in the `chemssh_launcher_token` cookie, and requires write requests to carry a matching `X-ChemSSH-Launcher-Token` header plus a valid Origin/Sec-Fetch-Site. The launcher's own frontend sends that header itself; for proxied ChemSSH pages the launcher injects a small script that reads the cookie and fills the header in, so bridge write endpoints (such as opening a file locally) need no extra configuration.
 

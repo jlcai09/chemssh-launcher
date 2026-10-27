@@ -12,7 +12,7 @@ func TestAssembleRemoteCommandPreservesMultilinePreStart(t *testing.T) {
 	profile.PreStartCommands = "cd /home/user/chemssh\nsource .venv/bin/activate"
 	profile.StartCommand = "chemssh --config config.yaml"
 
-	got := AssembleRemoteCommand(profile)
+	got := AssembleRemoteCommand(profile, nil)
 	mustContain := []string{
 		"set -e\ncd /home/user/chemssh\nsource .venv/bin/activate\n",
 		"trap '__chemssh_launcher_cleanup; exit 143' INT TERM HUP",
@@ -27,6 +27,41 @@ func TestAssembleRemoteCommandPreservesMultilinePreStart(t *testing.T) {
 	}
 	if strings.Contains(got, "pidfile") {
 		t.Fatalf("assembled command should not write launcher pidfiles anymore\n%s", got)
+	}
+}
+
+func TestAssembleRemoteCommandExportsProxyBeforePreStart(t *testing.T) {
+	profile := config.NewProfileDefaults()
+	profile.PreStartCommands = "cd /home/user/chemssh"
+	profile.StartCommand = "chemssh --config config.yaml"
+	env := config.ProxyEnvPairs("http://127.0.0.1:41000", "localhost,127.0.0.1")
+
+	got := AssembleRemoteCommand(profile, env)
+	if !strings.HasPrefix(got, "set -e\nexport http_proxy=http://127.0.0.1:41000\n") {
+		t.Fatalf("proxy exports missing after set -e\n%s", got)
+	}
+	proxyIndex := strings.Index(got, "export https_proxy=http://127.0.0.1:41000")
+	preStartIndex := strings.Index(got, "cd /home/user/chemssh")
+	if proxyIndex < 0 || preStartIndex < 0 || proxyIndex > preStartIndex {
+		t.Fatalf("proxy exports must precede pre-start commands\n%s", got)
+	}
+	for _, want := range []string{
+		"export HTTP_PROXY=http://127.0.0.1:41000",
+		"export ALL_PROXY=http://127.0.0.1:41000",
+		"export no_proxy='localhost,127.0.0.1'",
+		"export NO_PROXY='localhost,127.0.0.1'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("assembled command missing %q\n%s", want, got)
+		}
+	}
+}
+
+func TestAssembleRemoteCommandQuotesProxyValues(t *testing.T) {
+	env := []config.EnvPair{{Key: "no_proxy", Value: "localhost,it's-internal"}}
+	got := AssembleRemoteCommand(config.NewProfileDefaults(), env)
+	if !strings.Contains(got, `export no_proxy='localhost,it'"'"'s-internal'`) {
+		t.Fatalf("proxy value not shell-quoted\n%s", got)
 	}
 }
 
@@ -51,7 +86,7 @@ func TestAssembleCheckPortCommandUsesChemSSHCheckPort(t *testing.T) {
 	profile.PreStartCommands = "cd /home/user/chemssh\nsource .venv/bin/activate"
 	profile.StartCommand = "chemssh --config config.yaml"
 
-	got := AssembleCheckPortCommand(profile)
+	got := AssembleCheckPortCommand(profile, nil)
 	for _, want := range []string{
 		"set -e\ncd /home/user/chemssh\nsource .venv/bin/activate\n",
 		"chemssh --config config.yaml --host 127.0.0.1 --port 8888 --check-port",
