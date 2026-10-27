@@ -59,7 +59,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ArrowLeft, ArrowRight, Close, Download, FolderOpened, Monitor, Operation, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { t } from '../i18n'
 
@@ -109,8 +109,12 @@ let maxSeenOpenSeq = 0
 let suppressAutoOpenUntil = 0
 let sessionStatusPrimed = false
 let nextID = 1
+let pollTimer: number | undefined
+let pollInFlight = false
+let disposed = false
 
 const tabFrames = new Map<string, HTMLIFrameElement>()
+const reloadTimers = new Map<string, number>()
 // A page is only addressable once it announces it is ready: booting takes an
 // async settings fetch, so the iframe load event fires before it can answer.
 const readyTabs = new Set<string>()
@@ -125,6 +129,11 @@ function forgetTab(id: string) {
   tabFrames.delete(id)
   readyTabs.delete(id)
   pendingSftpProfiles.delete(id)
+  const reloadTimer = reloadTimers.get(id)
+  if (reloadTimer !== undefined) {
+    window.clearTimeout(reloadTimer)
+    reloadTimers.delete(id)
+  }
 }
 
 function postToTab(id: string, message: Record<string, unknown>) {
@@ -187,12 +196,18 @@ function normalizeShellURL(value: string) {
   return value
 }
 
+const embeddableSchemes = ['http:', 'https:']
+
 function absoluteURL(value: string) {
   const text = normalizeAddressInput(value)
   if (!text) return 'about:blank'
   if (text === 'about:blank') return text
+  const scheme = text.match(/^([a-zA-Z][a-zA-Z\d+.-]*:)/)?.[1].toLowerCase()
+  // An iframe src accepts javascript:, data:, file: and friends; the shell only
+  // ever embeds web pages, so any other scheme is dropped instead of loaded.
+  if (scheme && !embeddableSchemes.includes(scheme)) return 'about:blank'
   let finalURL = ''
-  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(text)) {
+  if (scheme) {
     finalURL = text
   } else if (text.startsWith('/')) {
     finalURL = new URL(text, window.location.origin).href
@@ -298,9 +313,13 @@ function reloadActive() {
   readyTabs.delete(tab.id)
   pendingSftpProfiles.delete(tab.id)
   tab.url = 'about:blank'
-  window.setTimeout(() => {
+  const previous = reloadTimers.get(tab.id)
+  if (previous !== undefined) window.clearTimeout(previous)
+  reloadTimers.set(tab.id, window.setTimeout(() => {
+    reloadTimers.delete(tab.id)
+    if (disposed) return
     tab.url = url
-  }, 0)
+  }, 0))
 }
 
 function goBack() {
@@ -405,9 +424,14 @@ async function closeDownloadsPanel() {
 }
 
 async function pollSession() {
+  // The 1.5s tick is faster than a stalled /api/session/status can be; two
+  // overlapping polls would race on maxSeenOpenSeq and could open a tab twice.
+  if (pollInFlight || disposed) return
+  pollInFlight = true
   try {
     const res = await fetch('/api/session/status')
     const status = await res.json()
+    if (disposed) return
     const url = status.forwarding && status.url ? status.url : ''
     const openSeq = Number(status.open_seq || 0)
     currentSessionURL.value = url
@@ -444,27 +468,42 @@ async function pollSession() {
     }
   } catch {
     // Polling should stay quiet while the backend is starting or stopping.
+  } finally {
+    pollInFlight = false
   }
+}
+
+function handleWindowMessage(event: MessageEvent) {
+  const data = event.data || {}
+  if (data.type === 'chemssh-sftp:ready') {
+    markTabReady(event.source as Window | null)
+  }
+  if (data.type === 'chemssh-launcher:new-tab' && data.url) {
+    const finalURL = absoluteURL(data.url)
+    openOrFocus(titleForURL(finalURL).title, finalURL)
+  }
+  if (data.type === 'chemssh-launcher:open-sftp' && data.profile) {
+    openSftpProfile(String(data.profile), String(data.name || ''))
+  }
+  if (data.type === 'chemssh-launcher:close-downloads') closeDownloadsPanel()
+  if (data.type === 'chemssh-launcher:suppress-auto-open') suppressAutoOpenUntil = Date.now() + 10000
 }
 
 onMounted(() => {
   createTab('', '/', true, true)
   pollSession()
-  window.setInterval(pollSession, 1500)
-  window.addEventListener('message', event => {
-    const data = event.data || {}
-    if (data.type === 'chemssh-sftp:ready') {
-      markTabReady(event.source as Window | null)
-    }
-    if (data.type === 'chemssh-launcher:new-tab' && data.url) {
-      const finalURL = absoluteURL(data.url)
-      openOrFocus(titleForURL(finalURL).title, finalURL)
-    }
-    if (data.type === 'chemssh-launcher:open-sftp' && data.profile) {
-      openSftpProfile(String(data.profile), String(data.name || ''))
-    }
-    if (data.type === 'chemssh-launcher:close-downloads') closeDownloadsPanel()
-    if (data.type === 'chemssh-launcher:suppress-auto-open') suppressAutoOpenUntil = Date.now() + 10000
-  })
+  pollTimer = window.setInterval(pollSession, 1500)
+  window.addEventListener('message', handleWindowMessage)
+})
+
+onBeforeUnmount(() => {
+  disposed = true
+  if (pollTimer !== undefined) {
+    window.clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+  window.removeEventListener('message', handleWindowMessage)
+  reloadTimers.forEach(timer => window.clearTimeout(timer))
+  reloadTimers.clear()
 })
 </script>

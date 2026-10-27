@@ -2,8 +2,21 @@
   <section class="terminal-view">
     <aside class="terminal-sessions">
       <header class="terminal-sessions-title">
-        <span>{{ t('terminal.servers') }}</span>
-        <span class="terminal-sessions-count">{{ remoteProfiles.length }}</span>
+        <span class="terminal-sessions-label">{{ t('terminal.servers') }}</span>
+        <span class="terminal-sessions-actions">
+          <button
+            type="button"
+            class="terminal-sessions-refresh"
+            :class="{ 'is-refreshing': refreshingProfiles }"
+            :title="t('terminal.refreshServers')"
+            :aria-label="t('terminal.refreshServers')"
+            :disabled="refreshingProfiles"
+            @click="refreshProfiles"
+          >
+            <el-icon><Refresh /></el-icon>
+          </button>
+          <span class="terminal-sessions-count">{{ remoteProfiles.length }}</span>
+        </span>
       </header>
       <div class="terminal-session-list" role="list">
         <button
@@ -96,6 +109,31 @@
           <strong>{{ !connected ? t('terminal.connectFirst') : uploading ? t('terminal.uploadBusy') : t('terminal.dropToUpload') }}</strong>
           <span v-if="connected && !uploading">{{ t('terminal.uploadTarget', { path: uploadTargetLabel }) }}</span>
         </div>
+        <div v-if="searchVisible" class="terminal-search" @mousedown.stop>
+          <el-icon class="terminal-search-icon"><Search /></el-icon>
+          <input
+            ref="searchInputRef"
+            v-model="searchQuery"
+            class="terminal-search-input"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            :placeholder="t('terminal.searchPlaceholder')"
+            @input="runSearch(false)"
+            @keydown.enter.prevent.stop="runSearch($event.shiftKey)"
+            @keydown.esc.prevent.stop="closeSearch()"
+          />
+          <span class="terminal-search-count">{{ searchStatus }}</span>
+          <button type="button" class="terminal-search-action" :title="t('terminal.searchPrevious')" @mousedown.prevent @click="runSearch(true)">
+            <el-icon><ArrowUp /></el-icon>
+          </button>
+          <button type="button" class="terminal-search-action" :title="t('terminal.searchNext')" @mousedown.prevent @click="runSearch(false)">
+            <el-icon><ArrowDown /></el-icon>
+          </button>
+          <button type="button" class="terminal-search-action" :title="t('terminal.searchClose')" @mousedown.prevent @click="closeSearch()">
+            <el-icon><Close /></el-icon>
+          </button>
+        </div>
       </div>
       <footer class="terminal-footer">
         <div class="terminal-footer-actions">
@@ -130,6 +168,51 @@
             </el-tooltip>
             <span v-if="uploading" class="terminal-upload-percent">{{ uploadPercent }}%</span>
           </span>
+          <el-tooltip :content="t('terminal.search')" placement="top" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+            <el-button :icon="Search" circle :disabled="!activeTab" @click="toggleSearch" />
+          </el-tooltip>
+          <el-popover placement="top-start" :width="260" trigger="click" popper-class="terminal-settings-popover">
+            <template #reference>
+              <el-button :icon="Setting" circle :title="t('terminal.displaySettings')" />
+            </template>
+            <div class="terminal-settings-panel">
+              <div class="terminal-settings-title">{{ t('terminal.displaySettings') }}</div>
+              <div class="terminal-settings-row">
+                <span class="terminal-settings-label">{{ t('terminal.fontSize') }}</span>
+                <div class="terminal-font-stepper">
+                  <button
+                    type="button"
+                    :disabled="displaySettings.fontSize <= TERMINAL_FONT_MIN"
+                    :title="t('terminal.fontSizeDecrease')"
+                    @click="adjustFontSize(-1)"
+                  >
+                    <el-icon><Minus /></el-icon>
+                  </button>
+                  <span class="terminal-font-value">{{ t('terminal.fontSizeValue', { size: displaySettings.fontSize }) }}</span>
+                  <button
+                    type="button"
+                    :disabled="displaySettings.fontSize >= TERMINAL_FONT_MAX"
+                    :title="t('terminal.fontSizeIncrease')"
+                    @click="adjustFontSize(1)"
+                  >
+                    <el-icon><Plus /></el-icon>
+                  </button>
+                </div>
+              </div>
+              <div class="terminal-settings-row">
+                <span class="terminal-settings-label">{{ t('terminal.scrollback') }}</span>
+                <el-select v-model="displaySettings.scrollback" size="small" class="terminal-scrollback-select" @change="applyScrollback">
+                  <el-option
+                    v-for="value in SCROLLBACK_OPTIONS"
+                    :key="value"
+                    :label="t('terminal.scrollbackValue', { count: value })"
+                    :value="value"
+                  />
+                </el-select>
+              </div>
+              <div class="terminal-settings-hint">{{ t('terminal.searchShortcutHint') }}</div>
+            </div>
+          </el-popover>
         </div>
         <div class="terminal-footer-address" :title="connectionAddress">
           {{ connectionAddress || t('terminal.noSession') }}
@@ -170,9 +253,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Close, Connection, Plus, SwitchButton, Upload, UploadFilled } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowUp, Close, Connection, Minus, Plus, Refresh, Search, Setting, SwitchButton, Upload, UploadFilled } from '@element-plus/icons-vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
 import '@xterm/xterm/css/xterm.css'
 import { api, APIError, postJSON, withLauncherToken, type Profile } from '../api'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
@@ -204,11 +288,14 @@ interface TerminalTab {
 interface TerminalRuntime {
   term: Terminal
   fitAddon: FitAddon
+  searchAddon: SearchAddon
   sessionID: string
   outputAbort: AbortController | null
   pendingInput: string
   inputFlushing: boolean
   resizeTimer: number | null
+  resizeRunning: boolean
+  resizePending: boolean
   lastCols: number
   lastRows: number
   controlBuffer: string
@@ -222,19 +309,41 @@ interface TerminalRuntime {
 }
 
 const profiles = ref<Profile[]>([])
+const refreshingProfiles = ref(false)
 const tabs = ref<TerminalTab[]>([])
 const activeTabID = ref('')
 const selectedProfileID = ref('')
 const dropActive = ref(false)
 const stageRef = ref<HTMLElement | null>(null)
+const searchVisible = ref(false)
+const searchQuery = ref('')
+const searchResultCount = ref(0)
+const searchResultIndex = ref(-1)
+const searchInputRef = ref<HTMLInputElement | null>(null)
+const displaySettings = reactive({ fontSize: 13, scrollback: 5000 })
 const tabMenu = reactive({ visible: false, x: 0, y: 0, tabID: '' })
 const profileMenu = reactive({ visible: false, x: 0, y: 0, profileID: '' })
 const tabDrag = reactive({ active: false, tabID: '', targetID: '', position: 'before' as 'before' | 'after' })
+
+const TERMINAL_FONT_MIN = 10
+const TERMINAL_FONT_MAX = 24
+const SCROLLBACK_OPTIONS = [1000, 5000, 10000, 20000, 50000]
+const SEARCH_OPTIONS = {
+  decorations: {
+    matchBackground: '#1f3b4d',
+    matchBorder: '#2b5a75',
+    matchOverviewRuler: '#7dd3fc',
+    activeMatchBackground: '#2c6e91',
+    activeMatchBorder: '#7dd3fc',
+    activeMatchColorOverviewRuler: '#7dd3fc'
+  }
+}
 
 const runtimes = new Map<string, TerminalRuntime>()
 const hosts = new Map<string, HTMLElement>()
 let lastProfileID = localStorage.getItem(TERMINAL_PROFILE_KEY) || ''
 let resizeObserver: ResizeObserver | null = null
+let settingsSaveTimer: number | null = null
 let tabSeq = 0
 
 const ZMODEM_SIGNATURES = [
@@ -267,6 +376,12 @@ const statusText = computed(() => {
     default:
       return t('terminal.notConnected')
   }
+})
+const searchStatus = computed(() => {
+  if (!searchVisible.value || !searchQuery.value) return ''
+  if (searchResultCount.value <= 0) return t('terminal.searchNoMatch')
+  const current = Math.min(Math.max(searchResultIndex.value + 1, 1), searchResultCount.value)
+  return t('terminal.searchResults', { current, total: searchResultCount.value })
 })
 
 function persistProfile(value: string) {
@@ -379,11 +494,11 @@ function setTabHost(id: string, el: unknown) {
 
 function terminalSize(tab: TerminalTab) {
   const runtime = runtimeFor(tab)
-  const proposed = runtime?.fitAddon.proposeDimensions()
-  return {
-    cols: proposed?.cols || runtime?.term.cols || 80,
-    rows: proposed?.rows || runtime?.term.rows || 24
-  }
+  if (!runtime) return { cols: 80, rows: 24 }
+  // The rendered grid is the only trustworthy source: FitAddon reports a
+  // placeholder size for a host that is not laid out (hidden tab), which
+  // would resize the remote PTY to a few columns while the grid stays wide.
+  return { cols: runtime.term.cols, rows: runtime.term.rows }
 }
 
 function writeNotice(tab: TerminalTab, text: string) {
@@ -502,8 +617,110 @@ function fitTerminal(tab: TerminalTab | null) {
   if (host.clientWidth <= 0 || host.clientHeight <= 0) return
   try {
     runtime.fitAddon.fit()
+    // fit() only emits onResize when the grid changed, so a PTY that drifted
+    // out of sync would otherwise stay wrong until the next window resize.
+    scheduleResize(tab)
   } catch {
     // The terminal can be transiently unmeasurable while the view is switching.
+  }
+}
+
+async function loadDisplaySettings() {
+  try {
+    const settings = await api<{ terminal_font_size?: number; terminal_scrollback?: number }>('/api/ui-settings')
+    if (typeof settings.terminal_font_size === 'number') displaySettings.fontSize = settings.terminal_font_size
+    if (typeof settings.terminal_scrollback === 'number') displaySettings.scrollback = settings.terminal_scrollback
+  } catch {
+    // Local defaults keep the terminal usable if the settings endpoint is unavailable.
+  }
+}
+
+function persistDisplaySettings() {
+  if (settingsSaveTimer !== null) window.clearTimeout(settingsSaveTimer)
+  settingsSaveTimer = window.setTimeout(() => {
+    settingsSaveTimer = null
+    postJSON('/api/ui-settings', {
+      terminal_font_size: displaySettings.fontSize,
+      terminal_scrollback: displaySettings.scrollback
+    }).catch(() => ElMessage.error(t('terminal.settingsSaveFailed')))
+  }, 300)
+}
+
+function applyDisplaySettings() {
+  for (const runtime of runtimes.values()) {
+    if (runtime.disposed) continue
+    runtime.term.options.fontSize = displaySettings.fontSize
+    runtime.term.options.scrollback = displaySettings.scrollback
+  }
+  fitTerminal(activeTab.value)
+  if (searchVisible.value) runSearch(false)
+}
+
+function adjustFontSize(delta: number) {
+  const next = Math.min(TERMINAL_FONT_MAX, Math.max(TERMINAL_FONT_MIN, displaySettings.fontSize + delta))
+  if (next === displaySettings.fontSize) return
+  displaySettings.fontSize = next
+  applyDisplaySettings()
+  persistDisplaySettings()
+}
+
+function applyScrollback() {
+  applyDisplaySettings()
+  persistDisplaySettings()
+}
+
+function openSearch() {
+  if (!activeTab.value) return
+  searchVisible.value = true
+  void nextTick(() => {
+    searchInputRef.value?.focus()
+    searchInputRef.value?.select()
+    runSearch(false)
+  })
+}
+
+function closeSearch(focusTerminal = true) {
+  runtimeFor(activeTab.value)?.searchAddon.clearDecorations()
+  searchVisible.value = false
+  searchQuery.value = ''
+  searchResultCount.value = 0
+  searchResultIndex.value = -1
+  if (focusTerminal) runtimeFor(activeTab.value)?.term.focus()
+}
+
+function toggleSearch() {
+  if (searchVisible.value) closeSearch()
+  else openSearch()
+}
+
+function runSearch(backwards: boolean) {
+  const runtime = runtimeFor(activeTab.value)
+  if (!runtime) return
+  const query = searchQuery.value
+  if (!query) {
+    runtime.searchAddon.clearDecorations()
+    searchResultCount.value = 0
+    searchResultIndex.value = -1
+    return
+  }
+  if (backwards) runtime.searchAddon.findPrevious(query, SEARCH_OPTIONS)
+  else runtime.searchAddon.findNext(query, SEARCH_OPTIONS)
+}
+
+function handleTerminalShortcut(event: KeyboardEvent) {
+  if (!props.active) return
+  if (document.querySelector('.lumen-command-palette')) return
+  if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') {
+    if (!activeTab.value) return
+    event.preventDefault()
+    event.stopPropagation()
+    openSearch()
+    return
+  }
+  if (event.key === 'Escape' && searchVisible.value) {
+    event.preventDefault()
+    event.stopPropagation()
+    closeSearch()
   }
 }
 
@@ -515,6 +732,23 @@ async function loadProfiles() {
   }
 }
 
+// Manual refresh for the server sidebar: profiles can be added, renamed or
+// deleted on the launcher page while this view stays mounted.
+async function refreshProfiles() {
+  if (refreshingProfiles.value) return
+  refreshingProfiles.value = true
+  try {
+    await loadProfiles()
+    if (selectedProfileID.value && !profiles.value.some(profile => profile.id === selectedProfileID.value)) {
+      selectedProfileID.value = ''
+    }
+  } finally {
+    window.setTimeout(() => {
+      refreshingProfiles.value = false
+    }, 320)
+  }
+}
+
 async function ensureRuntime(tab: TerminalTab) {
   const existing = runtimeFor(tab)
   if (existing) return existing
@@ -522,11 +756,12 @@ async function ensureRuntime(tab: TerminalTab) {
   const host = hosts.get(tab.id)
   if (!host) return null
   const term = new Terminal({
+    allowProposedApi: true,
     cursorBlink: true,
     fontFamily: 'Consolas, "Cascadia Mono", "SFMono-Regular", Menlo, monospace',
-    fontSize: 13,
+    fontSize: displaySettings.fontSize,
     lineHeight: 1.2,
-    scrollback: 5000,
+    scrollback: displaySettings.scrollback,
     theme: {
       background: '#0b1218',
       foreground: '#d7e6ee',
@@ -539,15 +774,20 @@ async function ensureRuntime(tab: TerminalTab) {
   })
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
+  const searchAddon = new SearchAddon()
+  term.loadAddon(searchAddon)
   term.open(host)
   const runtime: TerminalRuntime = {
     term,
     fitAddon,
+    searchAddon,
     sessionID: '',
     outputAbort: null,
     pendingInput: '',
     inputFlushing: false,
     resizeTimer: null,
+    resizeRunning: false,
+    resizePending: false,
     lastCols: 0,
     lastRows: 0,
     controlBuffer: '',
@@ -563,9 +803,17 @@ async function ensureRuntime(tab: TerminalTab) {
   term.onData(data => {
     if (tab.status !== 'connected' || !runtime.sessionID) return
     runtime.pendingInput += data
+    // A queued cd has to reach the shell before anything typed while the
+    // session was still starting, otherwise the keys prepend the command.
+    if (runtime.pendingCd) return
     void flushInput(tab)
   })
   term.onResize(() => scheduleResize(tab))
+  searchAddon.onDidChangeResults(result => {
+    if (tab.id !== activeTabID.value) return
+    searchResultCount.value = result.resultCount
+    searchResultIndex.value = result.resultIndex
+  })
   writeNotice(tab, t('terminal.welcome'))
   fitTerminal(tab)
   return runtime
@@ -600,6 +848,7 @@ async function activateTab(id: string) {
   const tab = tabs.value.find(item => item.id === id)
   if (tab?.profileID) selectedProfileID.value = tab.profileID
   if (activeTabID.value === id) return
+  if (searchVisible.value) closeSearch(false)
   activeTabID.value = id
   tabMenu.visible = false
   dropActive.value = false
@@ -626,6 +875,7 @@ async function shutdownTab(tab: TerminalTab) {
 async function closeTab(id: string) {
   const index = tabs.value.findIndex(tab => tab.id === id)
   if (index < 0) return
+  if (activeTabID.value === id && searchVisible.value) closeSearch(false)
   const [tab] = tabs.value.splice(index, 1)
   if (activeTabID.value === id) {
     const next = tabs.value[Math.min(index, tabs.value.length - 1)] || null
@@ -640,6 +890,7 @@ async function closeTab(id: string) {
 }
 
 async function closeAllTabs() {
+  if (searchVisible.value) closeSearch(false)
   const all = [...tabs.value]
   tabs.value = []
   activeTabID.value = ''
@@ -797,12 +1048,14 @@ async function openShell(tab: TerminalTab) {
   const size = terminalSize(tab)
   const payload = { profile_id: tab.profileID, cols: size.cols, rows: size.rows }
   try {
-    return await postJSON<{ id: string }>('/api/session/shell/open', payload)
+    const opened = await postJSON<{ id: string }>('/api/session/shell/open', payload)
+    return { id: opened.id, ...size }
   } catch (error) {
     const hostKey = hostKeyFromError(error)
     if (!hostKey) throw error
     const trust = await confirmHostKey(hostKey)
-    return await postJSON<{ id: string }>('/api/session/shell/open', { ...payload, ...trust })
+    const opened = await postJSON<{ id: string }>('/api/session/shell/open', { ...payload, ...trust })
+    return { id: opened.id, ...size }
   }
 }
 
@@ -1236,13 +1489,13 @@ async function connect(tab: TerminalTab, cdPath = '') {
     }
     runtime.sessionID = opened.id
     tab.status = 'connected'
-    runtime.lastCols = 0
-    runtime.lastRows = 0
+    runtime.lastCols = opened.cols
+    runtime.lastRows = opened.rows
     if (cdPath.startsWith('/')) {
       tab.cwd = cdPath
       runtime.pendingCd = cdPath
     }
-    void sendResize(tab, true)
+    void sendResize(tab)
     void streamOutput(tab, opened.id)
     runtime.term.focus()
   } catch (error) {
@@ -1283,7 +1536,7 @@ async function streamOutput(tab: TerminalTab, id: string) {
         if (runtime.pendingCd) {
           const dir = runtime.pendingCd
           runtime.pendingCd = ''
-          runtime.pendingInput += `cd ${quoteShellPath(dir)}\r`
+          runtime.pendingInput = `cd ${quoteShellPath(dir)}\r${runtime.pendingInput}`
           void flushInput(tab)
         }
       }
@@ -1336,7 +1589,13 @@ function disconnectActiveTab() {
 }
 
 function clearActiveTab() {
-  if (activeTab.value) runtimeFor(activeTab.value)?.term.clear()
+  const tab = activeTab.value
+  if (!tab) return
+  const runtime = runtimeFor(tab)
+  runtime?.searchAddon.clearDecorations()
+  runtime?.term.clear()
+  searchResultCount.value = 0
+  searchResultIndex.value = -1
 }
 
 function activateCurrentTerminal() {
@@ -1366,14 +1625,34 @@ async function flushInput(tab: TerminalTab) {
   }
 }
 
-async function sendResize(tab: TerminalTab, force = false) {
+async function sendResize(tab: TerminalTab) {
   const runtime = runtimeFor(tab)
   if (!runtime || tab.status !== 'connected' || !runtime.sessionID) return
-  const { cols, rows } = terminalSize(tab)
-  if (!force && cols === runtime.lastCols && rows === runtime.lastRows) return
-  runtime.lastCols = cols
-  runtime.lastRows = rows
-  await postJSON('/api/session/shell/resize', { id: runtime.sessionID, cols, rows }).catch(() => undefined)
+  if (runtime.resizeRunning) {
+    runtime.resizePending = true
+    return
+  }
+  runtime.resizeRunning = true
+  try {
+    for (;;) {
+      runtime.resizePending = false
+      const id = runtime.sessionID
+      const { cols, rows } = terminalSize(tab)
+      if (cols === runtime.lastCols && rows === runtime.lastRows) return
+      // Coalesce into one in-flight request so an older response can never
+      // land after a newer size and leave the PTY stale.
+      const ok = await postJSON('/api/session/shell/resize', { id, cols, rows })
+        .then(() => true)
+        .catch(() => false)
+      if (!ok || runtime.sessionID !== id) return
+      runtime.lastCols = cols
+      runtime.lastRows = rows
+      if (!runtime.resizePending) return
+    }
+  } finally {
+    runtime.resizeRunning = false
+    if (runtime.resizePending) void sendResize(tab)
+  }
 }
 
 function scheduleResize(tab: TerminalTab) {
@@ -1400,6 +1679,7 @@ onMounted(async () => {
     lastProfileID = initialProfile
     persistProfile(initialProfile)
   }
+  await loadDisplaySettings()
   await loadProfiles()
   await createTab(lastProfileID || remoteProfiles.value[0]?.id || '')
   if (stageRef.value) {
@@ -1412,18 +1692,22 @@ onMounted(async () => {
   document.addEventListener('click', handleProfileMenuDismiss)
   window.addEventListener('keydown', handleProfileMenuKeydown)
   window.addEventListener('scroll', handleProfileMenuDismiss, true)
+  window.addEventListener('keydown', handleTerminalShortcut, true)
   activateCurrentTerminal()
 })
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
+  if (settingsSaveTimer !== null) window.clearTimeout(settingsSaveTimer)
+  settingsSaveTimer = null
   document.removeEventListener('click', handleTabMenuDismiss)
   window.removeEventListener('keydown', handleTabMenuKeydown)
   window.removeEventListener('scroll', handleTabMenuDismiss, true)
   document.removeEventListener('click', handleProfileMenuDismiss)
   window.removeEventListener('keydown', handleProfileMenuKeydown)
   window.removeEventListener('scroll', handleProfileMenuDismiss, true)
+  window.removeEventListener('keydown', handleTerminalShortcut, true)
   for (const tab of [...tabs.value]) {
     void shutdownTab(tab)
   }

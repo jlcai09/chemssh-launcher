@@ -24,7 +24,7 @@ func ClientConfigWithHostKeyPolicy(profile config.Profile, secrets secret.Store,
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
+		if !ok || password == "" {
 			return nil, fmt.Errorf("password is not set for profile %q", profile.Name)
 		}
 		auths = append(auths, ssh.Password(password))
@@ -40,7 +40,7 @@ func ClientConfigWithHostKeyPolicy(profile config.Profile, secrets secret.Store,
 			if err != nil {
 				return nil, err
 			}
-			if !ok {
+			if !ok || passphrase == "" {
 				return nil, fmt.Errorf("private key passphrase is not set for profile %q", profile.Name)
 			}
 			signer, err = ssh.ParsePrivateKeyWithPassphrase(key, []byte(passphrase))

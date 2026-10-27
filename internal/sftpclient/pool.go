@@ -25,16 +25,18 @@ const (
 
 // connectionPool manages a pool of SFTP connections for a single profile
 type connectionPool struct {
-	profile    config.Profile
-	secrets    secret.Store
-	policy     sshclient.HostKeyPolicy
-	mu         sync.Mutex
-	sshClient  *ssh.Client      // 共享的 SSH 连接
-	conns      []*pooledConn    // 连接池
-	available  chan *pooledConn // 可用连接队列
-	refs       int              // 引用计数
-	closed     bool
-	healthStop context.CancelFunc
+	profile     config.Profile
+	secrets     secret.Store
+	policy      sshclient.HostKeyPolicy
+	mu          sync.Mutex
+	reconnectMu sync.Mutex                  // serializes reconnect calls without holding mu while dialing
+	sshClient   *ssh.Client                 // 共享的 SSH 连接
+	dial        func() (*ssh.Client, error) // establishes the shared SSH connection; replaceable in tests
+	conns       []*pooledConn               // 连接池
+	available   chan *pooledConn            // 可用连接队列
+	refs        int                         // 引用计数
+	closed      bool
+	healthStop  context.CancelFunc
 }
 
 // pooledConn represents a single SFTP connection in the pool
@@ -43,6 +45,7 @@ type pooledConn struct {
 	lastUsed time.Time
 	inUse    bool
 	failed   bool
+	retired  bool
 }
 
 // pooledReadCloser wraps an io.ReadCloser and releases the pool connection when closed.
@@ -56,13 +59,63 @@ type pooledReadCloser struct {
 	once sync.Once
 }
 
+func (p *pooledReadCloser) Read(b []byte) (int, error) {
+	n, err := p.ReadCloser.Read(b)
+	if err != nil && !errors.Is(err, io.EOF) {
+		p.pool.markFailed(p.conn)
+	}
+	return n, err
+}
+
 func (p *pooledReadCloser) Close() error {
 	err := p.ReadCloser.Close()
+	if err != nil {
+		// A failed close leaves the channel in an unknown state, so never
+		// return it to the pool.
+		p.pool.markFailed(p.conn)
+	}
 	p.once.Do(func() {
 		p.conn.lastUsed = time.Now()
 		p.pool.release(p.conn)
 	})
 	return err
+}
+
+type pooledWriteCloser struct {
+	io.WriteCloser
+	pool *connectionPool
+	conn *pooledConn
+	once sync.Once
+}
+
+func (p *pooledWriteCloser) Write(b []byte) (int, error) {
+	n, err := p.WriteCloser.Write(b)
+	if err != nil {
+		p.pool.markFailed(p.conn)
+	}
+	return n, err
+}
+
+func (p *pooledWriteCloser) Close() error {
+	err := p.WriteCloser.Close()
+	if err != nil {
+		// A failed close leaves the channel in an unknown state, so never
+		// return it to the pool.
+		p.pool.markFailed(p.conn)
+	}
+	p.once.Do(func() {
+		p.conn.lastUsed = time.Now()
+		p.pool.release(p.conn)
+	})
+	return err
+}
+
+// markFailed flags a connection so release() removes it instead of returning
+// it to the available queue.
+func (p *connectionPool) markFailed(conn *pooledConn) {
+	p.mu.Lock()
+	conn.failed = true
+	p.mu.Unlock()
 }
 
 // newConnectionPool creates a new connection pool for the given profile
@@ -81,6 +134,9 @@ func newConnectionPool(profile config.Profile, secrets secret.Store, policy sshc
 		conns:     make([]*pooledConn, 0, poolMaxSize),
 		available: make(chan *pooledConn, poolMaxSize),
 		refs:      1,
+	}
+	pool.dial = func() (*ssh.Client, error) {
+		return sshclient.DialWithHostKeyPolicy(pool.profile, pool.secrets, pool.policy)
 	}
 
 	// 预创建最小数量的连接
@@ -102,10 +158,14 @@ func newConnectionPool(profile config.Profile, secrets secret.Store, policy sshc
 	return pool, nil
 }
 
-// createConnection creates a new SFTP connection using the shared SSH client
-func (p *connectionPool) createConnection() (*pooledConn, error) {
+// newPooledConn opens an SFTP client over the given SSH connection without
+// touching pool state, so callers can dial outside the pool lock.
+func newPooledConn(sshClient *ssh.Client) (*pooledConn, error) {
+	if sshClient == nil {
+		return nil, errors.New("SSH connection is not available")
+	}
 	// 复用同一个 SSH 连接创建新的 SFTP Client
-	sftpClient, err := sftp.NewClient(p.sshClient)
+	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +176,11 @@ func (p *connectionPool) createConnection() (*pooledConn, error) {
 		inUse:    false,
 		failed:   false,
 	}, nil
+}
+
+// createConnection creates a new SFTP connection using the shared SSH client
+func (p *connectionPool) createConnection() (*pooledConn, error) {
+	return newPooledConn(p.sshClient)
 }
 
 // acquire gets an available connection from the pool
@@ -177,6 +242,11 @@ func (p *connectionPool) release(conn *pooledConn) {
 		return
 	}
 
+	if conn.retired {
+		_ = conn.client.Close()
+		return
+	}
+
 	conn.inUse = false
 	conn.lastUsed = time.Now()
 
@@ -195,7 +265,10 @@ func (p *connectionPool) release(conn *pooledConn) {
 	}
 }
 
-// removeConnection removes and closes a connection from the pool
+// removeConnection removes and closes a connection from the pool.
+// The caller must hold p.mu. Idle connections live in the available queue, so
+// dropping one must also purge that entry; otherwise acquire() hands out a
+// closed client and the queue keeps losing slots to dead connections.
 func (p *connectionPool) removeConnection(conn *pooledConn) {
 	// 从连接列表中移除
 	for i, c := range p.conns {
@@ -204,8 +277,35 @@ func (p *connectionPool) removeConnection(conn *pooledConn) {
 			break
 		}
 	}
+	// 从可用队列中移除
+	kept := make([]*pooledConn, 0, cap(p.available))
+	for {
+		select {
+		case queued := <-p.available:
+			if queued != conn {
+				kept = append(kept, queued)
+			}
+			continue
+		default:
+		}
+		break
+	}
+	for _, queued := range kept {
+		p.available <- queued
+	}
 	// 关闭 SFTP 客户端
 	_ = conn.client.Close()
+}
+
+// offerLocked returns an idle connection to the available queue. The caller
+// must hold p.mu. A full queue means the pool is already saturated, so the
+// connection is closed instead of blocking every other pool operation.
+func (p *connectionPool) offerLocked(conn *pooledConn) {
+	select {
+	case p.available <- conn:
+	default:
+		p.removeConnection(conn)
+	}
 }
 
 // healthCheckLoop periodically checks connection health
@@ -268,7 +368,7 @@ func (p *connectionPool) healthCheck() {
 			break
 		}
 		p.conns = append(p.conns, newConn)
-		p.available <- newConn
+		p.offerLocked(newConn)
 	}
 }
 
@@ -276,6 +376,148 @@ func (p *connectionPool) healthCheck() {
 func (p *connectionPool) isConnectionAlive(conn *pooledConn) bool {
 	_, err := conn.client.Stat(".")
 	return err == nil
+}
+
+// reconnect replaces the shared SSH connection and every pooled SFTP client
+// when the transport is no longer usable. Healthy pools are left untouched, so
+// callers can invoke it after any transfer failure without disrupting peers.
+// Dialing happens outside p.mu so acquire/release/healthCheck keep working
+// while a new transport is being established.
+func (p *connectionPool) reconnect() error {
+	// Serialize reconnects: two concurrent calls could otherwise interleave
+	// teardown, dial, and install and leak one of the new SSH clients.
+	p.reconnectMu.Lock()
+	defer p.reconnectMu.Unlock()
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errors.New("connection pool is closed")
+	}
+	sshClient := p.sshClient
+	p.mu.Unlock()
+
+	// The probe opens a fresh channel on the existing SSH client. Keep it out
+	// of the pool lock so a hung probe cannot stall the whole pool.
+	if probeSSH(sshClient) == nil {
+		p.mu.Lock()
+		if !p.closed {
+			p.dropFailedLocked()
+		}
+		p.mu.Unlock()
+		return nil
+	}
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return errors.New("connection pool is closed")
+	}
+	for _, conn := range p.conns {
+		conn.retired = true
+		conn.failed = true
+		_ = conn.client.Close()
+	}
+	p.conns = nil
+	for {
+		select {
+		case <-p.available:
+			continue
+		default:
+		}
+		break
+	}
+	oldSSH := p.sshClient
+	p.sshClient = nil
+	p.mu.Unlock()
+
+	if oldSSH != nil {
+		_ = oldSSH.Close()
+	}
+
+	newSSH, err := p.dial()
+	if err != nil {
+		return fmt.Errorf("failed to reconnect SSH: %w", err)
+	}
+
+	conns := make([]*pooledConn, 0, poolMinSize)
+	for i := 0; i < poolMinSize; i++ {
+		conn, err := newPooledConn(newSSH)
+		if err != nil {
+			_ = newSSH.Close()
+			for _, created := range conns {
+				_ = created.client.Close()
+			}
+			return fmt.Errorf("failed to recreate SFTP connection %d: %w", i+1, err)
+		}
+		conns = append(conns, conn)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		_ = newSSH.Close()
+		for _, conn := range conns {
+			_ = conn.client.Close()
+		}
+		return errors.New("connection pool is closed")
+	}
+	p.sshClient = newSSH
+	p.conns = append(p.conns, conns...)
+	for _, conn := range conns {
+		p.offerLocked(conn)
+	}
+	return nil
+}
+
+// dropFailedLocked removes idle connections that were flagged during a
+// transfer and replenishes the pool. The caller must hold p.mu.
+func (p *connectionPool) dropFailedLocked() {
+	var failed []*pooledConn
+	for _, conn := range p.conns {
+		// In-flight connections are dropped by release() once their owner is
+		// done; closing them here would break the active transfer.
+		if conn.failed && !conn.inUse {
+			failed = append(failed, conn)
+		}
+	}
+	if len(failed) > 0 {
+		for _, conn := range failed {
+			p.removeConnection(conn)
+		}
+	}
+	// Top the pool back up so a failed connection that release() already
+	// dropped does not leave the pool permanently below its minimum.
+	for len(p.conns) < poolMinSize {
+		conn, err := p.createConnection()
+		if err != nil {
+			return
+		}
+		p.conns = append(p.conns, conn)
+		p.offerLocked(conn)
+	}
+}
+
+// probeSSH reports whether the given SSH connection can still open an SFTP
+// channel. It must be called without p.mu held.
+func probeSSH(sshClient *ssh.Client) error {
+	if sshClient == nil {
+		return errors.New("SSH connection is not available")
+	}
+	done := make(chan error, 1)
+	go func() {
+		client, err := sftp.NewClient(sshClient)
+		if err == nil {
+			err = client.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(2 * time.Second):
+		return errors.New("SSH connection probe timed out")
+	}
 }
 
 // closeAll closes all connections in the pool

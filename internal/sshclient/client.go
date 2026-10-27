@@ -35,9 +35,21 @@ func DialWithHostKeyPolicy(profile config.Profile, secrets secret.Store, policy 
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, address, cfg)
 	if err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, describeHandshakeError(profile, address, err)
 	}
 	return ssh.NewClient(clientConn, chans, reqs), nil
+}
+
+// describeHandshakeError prefixes plain authentication failures with the exact
+// account and address that was tried. Copies of a profile easily keep the old
+// login, and bare "unable to authenticate" hides which account was attempted.
+// Host key and network errors are returned unchanged so their typed handling
+// keeps working.
+func describeHandshakeError(profile config.Profile, address string, err error) error {
+	if !strings.Contains(err.Error(), "unable to authenticate") {
+		return err
+	}
+	return fmt.Errorf("%s@%s: %w", profile.SSHUser, address, err)
 }
 
 type RemoteProcess struct {

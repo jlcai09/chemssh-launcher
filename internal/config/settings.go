@@ -16,13 +16,29 @@ const (
 	LanguageEnglish = "en"
 )
 
+const (
+	DefaultTerminalFontSize   = 13
+	MinTerminalFontSize       = 10
+	MaxTerminalFontSize       = 24
+	DefaultTerminalScrollback = 5000
+	MinTerminalScrollback     = 1000
+	MaxTerminalScrollback     = 50000
+)
+
 type UISettings struct {
-	Version  int    `json:"version"`
-	Language string `json:"language"`
+	Version            int    `json:"version"`
+	Language           string `json:"language"`
+	TerminalFontSize   int    `json:"terminal_font_size"`
+	TerminalScrollback int    `json:"terminal_scrollback"`
 }
 
 func DefaultUISettings() UISettings {
-	return UISettings{Version: 1, Language: LanguageSystem}
+	return UISettings{
+		Version:            1,
+		Language:           LanguageSystem,
+		TerminalFontSize:   DefaultTerminalFontSize,
+		TerminalScrollback: DefaultTerminalScrollback,
+	}
 }
 
 func NormalizeUILanguage(value string) (string, bool) {
@@ -61,13 +77,32 @@ func LoadUISettingsFile(path string) (UISettings, error) {
 	if err := json.Unmarshal(b, &settings); err != nil {
 		return DefaultUISettings(), nil
 	}
+	return normalizeUISettings(settings), nil
+}
+
+func normalizeUISettings(settings UISettings) UISettings {
+	settings.Version = 1
 	language, ok := NormalizeUILanguage(settings.Language)
 	if !ok {
 		language = LanguageSystem
 	}
-	settings.Version = 1
 	settings.Language = language
-	return settings, nil
+	settings.TerminalFontSize = normalizeLoadedRange(settings.TerminalFontSize, DefaultTerminalFontSize, MinTerminalFontSize, MaxTerminalFontSize)
+	settings.TerminalScrollback = normalizeLoadedRange(settings.TerminalScrollback, DefaultTerminalScrollback, MinTerminalScrollback, MaxTerminalScrollback)
+	return settings
+}
+
+func normalizeLoadedRange(value, fallback, min, max int) int {
+	if value == 0 {
+		return fallback
+	}
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func SaveUISettings(settings UISettings) error {
@@ -85,6 +120,18 @@ func SaveUISettingsFile(path string, settings UISettings) error {
 	}
 	settings.Version = 1
 	settings.Language = language
+	if settings.TerminalFontSize == 0 {
+		settings.TerminalFontSize = DefaultTerminalFontSize
+	}
+	if settings.TerminalFontSize < MinTerminalFontSize || settings.TerminalFontSize > MaxTerminalFontSize {
+		return fmt.Errorf("terminal font size must be between %d and %d", MinTerminalFontSize, MaxTerminalFontSize)
+	}
+	if settings.TerminalScrollback == 0 {
+		settings.TerminalScrollback = DefaultTerminalScrollback
+	}
+	if settings.TerminalScrollback < MinTerminalScrollback || settings.TerminalScrollback > MaxTerminalScrollback {
+		return fmt.Errorf("terminal scrollback must be between %d and %d", MinTerminalScrollback, MaxTerminalScrollback)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

@@ -35,6 +35,9 @@ coverage.*
 /profiles.json
 /vault.json
 
+# Local agent memory written into the repo working tree
+/.workbuddy/
+
 # IDE/editor
 .idea/
 .vscode/

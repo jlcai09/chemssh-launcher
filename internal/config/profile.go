@@ -1,5 +1,11 @@
 package config
 
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
 const (
 	ProfileKindRemote = "remote"
 	ProfileKindLocal  = "local"
@@ -7,6 +13,10 @@ const (
 	AuthPassword   = "password"
 	AuthPrivateKey = "private_key"
 )
+
+// ErrProfileInvalid marks validation failures so callers can return a client
+// error instead of a server error.
+var ErrProfileInvalid = errors.New("profile invalid")
 
 const DefaultStartCommand = `source .venv/bin/activate
 unset PS1
@@ -68,6 +78,85 @@ func NewLocalProfileDefaults() Profile {
 	p.PreStartCommands = ""
 	p.StartCommand = ""
 	return p
+}
+
+// Validate checks the fields the launcher needs before a profile can be saved
+// through the API, the CLI, or an import. FileStore itself stays permissive so
+// partially built profiles can still be round-tripped by callers that manage
+// their own defaults.
+func (p Profile) Validate() error {
+	if strings.TrimSpace(p.Name) == "" {
+		return invalidProfile("profile name is required")
+	}
+	if p.IsLocal() {
+		if strings.TrimSpace(p.LocalHost) == "" {
+			return invalidProfile("local ChemSSH host is required")
+		}
+		if p.LocalPort < 1 || p.LocalPort > 65535 {
+			return invalidProfile("local ChemSSH port must be between 1 and 65535")
+		}
+		return nil
+	}
+	if strings.TrimSpace(p.SSHHost) == "" {
+		return invalidProfile("SSH host is required")
+	}
+	if p.SSHPort < 1 || p.SSHPort > 65535 {
+		return invalidProfile("SSH port must be between 1 and 65535")
+	}
+	if strings.TrimSpace(p.SSHUser) == "" {
+		return invalidProfile("SSH user is required")
+	}
+	switch p.AuthMethod {
+	case AuthPassword:
+	case AuthPrivateKey:
+		if strings.TrimSpace(p.PrivateKeyPath) == "" {
+			return invalidProfile("private key path is required for private key authentication")
+		}
+	default:
+		return invalidProfile("auth method must be password or private_key")
+	}
+	if strings.TrimSpace(p.RemoteHost) == "" {
+		return invalidProfile("remote ChemSSH host is required")
+	}
+	if p.RemoteHost == "0.0.0.0" || p.RemoteHost == "::" {
+		return invalidProfile("remote ChemSSH host must be a reachable address, not a wildcard bind address")
+	}
+	if p.RemotePort < 1 || p.RemotePort > 65535 {
+		return invalidProfile("remote ChemSSH port must be between 1 and 65535")
+	}
+	if strings.TrimSpace(p.LocalHost) == "" {
+		return invalidProfile("local bind host is required")
+	}
+	if p.LocalPort < 1 || p.LocalPort > 65535 {
+		return invalidProfile("local bind port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func invalidProfile(message string) error {
+	return fmt.Errorf("%w: %s", ErrProfileInvalid, message)
+}
+
+// Warnings reports configurations that are legal but easy to misread. They are
+// surfaced to the user (profile log, CLI output, form hint) instead of being
+// rejected, because each one still has a well-defined runtime behaviour.
+func (p Profile) Warnings() []string {
+	var warnings []string
+	if p.UsesNonLoopbackLocalHost() {
+		warnings = append(warnings, "local bind host "+p.LocalHost+" is not loopback; the tunnel is reachable from other machines")
+	}
+	if p.IsLocal() {
+		// A local profile drives ChemSSH through LocalHost/LocalPort only, so a
+		// leftover remote host/port would silently be ignored.
+		if (p.RemoteHost != "" || p.RemotePort > 0) && (p.RemoteHost != p.LocalHost || p.RemotePort != p.LocalPort) {
+			warnings = append(warnings, "local profile ignores the remote host and port; the launcher uses "+p.LocalAddress())
+		}
+		return warnings
+	}
+	if p.LocalHost == p.SSHHost && p.LocalPort == p.SSHPort {
+		warnings = append(warnings, "local bind "+p.LocalAddress()+" is the SSH endpoint itself; the tunnel listener cannot share the SSH port")
+	}
+	return warnings
 }
 
 func (p Profile) EffectiveKind() string {

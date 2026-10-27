@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -243,6 +242,7 @@ func (s *Server) handleLocalCopy(w http.ResponseWriter, r *http.Request) {
 		TargetPath   string `json:"target_path"`
 		RelativePath string `json:"relative_path"`
 		TransferID   string `json:"transfer_id"`
+		Resume       bool   `json:"resume"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -254,12 +254,32 @@ func (s *Server) handleLocalCopy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.copyLocalFile(req.SourcePath, req.TargetPath, req.RelativePath, req.TransferID); err != nil {
+	sourcePath := localCleanPath(req.SourcePath)
+	targetDir := localCleanPath(req.TargetPath)
+	targetInfo, err := os.Stat(targetDir)
+	if err != nil {
 		s.finishProgress(req.TransferID, err)
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	s.finishProgress(req.TransferID, nil)
+	if !targetInfo.IsDir() {
+		err := fmt.Errorf("target is not a directory: %s", targetDir)
+		s.finishProgress(req.TransferID, err)
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	targetName, err := cleanLocalTransferName(req.RelativePath, filepath.Base(sourcePath))
+	if err != nil {
+		s.finishProgress(req.TransferID, err)
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	src := newLocalFileSource(sourcePath)
+	dst := newLocalFileTarget(filepath.Join(targetDir, targetName))
+	if err := s.runResumableTransfer(req.TransferID, req.Resume, targetName, src, dst); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
@@ -329,49 +349,6 @@ func (e *localEntry) resolveLink() {
 	e.IsDir = info.IsDir()
 	e.Size = info.Size()
 	e.ModTime = info.ModTime()
-}
-
-func (s *Server) copyLocalFile(sourcePath, targetDir, relativePath, transferID string) error {
-	source := localCleanPath(sourcePath)
-	targetBase := localCleanPath(targetDir)
-	info, err := os.Stat(source)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return fmt.Errorf("directory transfer is not supported yet: %s", source)
-	}
-	targetInfo, err := os.Stat(targetBase)
-	if err != nil {
-		return err
-	}
-	if !targetInfo.IsDir() {
-		return fmt.Errorf("target is not a directory: %s", targetBase)
-	}
-	targetRel, err := cleanLocalTransferName(relativePath, filepath.Base(source))
-	if err != nil {
-		return err
-	}
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	target := filepath.Join(targetBase, targetRel)
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(target)
-	if err != nil {
-		return err
-	}
-	src := s.progressReader(transferID, info.Size(), in)
-	buf := make([]byte, copyBufferSize)
-	if _, err := io.CopyBuffer(out, src, buf); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func cleanLocalTransferName(value, fallback string) (string, error) {

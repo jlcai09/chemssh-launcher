@@ -23,6 +23,7 @@
   --accent-2: #c8743d;
   --success: #168a45;
   --danger: #b42318;
+  --warning: #b06a00;
   --text-muted: #5f6f7d;
   --log-bg: #101820;
   --log-bg-soft: #13202a;
@@ -703,6 +704,23 @@ p,
 .xftp-tab.is-tab-drop-after::after,
 .terminal-tab.is-tab-drop-after::after {
   right: -5px;
+}
+
+.xftp-new-fade-enter-active {
+  transition: opacity 0.09s ease-out, transform 0.11s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.xftp-new-fade-leave-active {
+  transition: opacity 0.06s ease-in;
+}
+
+.xftp-new-fade-enter-from,
+.xftp-new-fade-leave-to {
+  opacity: 0;
+}
+
+.xftp-new-fade-enter-from {
+  transform: translateY(-3px);
 }
 
 .xftp-new-menu {
@@ -1816,8 +1834,8 @@ p,
 }
 
 .transfer-row > :nth-child(2) {
-  width: 72px;
-  flex: 0 0 72px;
+  width: 108px;
+  flex: 0 0 108px;
 }
 
 .transfer-row > :nth-child(3) {
@@ -2660,6 +2678,13 @@ body,
 .status-dot.is-done { background: var(--success); }
 .status-dot.is-error { background: var(--danger); }
 .status-dot.is-paused { background: var(--accent-2); }
+.status-dot.is-retrying {
+  background: var(--warning);
+  animation: state-dot-pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.is-retrying { animation: none !important; }
+}
 
 .backend-grid {
   gap: 0;
@@ -2915,6 +2940,54 @@ body,
   font-size: 10px;
   letter-spacing: 0;
   text-align: center;
+}
+
+.terminal-sessions-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-sessions-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-sessions-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.terminal-sessions-refresh:hover:not(:disabled) {
+  background: var(--soft-bg);
+  color: var(--text);
+}
+
+.terminal-sessions-refresh:disabled {
+  cursor: default;
+}
+
+.terminal-sessions-refresh.is-refreshing .el-icon {
+  animation: terminal-sessions-spin 0.7s linear infinite;
+}
+
+@keyframes terminal-sessions-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .terminal-session-list {

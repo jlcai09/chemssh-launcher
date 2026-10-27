@@ -213,7 +213,7 @@ async function exportProfiles() {
   const res = await fetch('/api/backend/export')
   if (!res.ok) {
     const data = await res.json()
-    throw new Error(data.error || '导出失败')
+    throw new Error(data.error || t('backend.exportFailed'))
   }
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)

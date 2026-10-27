@@ -93,8 +93,8 @@
           <el-button :icon="Monitor" :disabled="!current.id || isLocalProfile" :title="t('launcher.sshTerminal')" @click.stop="openTerminal">
             <span>{{ t('launcher.terminalShort') }}</span>
           </el-button>
-          <el-button :icon="CaretRight" type="primary" :disabled="!current.id" :title="t('launcher.start')" @click.stop="startSession">
-            <span>{{ t('launcher.start') }}</span>
+          <el-button :icon="CaretRight" type="primary" :disabled="!current.id" :loading="phaseStarting" :title="t('launcher.start')" @click.stop="startSession">
+            <span>{{ phaseStarting ? t('launcher.phaseStarting') : t('launcher.start') }}</span>
           </el-button>
           <el-dropdown trigger="click" placement="bottom-end" @command="handleToolbarCommand">
             <el-button :icon="MoreFilled" :title="t('launcher.moreActions')" />
@@ -175,6 +175,10 @@
               <el-form-item :label="isLocalProfile ? t('launcher.localTargetHost') : t('launcher.localHost')"><el-input v-model="current.local_host" :placeholder="t('launcher.placeholder.localHost')" /></el-form-item>
               <el-form-item :label="isLocalProfile ? t('launcher.localTargetPort') : t('launcher.localPort')"><el-input-number v-model="current.local_port" :min="1" :max="65535" /></el-form-item>
             </div>
+            <p v-if="localBindWarning" class="field-warning">
+              <el-icon><WarningFilled /></el-icon>
+              <span>{{ localBindWarning }}</span>
+            </p>
             <el-checkbox v-model="current.open_browser">{{ t('launcher.openBrowser') }}</el-checkbox>
           </section>
 
@@ -224,12 +228,12 @@
               <h2><el-icon><Monitor /></el-icon>{{ t('launcher.sessionOverview') }}</h2>
             </div>
             <div class="session-top">
-              <div class="session-badge" :class="{ 'is-live': isRunning }">
-                <el-icon><Check v-if="isRunning" /><CaretRight v-else /></el-icon>
+              <div class="session-badge" :class="{ 'is-live': currentPhase === 'ready' }">
+                <el-icon><Check v-if="currentPhase === 'ready'" /><CaretRight v-else /></el-icon>
               </div>
               <div class="session-copy">
                 <div class="session-name">
-                  {{ isRunning ? t('launcher.sessionRunning') : t('launcher.sessionIdle') }}
+                  {{ sessionHeadline }}
                 </div>
                 <div class="session-sub">
                   <span>{{ kindLabel }}</span><i />
@@ -237,7 +241,15 @@
                   <span>{{ current.local_url_path || '/' }}</span>
                 </div>
               </div>
-              <span class="session-pill" :class="{ 'is-live': isRunning }"><i />{{ isRunning ? t('launcher.active') : t('launcher.idle') }}</span>
+              <span class="session-pill" :class="{ 'is-live': currentPhase === 'ready', 'is-paused': currentPhase === 'paused', 'is-failed': currentPhase === 'failed' }"><i />{{ sessionPill }}</span>
+            </div>
+
+            <div v-if="currentFailure" class="session-failure">
+              <div class="session-failure-head">
+                <strong>{{ t('launcher.lastFailure') }}</strong>
+                <button type="button" class="session-failure-link" @click="focusLogs">{{ t('launcher.viewLogs') }}</button>
+              </div>
+              <p>{{ currentFailure }}</p>
             </div>
 
             <div class="routebar">
@@ -271,12 +283,41 @@
               <span class="aside">
                 <b v-if="current.id" class="is-live">{{ t('launcher.logsLive') }}</b>
                 <span v-else>{{ t('launcher.logsIdle') }}</span>
+                <label v-if="logs.length" class="log-filter">
+                  <el-icon><Search /></el-icon>
+                  <input
+                    v-model="logQuery"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    :placeholder="t('launcher.logFilterPlaceholder')"
+                    :aria-label="t('launcher.logFilter')"
+                  />
+                  <button
+                    v-if="logQuery"
+                    type="button"
+                    class="log-filter-clear"
+                    :title="t('launcher.logFilterClear')"
+                    @mousedown.prevent
+                    @click="logQuery = ''"
+                  >
+                    <el-icon><Close /></el-icon>
+                  </button>
+                </label>
+                <span v-if="logQuery" class="log-filter-count">{{ t('launcher.logFilterCount', { shown: visibleLogs.length, total: logs.length }) }}</span>
+                <button type="button" class="card-icon-btn" :disabled="!logs.length" :title="t('launcher.copyLogs')" @click="copyLogs">
+                  <el-icon><DocumentCopy /></el-icon>
+                </button>
+                <button type="button" class="card-icon-btn" :disabled="!logs.length" :title="t('launcher.exportLogs')" @click="exportLogs">
+                  <el-icon><Download /></el-icon>
+                </button>
                 <button type="button" class="card-icon-btn" :title="t('launcher.refreshLogs')" @click="refreshLogs(true)">
                   <el-icon><Refresh /></el-icon>
                 </button>
               </span>
             </div>
-            <pre v-if="logs.length" ref="logRef" @scroll="logScroller.onScroll">{{ logs.join('\n') }}</pre>
+            <pre v-if="visibleLogs.length" ref="logRef" @scroll="logScroller.onScroll">{{ visibleLogs.join('\n') }}</pre>
+            <p v-else-if="logs.length" class="logs-empty">{{ t('launcher.logsNoMatch', { query: logQuery }) }}</p>
             <p v-else class="logs-empty">{{ t('launcher.logsEmpty') }}</p>
           </section>
 
@@ -327,17 +368,48 @@
         <button type="button" role="menuitem" :disabled="menuProfileIsLocal" @click="openMenuProfileInSftp">{{ t('launcher.openSftp') }}</button>
       </div>
     </Teleport>
+
+    <el-dialog
+      v-model="discardDialog.visible"
+      :title="t('launcher.confirmDiscardTitle')"
+      width="420px"
+      align-center
+      :close-on-click-modal="false"
+      class="discard-changes-dialog"
+      @closed="resolveDiscard('cancel')"
+    >
+      <p class="discard-changes-body">{{ t('launcher.confirmDiscardBody') }}</p>
+      <template #footer>
+        <div class="discard-changes-actions">
+          <button type="button" class="discard-changes-cancel" @click="resolveDiscard('cancel')">{{ t('launcher.cancel') }}</button>
+          <el-button @click="resolveDiscard('discard')">{{ t('launcher.confirmDiscardLeave') }}</el-button>
+          <el-button type="primary" @click="resolveDiscard('save')">{{ t('launcher.confirmDiscardSave') }}</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowRight, CaretRight, Check, Clock, Close, CloseBold, Connection, Cpu, Delete, FolderOpened, Lock, Monitor, MoreFilled, Plus, Refresh, Search, Setting, SwitchButton } from '@element-plus/icons-vue'
+import { ArrowRight, CaretRight, Check, Clock, Close, CloseBold, Connection, Cpu, Delete, DocumentCopy, Download, FolderOpened, Lock, Monitor, MoreFilled, Plus, Refresh, Search, Setting, SwitchButton, WarningFilled } from '@element-plus/icons-vue'
 import { api, postJSON, putJSON, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import { t } from '../i18n'
+
+type SessionPhase = 'stopped' | 'starting' | 'ready' | 'paused' | 'failed'
+
+interface SessionStatus {
+  running: boolean
+  forwarding?: boolean
+  ready?: boolean
+  name?: string
+  open_seq?: number
+  phase: SessionPhase
+  last_failure?: { message: string; at: string } | null
+}
 
 const defaults = ref<Profile | null>(null)
 const profiles = ref<Profile[]>([])
@@ -348,6 +420,7 @@ const draftSnapshot = ref<Partial<Profile>>({})
 const draftSecrets = ref({ password: '', passphrase: '', securityToken: '' })
 const activeProfileId = ref('')
 const runningProfileIds = ref(new Set<string>())
+const statusByProfile = ref<Record<string, SessionStatus>>({})
 const draggingProfileID = ref('')
 const profileDropTarget = reactive<{ id: string; position: 'before' | 'after' }>({ id: '', position: 'before' })
 const profileMenu = reactive<{ visible: boolean; x: number; y: number; profileID: string }>({
@@ -358,6 +431,7 @@ const profileMenu = reactive<{ visible: boolean; x: number; y: number; profileID
 })
 let suppressProfileClickUntil = 0
 const logs = ref<string[]>([])
+const logQuery = ref('')
 const logRef = ref<HTMLElement | null>(null)
 const logScroller = createAutoScroll(() => logRef.value)
 const passwordInput = ref('')
@@ -389,7 +463,48 @@ const filteredProfiles = computed(() => {
       .some(value => String(value || '').toLowerCase().includes(query))
   )
 })
-const isRunning = computed(() => Boolean(current.id && runningProfileIds.value.has(current.id)))
+const currentStatus = computed<SessionStatus | null>(() => (current.id ? statusByProfile.value[current.id] || null : null))
+const currentPhase = computed<SessionPhase>(() => currentStatus.value?.phase || 'stopped')
+const phaseStarting = computed(() => currentPhase.value === 'starting')
+const phaseLabel = computed(() => {
+  switch (currentPhase.value) {
+    case 'starting': return t('launcher.phaseStarting')
+    case 'ready': return t('launcher.phaseReady')
+    case 'paused': return t('launcher.phasePaused')
+    case 'failed': return t('launcher.phaseFailed')
+    default: return t('launcher.phaseStopped')
+  }
+})
+const phaseShortLabel = computed(() => {
+  switch (currentPhase.value) {
+    case 'starting': return t('launcher.phaseStartingShort')
+    case 'ready': return t('launcher.phaseReadyShort')
+    case 'paused': return t('launcher.phasePausedShort')
+    case 'failed': return t('launcher.phaseFailedShort')
+    default: return t('launcher.phaseStoppedShort')
+  }
+})
+const currentFailure = computed(() => (currentPhase.value === 'failed' ? currentStatus.value?.last_failure?.message || '' : ''))
+const sessionHeadline = computed(() => {
+  if (!current.id) return t('launcher.sessionIdle')
+  if (currentPhase.value === 'ready') return t('launcher.sessionRunning')
+  if (currentPhase.value === 'stopped') return t('launcher.sessionIdle')
+  return phaseLabel.value
+})
+const sessionPill = computed(() => (current.id ? phaseShortLabel.value : t('launcher.idle')))
+const visibleLogs = computed(() => {
+  const query = logQuery.value.trim().toLowerCase()
+  if (!query) return logs.value
+  return logs.value.filter(line => line.toLowerCase().includes(query))
+})
+// Mirrors config.Profile.UsesNonLoopbackLocalHost; only the tunnel profile has a
+// bind address that can expose ChemSSH to other machines.
+const localBindWarning = computed(() => {
+  if (isLocalProfile.value) return ''
+  const host = (current.local_host || '').trim()
+  if (!host || host === '127.0.0.1' || host === 'localhost' || host === '::1') return ''
+  return t('launcher.warnNonLoopbackBind', { host })
+})
 const kindLabel = computed(() => (isLocalProfile.value ? t('launcher.kindLocal') : t('launcher.kindRemote')))
 const authLabel = computed(() => {
   if (isLocalProfile.value) return current.has_security_token ? t('launcher.securityToken') : t('launcher.noAuth')
@@ -520,16 +635,47 @@ function restoreDraft() {
   logs.value = []
 }
 
-function selectDraft() {
+type DiscardChoice = 'save' | 'discard' | 'cancel'
+
+// Dropping unsaved edits has three possible outcomes, which the two-button
+// message box cannot express, so the confirm is a real dialog.
+const discardDialog = reactive<{ visible: boolean; resolve: ((choice: DiscardChoice) => void) | null }>({
+  visible: false,
+  resolve: null
+})
+
+function resolveDiscard(choice: DiscardChoice) {
+  const resolve = discardDialog.resolve
+  discardDialog.resolve = null
+  discardDialog.visible = false
+  resolve?.(choice)
+}
+
+async function confirmDiscardChanges(): Promise<boolean> {
+  if (!isDirty.value) return true
+  // Never stack two prompts: the second would silently strand the first promise.
+  if (discardDialog.resolve) return false
+  const choice = await new Promise<DiscardChoice>(resolve => {
+    discardDialog.resolve = resolve
+    discardDialog.visible = true
+  })
+  if (choice === 'cancel') return false
+  if (choice === 'discard') return true
+  return await saveProfile()
+}
+
+async function selectDraft() {
   if (!draftOpen.value || draftActive.value) return
+  if (!(await confirmDiscardChanges())) return
   restoreDraft()
 }
 
-function newProfile() {
+async function newProfile() {
   if (draftOpen.value) {
-    selectDraft()
+    await selectDraft()
     return
   }
+  if (!(await confirmDiscardChanges())) return
   draftOpen.value = true
   draftSnapshot.value = {}
   draftSecrets.value = { password: '', passphrase: '', securityToken: '' }
@@ -537,9 +683,10 @@ function newProfile() {
   logs.value = []
 }
 
-function selectProfile(profile: Profile) {
+async function selectProfile(profile: Profile) {
   if (Date.now() < suppressProfileClickUntil) return
   if (profile.id === current.id) return
+  if (!(await confirmDiscardChanges())) return
   snapshotDraft()
   applyProfile(profile)
   // Log stream will auto-reconnect via watch on current.id
@@ -685,22 +832,35 @@ async function loadProfiles() {
   if (!current.id && !draftOpen.value && profiles.value[0]) applyProfile(profiles.value[0])
 }
 
+// An empty input means "leave the stored secret untouched". Sending "replace"
+// with an empty value would wipe the saved secret and leave the profile with
+// has_password=true but nothing to authenticate with.
+function effectiveSecretAction(action: 'keep' | 'replace' | 'clear', value: string) {
+  return action === 'replace' && !value ? 'keep' : action
+}
+
 async function saveProfile() {
   const wasDraft = !current.id
   const payload = {
     profile: current,
     secrets: {
-      password_action: passwordAction.value,
+      password_action: effectiveSecretAction(passwordAction.value, passwordInput.value),
       password: passwordInput.value,
-      passphrase_action: passphraseAction.value,
+      passphrase_action: effectiveSecretAction(passphraseAction.value, passphraseInput.value),
       passphrase: passphraseInput.value,
-      security_token_action: securityTokenAction.value,
+      security_token_action: effectiveSecretAction(securityTokenAction.value, securityTokenInput.value),
       security_token: securityTokenInput.value
     }
   }
-  const saved = current.id
-    ? await putJSON<Profile>(`/api/profiles/${current.id}`, payload)
-    : await postJSON<Profile>('/api/profiles', payload)
+  let saved: Profile
+  try {
+    saved = current.id
+      ? await putJSON<Profile>(`/api/profiles/${current.id}`, payload)
+      : await postJSON<Profile>('/api/profiles', payload)
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+    return false
+  }
   if (wasDraft) {
     draftOpen.value = false
     draftSnapshot.value = {}
@@ -710,6 +870,7 @@ async function saveProfile() {
   await loadProfiles()
   await refreshLogs(true)
   ElMessage.success(t('launcher.profileSaved'))
+  return true
 }
 
 async function deleteProfile() {
@@ -719,8 +880,14 @@ async function deleteProfile() {
 
 async function deleteProfileByID(profile: Profile) {
   if (!profile.id) return
+  const name = profile.name || t('launcher.unnamed')
+  const running = Boolean(statusByProfile.value[profile.id]?.running)
   try {
-    await ElMessageBox.confirm(t('launcher.confirmDelete', { name: profile.name || t('launcher.unnamed') }), t('launcher.confirmTitle'), { type: 'warning' })
+    await ElMessageBox.confirm(
+      running ? t('launcher.confirmDeleteRunning', { name }) : t('launcher.confirmDelete', { name }),
+      t('launcher.confirmTitle'),
+      { type: 'warning', confirmButtonText: t('launcher.actions.delete'), cancelButtonText: t('launcher.cancel') }
+    )
   } catch {
     return
   }
@@ -750,8 +917,14 @@ async function withHostKey<T>(path: string, payload: Record<string, unknown>) {
 
 async function testProfile() {
   if (!current.id) return ElMessage.warning(t('launcher.warnSaveFirst'))
-  await withHostKey('/api/profile-test', { id: current.id })
-  ElMessage.success(t('launcher.sshTestPassed'))
+  try {
+    await withHostKey('/api/profile-test', { id: current.id })
+    ElMessage.success(t('launcher.sshTestPassed'))
+  } catch (error) {
+    // ElMessageBox rejects with 'cancel'/'close' when the host key dialog is dismissed
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error((error as Error).message)
+  }
 }
 
 function openTerminal() {
@@ -766,9 +939,15 @@ function openTerminal() {
 
 async function startSession() {
   if (!current.id) return ElMessage.warning(t('launcher.warnSaveFirst'))
-  await withHostKey('/api/session/start', { id: current.id })
-  await refreshStatus()
-  ElMessage.success(t('launcher.requestedStart'))
+  try {
+    await withHostKey('/api/session/start', { id: current.id })
+    await refreshStatus()
+    ElMessage.success(t('launcher.requestedStart'))
+  } catch (error) {
+    // ElMessageBox rejects with 'cancel'/'close' when the host key dialog is dismissed
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error((error as Error).message)
+  }
 }
 
 function suppressSessionAutoOpen() {
@@ -794,22 +973,57 @@ async function stopService() {
   await refreshStatus()
 }
 
+let activatedSessionKey = ''
+// A single failed poll is often just a dropped request; only after repeated
+// failures do we treat the cached status as stale and clear it.
+let statusPollFailures = 0
+
 async function refreshStatus() {
   if (!profiles.value.length) {
+    statusPollFailures = 0
+    statusByProfile.value = {}
     runningProfileIds.value = new Set()
     activeProfileId.value = ''
     return
   }
-  const statuses = await Promise.all(profiles.value.map(profile =>
-    api<{ running: boolean; id: string }>(`/api/session/status?profile_id=${encodeURIComponent(profile.id)}${profile.id === current.id ? '&activate=1' : ''}`)
-      .catch(() => ({ running: false, id: profile.id }))
-  ))
+  try {
+    const res = await api<{ statuses: Record<string, SessionStatus> }>('/api/session/statuses')
+    statusByProfile.value = res.statuses || {}
+    statusPollFailures = 0
+  } catch {
+    statusPollFailures += 1
+    if (statusPollFailures >= 2) {
+      statusByProfile.value = {}
+      runningProfileIds.value = new Set()
+      activeProfileId.value = ''
+      // Promotion is keyed off the status we just discarded, so re-validate it
+      // on the next successful poll instead of trusting a stale marker.
+      activatedSessionKey = ''
+    }
+    return
+  }
   const running = new Set<string>()
-  statuses.forEach(status => {
-    if (status.running && status.id) running.add(status.id)
+  Object.entries(statusByProfile.value).forEach(([id, status]) => {
+    if (status.running) running.add(id)
   })
   runningProfileIds.value = running
   activeProfileId.value = current.id && running.has(current.id) ? current.id : ''
+  await syncActiveProxy()
+}
+
+// Promotion changes which session the proxy serves, so it runs once per
+// session instead of on every two-second poll.
+async function syncActiveProxy() {
+  const status = currentStatus.value
+  if (!current.id || !status?.running) return
+  const key = `${current.id}:${status.open_seq || 0}`
+  if (key === activatedSessionKey) return
+  activatedSessionKey = key
+  try {
+    await postJSON('/api/session/activate', { id: current.id })
+  } catch {
+    activatedSessionKey = ''
+  }
 }
 
 async function refreshLogs(forceScroll = false) {
@@ -821,57 +1035,109 @@ async function refreshLogs(forceScroll = false) {
   }
 }
 
-watch(passwordInput, value => {
-  if (value) passwordAction.value = 'replace'
-})
+function focusLogs() {
+  logRef.value?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
 
-watch(passphraseInput, value => {
-  if (value) passphraseAction.value = 'replace'
-})
+async function copyLogs() {
+  if (!logs.value.length) return
+  try {
+    await navigator.clipboard.writeText(logs.value.join('\n'))
+    ElMessage.success(t('launcher.logsCopied'))
+  } catch {
+    ElMessage.error(t('launcher.logsCopyFailed'))
+  }
+}
 
-watch(securityTokenInput, value => {
-  if (value) securityTokenAction.value = 'replace'
-})
+function exportLogs() {
+  if (!logs.value.length) return
+  const name = (current.name || 'chemssh').replace(/[\\/:*?"<>|]/g, '-')
+  const blob = new Blob([logs.value.join('\n')], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${name}-logs.txt`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function syncActionFromInput(value: string, action: { value: 'keep' | 'replace' | 'clear' }) {
+  if (value) {
+    action.value = 'replace'
+    return
+  }
+  if (action.value === 'replace') action.value = 'keep'
+}
+
+watch(passwordInput, value => syncActionFromInput(value, passwordAction))
+watch(passphraseInput, value => syncActionFromInput(value, passphraseAction))
+watch(securityTokenInput, value => syncActionFromInput(value, securityTokenAction))
 
 // SSE for real-time log streaming
 let logEventSource: EventSource | null = null
+let replayLines: string[] | null = null
+
+function appendLogLine(line: string) {
+  logs.value.push(line)
+  // Keep only last 500 lines
+  if (logs.value.length > 500) {
+    logs.value = logs.value.slice(-500)
+  }
+}
 
 function connectLogStream() {
   if (logEventSource) {
     logEventSource.close()
+    logEventSource = null
   }
 
   if (!current.id) {
+    replayLines = null
     logs.value = []
     return
   }
 
   const url = `/api/logs/stream?profile_id=${encodeURIComponent(current.id)}`
-  logEventSource = new EventSource(url)
+  const source = new EventSource(url)
+  logEventSource = source
+  // Buffer the replayed history and swap it in when the server marks the end,
+  // so a reconnect neither blanks the panel nor duplicates every line.
+  replayLines = []
 
-  // Clear logs and prepare for new stream
-  logs.value = []
-
-  logEventSource.onmessage = (event) => {
-    logs.value.push(event.data)
-    // Keep only last 500 lines
-    if (logs.value.length > 500) {
-      logs.value = logs.value.slice(-500)
+  source.onmessage = (event) => {
+    if (logEventSource !== source) return
+    if (replayLines) {
+      replayLines.push(event.data)
+      return
     }
+    appendLogLine(event.data)
     nextTick(() => {
       logScroller.scrollToBottom(false)
     })
   }
 
-  logEventSource.onerror = () => {
-    // Auto-reconnect on error
-    if (logEventSource) {
-      logEventSource.close()
-      logEventSource = null
-    }
+  source.addEventListener('replay-end', () => {
+    if (logEventSource !== source) return
+    const replayed = replayLines || []
+    replayLines = null
+    logs.value = replayed.slice(-500)
+    nextTick(() => {
+      logScroller.scrollToBottom(false)
+    })
+  })
+
+  source.onerror = () => {
+    // Ignore errors from streams that were already replaced, otherwise an old
+    // stream would close the new one and schedule an extra reconnect.
+    if (logEventSource !== source) return
+    logEventSource.close()
+    logEventSource = null
+    replayLines = null
     // Reconnect after 2 seconds
     setTimeout(() => {
-      if (current.id) connectLogStream()
+      if (current.id && !logEventSource) connectLogStream()
     }, 2000)
   }
 }
@@ -884,12 +1150,16 @@ function disconnectLogStream() {
 }
 
 // Watch for profile changes to reconnect log stream
-watch(() => current.id, (newId) => {
+watch(() => current.id, (newId, oldId) => {
+  if (newId === oldId) return
+  logs.value = []
+  // A filter left over from the previous profile would hide the new profile's
+  // output and look like an empty log.
+  logQuery.value = ''
   if (newId) {
     connectLogStream()
   } else {
     disconnectLogStream()
-    logs.value = []
   }
 })
 
@@ -920,6 +1190,12 @@ const handleVisibilityChange = () => {
   }
 }
 
+const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+  if (!isDirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
 onMounted(async () => {
   defaults.value = await api<Profile>('/api/defaults')
   applyProfile({})
@@ -932,6 +1208,7 @@ onMounted(async () => {
 
   // 监听页面可见性变化
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  window.addEventListener('beforeunload', handleBeforeUnload)
   document.addEventListener('click', handleProfileMenuDocumentClick)
   window.addEventListener('keydown', handleProfileMenuKeydown)
   window.addEventListener('scroll', closeProfileMenu, true)
@@ -945,6 +1222,7 @@ onBeforeUnmount(() => {
   }
   disconnectLogStream()
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
   document.removeEventListener('click', handleProfileMenuDocumentClick)
   window.removeEventListener('keydown', handleProfileMenuKeydown)
   window.removeEventListener('scroll', closeProfileMenu, true)

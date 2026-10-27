@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 
@@ -379,6 +380,7 @@ func (s *Server) handleSFTPUploadLocal(w http.ResponseWriter, r *http.Request) {
 		LocalPath    string `json:"local_path"`
 		RelativePath string `json:"relative_path"`
 		TransferID   string `json:"transfer_id"`
+		Resume       bool   `json:"resume"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -394,23 +396,21 @@ func (s *Server) handleSFTPUploadLocal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("directory transfer is not supported yet"))
 		return
 	}
-	file, err := os.Open(localPath)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	defer file.Close()
 	uploadName := req.RelativePath
 	if uploadName == "" {
 		uploadName = filepath.Base(localPath)
 	}
-	src := s.progressReader(req.TransferID, info.Size(), file)
-	if err := s.sftp.Upload(req.Session, req.Path, uploadName, src); err != nil {
-		s.finishProgress(req.TransferID, err)
+	targetPath, err := sftpclient.UploadTargetPath(req.Path, uploadName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	src := newLocalFileSource(localPath)
+	dst := &sftpFileTarget{manager: s.sftp, session: req.Session, path: targetPath}
+	if err := s.runResumableTransfer(req.TransferID, req.Resume, filepath.Base(localPath), src, dst); err != nil {
 		writeSFTPError(w, err)
 		return
 	}
-	s.finishProgress(req.TransferID, nil)
 	s.logs.add("SFTP upload local: " + localPath + " -> " + req.Path)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
@@ -426,6 +426,7 @@ func (s *Server) handleSFTPDownloadLocal(w http.ResponseWriter, r *http.Request)
 		LocalPath    string `json:"local_path"`
 		RelativePath string `json:"relative_path"`
 		TransferID   string `json:"transfer_id"`
+		Resume       bool   `json:"resume"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -441,41 +442,18 @@ func (s *Server) handleSFTPDownloadLocal(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, errors.New("local target is not a directory"))
 		return
 	}
-	remote, info, err := s.sftp.Download(req.Session, req.Path)
-	if err != nil {
-		writeSFTPError(w, err)
-		return
-	}
-	defer remote.Close()
-	targetName, err := cleanLocalTransferName(req.RelativePath, info.Name)
+	targetName, err := cleanLocalTransferName(req.RelativePath, path.Base(req.Path))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	targetPath := filepath.Join(targetDir, targetName)
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		writeError(w, http.StatusBadGateway, err)
+	src := &sftpFileSource{manager: s.sftp, session: req.Session, path: req.Path}
+	dst := newLocalFileTarget(targetPath)
+	if err := s.runResumableTransfer(req.TransferID, req.Resume, targetName, src, dst); err != nil {
+		writeSFTPError(w, err)
 		return
 	}
-	localFile, err := os.Create(targetPath)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	src := s.progressReader(req.TransferID, info.Size, remote)
-	buf := make([]byte, copyBufferSize)
-	if _, err := io.CopyBuffer(localFile, src, buf); err != nil {
-		_ = localFile.Close()
-		s.finishProgress(req.TransferID, err)
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	if err := localFile.Close(); err != nil {
-		s.finishProgress(req.TransferID, err)
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	s.finishProgress(req.TransferID, nil)
 	s.logs.add("SFTP download local: " + req.Path + " -> " + targetDir)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
@@ -492,28 +470,27 @@ func (s *Server) handleSFTPCopyRemote(w http.ResponseWriter, r *http.Request) {
 		TargetPath    string `json:"target_path"`
 		RelativePath  string `json:"relative_path"`
 		TransferID    string `json:"transfer_id"`
+		Resume        bool   `json:"resume"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	remote, info, err := s.sftp.Download(req.SourceSession, req.SourcePath)
-	if err != nil {
-		writeSFTPError(w, err)
-		return
-	}
-	defer remote.Close()
 	uploadName := req.RelativePath
 	if uploadName == "" {
-		uploadName = info.Name
+		uploadName = path.Base(req.SourcePath)
 	}
-	src := s.progressReader(req.TransferID, info.Size, remote)
-	if err := s.sftp.Upload(req.TargetSession, req.TargetPath, uploadName, src); err != nil {
-		s.finishProgress(req.TransferID, err)
+	targetPath, err := sftpclient.UploadTargetPath(req.TargetPath, uploadName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	src := &sftpFileSource{manager: s.sftp, session: req.SourceSession, path: req.SourcePath}
+	dst := &sftpFileTarget{manager: s.sftp, session: req.TargetSession, path: targetPath}
+	if err := s.runResumableTransfer(req.TransferID, req.Resume, path.Base(req.SourcePath), src, dst); err != nil {
 		writeSFTPError(w, err)
 		return
 	}
-	s.finishProgress(req.TransferID, nil)
 	s.logs.add("SFTP remote copy: " + req.SourcePath + " -> " + req.TargetPath)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }

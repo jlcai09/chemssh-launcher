@@ -80,6 +80,8 @@ func TestHandleDuplicateProfileCopiesOnlyActiveCredential(t *testing.T) {
 	source := config.NewProfileDefaults()
 	source.ID = "key-profile"
 	source.Name = "Key Server"
+	source.SSHHost = "example.com"
+	source.SSHUser = "user"
 	source.AuthMethod = config.AuthPrivateKey
 	source.PrivateKeyPath = "/home/user/.ssh/id_ed25519"
 	source.HasPrivateKeyPassphrase = true

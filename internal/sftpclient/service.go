@@ -223,6 +223,82 @@ func (m *Manager) Download(id, remotePath string) (io.ReadCloser, FileInfo, erro
 	return &pooledReadCloser{ReadCloser: reader, pool: session.pool, conn: conn}, info, nil
 }
 
+func (m *Manager) Reconnect(id string) error {
+	session, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	return session.pool.reconnect()
+}
+
+func (m *Manager) Stat(id, remotePath string) (FileInfo, error) {
+	session, err := m.get(id)
+	if err != nil {
+		return FileInfo{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	defer session.pool.release(conn)
+
+	info, err := conn.client.Stat(CleanPath(remotePath))
+	if err != nil {
+		return FileInfo{}, err
+	}
+	return FileInfo{Name: info.Name(), Size: info.Size(), ModTime: info.ModTime()}, nil
+}
+
+func (m *Manager) OpenReadAt(id, remotePath string, offset int64) (io.ReadCloser, FileInfo, error) {
+	session, err := m.get(id)
+	if err != nil {
+		return nil, FileInfo{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return nil, FileInfo{}, err
+	}
+
+	reader, info, err := downloadFileAt(conn.client, remotePath, offset)
+	if err != nil {
+		conn.failed = true
+		session.pool.release(conn)
+		return nil, FileInfo{}, err
+	}
+	return &pooledReadCloser{ReadCloser: reader, pool: session.pool, conn: conn}, info, nil
+}
+
+func (m *Manager) OpenWriteAt(id, remotePath string, offset int64) (io.WriteCloser, error) {
+	session, err := m.get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := session.pool.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	writer, err := uploadFileAt(conn.client, remotePath, offset)
+	if err != nil {
+		conn.failed = true
+		session.pool.release(conn)
+		return nil, err
+	}
+	return &pooledWriteCloser{WriteCloser: writer, pool: session.pool, conn: conn}, nil
+}
+
 func (m *Manager) Mkdir(id, remotePath string) error {
 	session, err := m.get(id)
 	if err != nil {

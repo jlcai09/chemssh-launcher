@@ -73,7 +73,7 @@ func runProfile(args []string, in io.Reader, out, errOut io.Writer, profiles con
 		if len(args) != 2 {
 			return errors.New("usage: chemssh-launcher profile delete <profile>")
 		}
-		return deleteProfile(args[1], out, profiles, secrets)
+		return deleteProfile(args[1], in, out, profiles, secrets)
 	case "test":
 		if len(args) != 2 {
 			return errors.New("usage: chemssh-launcher profile test <profile>")
@@ -112,6 +112,9 @@ func addProfile(in io.Reader, out io.Writer, profiles config.ProfileStore, secre
 	if err := promptProfile(reader, out, &p, false); err != nil {
 		return err
 	}
+	if err := p.Validate(); err != nil {
+		return err
+	}
 	if err := promptSecrets(reader, out, &p, secrets); err != nil {
 		return err
 	}
@@ -119,7 +122,16 @@ func addProfile(in io.Reader, out io.Writer, profiles config.ProfileStore, secre
 		return err
 	}
 	fmt.Fprintf(out, "Saved profile %q (%s)\n", p.Name, p.ID)
+	printProfileWarnings(out, p)
 	return nil
+}
+
+// printProfileWarnings prints the non-fatal configuration warnings so a CLI user
+// sees the same hints the GUI writes into the profile log.
+func printProfileWarnings(out io.Writer, p config.Profile) {
+	for _, warning := range p.Warnings() {
+		fmt.Fprintln(out, "warning: "+warning)
+	}
 }
 
 func editProfile(idOrName string, in io.Reader, out io.Writer, profiles config.ProfileStore, secrets secret.Store) error {
@@ -131,6 +143,9 @@ func editProfile(idOrName string, in io.Reader, out io.Writer, profiles config.P
 	if err := promptProfile(reader, out, &p, true); err != nil {
 		return err
 	}
+	if err := p.Validate(); err != nil {
+		return err
+	}
 	if err := promptSecrets(reader, out, &p, secrets); err != nil {
 		return err
 	}
@@ -138,13 +153,18 @@ func editProfile(idOrName string, in io.Reader, out io.Writer, profiles config.P
 		return err
 	}
 	fmt.Fprintf(out, "Updated profile %q (%s)\n", p.Name, p.ID)
+	printProfileWarnings(out, p)
 	return nil
 }
 
-func deleteProfile(idOrName string, out io.Writer, profiles config.ProfileStore, secrets secret.Store) error {
+func deleteProfile(idOrName string, in io.Reader, out io.Writer, profiles config.ProfileStore, secrets secret.Store) error {
 	p, err := profiles.Get(idOrName)
 	if err != nil {
 		return err
+	}
+	if !promptBool(bufio.NewReader(in), out, "Delete this profile", false) {
+		fmt.Fprintln(out, "Cancelled.")
+		return nil
 	}
 	if err := profiles.Delete(p.ID); err != nil {
 		return err
@@ -236,7 +256,7 @@ func reportPort(out io.Writer, p config.Profile) error {
 
 func promptProfile(reader *bufio.Reader, out io.Writer, p *config.Profile, editing bool) error {
 	if editing {
-		fmt.Fprintf(out, "Editing profile %q. Press Enter to keep existing values.\n", p.Name)
+		fmt.Fprintf(out, "Editing profile %q. Press Enter to keep existing values, or type - to clear an optional value.\n", p.Name)
 	}
 
 	p.Name = promptString(reader, out, "Profile name", p.Name)
@@ -276,7 +296,7 @@ func promptSecrets(reader *bufio.Reader, out io.Writer, p *config.Profile, secre
 		action := promptChoice(reader, out, "Password action", defaultAction, []string{"keep", "replace", "clear"})
 		switch action {
 		case "replace":
-			value, err := readSecret(out, "New password")
+			value, err := readSecret(reader, out, "New password")
 			if err != nil {
 				return err
 			}
@@ -303,7 +323,7 @@ func promptSecrets(reader *bufio.Reader, out io.Writer, p *config.Profile, secre
 		action := promptChoice(reader, out, "Passphrase action", "keep", []string{"keep", "replace", "clear"})
 		switch action {
 		case "replace":
-			value, err := readSecret(out, "New passphrase")
+			value, err := readSecret(reader, out, "New passphrase")
 			if err != nil {
 				return err
 			}
@@ -326,6 +346,9 @@ func promptString(reader *bufio.Reader, out io.Writer, label, current string) st
 	value := readLine(reader)
 	if value == "" {
 		return current
+	}
+	if value == "-" {
+		return ""
 	}
 	return value
 }
@@ -371,7 +394,7 @@ func promptChoice(reader *bufio.Reader, out io.Writer, label, current string, ch
 }
 
 func promptMultiline(reader *bufio.Reader, out io.Writer, label, current string) string {
-	fmt.Fprintf(out, "%s. End with a single dot on its own line. Leave empty to keep current/default.\n", label)
+	fmt.Fprintf(out, "%s. End with a single dot on its own line. Type - alone to clear, or a single dot to keep the current value.\n", label)
 	if current != "" {
 		fmt.Fprintln(out, "--- current/default ---")
 		fmt.Fprintln(out, current)
@@ -380,6 +403,9 @@ func promptMultiline(reader *bufio.Reader, out io.Writer, label, current string)
 	var lines []string
 	for {
 		line := readLine(reader)
+		if line == "-" && len(lines) == 0 {
+			return ""
+		}
 		if line == "." {
 			break
 		}
@@ -392,7 +418,7 @@ func promptMultiline(reader *bufio.Reader, out io.Writer, label, current string)
 	return value
 }
 
-func readSecret(out io.Writer, label string) (string, error) {
+func readSecret(reader *bufio.Reader, out io.Writer, label string) (string, error) {
 	fmt.Fprintf(out, "%s: ", label)
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		b, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -402,7 +428,6 @@ func readSecret(out io.Writer, label string) (string, error) {
 		}
 		return string(b), nil
 	}
-	reader := bufio.NewReader(os.Stdin)
 	return readLine(reader), nil
 }
 

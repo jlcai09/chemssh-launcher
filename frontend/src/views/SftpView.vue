@@ -60,6 +60,7 @@
             trigger="click"
             placement="bottom-start"
             popper-class="xftp-new-popover"
+            transition="xftp-new-fade"
             :width="300"
           >
             <template #reference>
@@ -106,11 +107,11 @@
         </div>
 
         <div class="file-toolbar">
-          <el-tooltip content="刷新" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-tooltip :content="t('sftp.refresh')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Refresh" circle @click="loadTab(paneName)" />
           </el-tooltip>
           <div class="toolbar-history-control">
-            <el-tooltip content="返回" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+            <el-tooltip :content="t('sftp.back')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
               <el-button :icon="Back" circle :disabled="!canGoBack(paneName)" @click="goBack(paneName)" />
             </el-tooltip>
             <el-dropdown trigger="click" :disabled="historyEntries(paneName).length === 0" @command="handleHistoryCommand(paneName, $event)">
@@ -118,7 +119,7 @@
                 class="toolbar-history-menu-button"
                 type="button"
                 :disabled="historyEntries(paneName).length === 0"
-                aria-label="历史记录"
+                :aria-label="t('sftp.history')"
               >
                 <el-icon><CaretBottom /></el-icon>
               </button>
@@ -134,19 +135,19 @@
           <div class="toolbar-menu">
             <el-button :icon="Plus" circle aria-haspopup="menu" @click.prevent />
             <div class="toolbar-submenu" role="menu">
-              <el-tooltip content="新建文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-                <button class="toolbar-submenu-button" type="button" role="menuitem" aria-label="新建文件" @click="createFile(paneName)">
+              <el-tooltip :content="t('sftp.newFile')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                <button class="toolbar-submenu-button" type="button" role="menuitem" :aria-label="t('sftp.newFile')" @click="createFile(paneName)">
                   <el-icon><DocumentAdd /></el-icon>
                 </button>
               </el-tooltip>
-              <el-tooltip content="新建文件夹" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
-                <button class="toolbar-submenu-button" type="button" role="menuitem" aria-label="新建文件夹" @click="createFolder(paneName)">
+              <el-tooltip :content="t('sftp.newFolder')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                <button class="toolbar-submenu-button" type="button" role="menuitem" :aria-label="t('sftp.newFolder')" @click="createFolder(paneName)">
                   <el-icon><FolderAdd /></el-icon>
                 </button>
               </el-tooltip>
             </div>
           </div>
-          <el-tooltip :content="activeTab(paneName)?.showHidden ? '隐藏点开头文件' : '显示点开头文件'" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-tooltip :content="activeTab(paneName)?.showHidden ? t('sftp.hideDotfiles') : t('sftp.showDotfiles')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button
               :icon="activeTab(paneName)?.showHidden ? View : Hide"
               circle
@@ -159,25 +160,25 @@
           <div class="toolbar-menu">
             <el-button :icon="Upload" circle :disabled="activeTab(paneName)?.kind !== 'remote'" aria-haspopup="menu" @click.prevent />
             <div class="toolbar-submenu" role="menu">
-              <el-tooltip content="上传文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+              <el-tooltip :content="t('sftp.uploadFile')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
                 <button class="toolbar-submenu-button" type="button" role="menuitem" :disabled="activeTab(paneName)?.kind !== 'remote'" @click="pickUpload(paneName, 'file')">
                   <el-icon><Upload /></el-icon>
                 </button>
               </el-tooltip>
-              <el-tooltip content="上传文件夹" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+              <el-tooltip :content="t('sftp.uploadFolder')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
                 <button class="toolbar-submenu-button" type="button" role="menuitem" :disabled="activeTab(paneName)?.kind !== 'remote'" @click="pickUpload(paneName, 'folder')">
                   <el-icon><FolderOpened /></el-icon>
                 </button>
               </el-tooltip>
             </div>
           </div>
-          <el-tooltip content="下载远程文件" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-tooltip :content="t('sftp.download')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Download" circle :disabled="!canDownload(paneName)" @click="downloadSelected(paneName)" />
           </el-tooltip>
-          <el-tooltip content="重命名" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-tooltip :content="t('sftp.rename')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Edit" circle :disabled="selectedEntries(paneName).length !== 1" @click="renameSelected(paneName)" />
           </el-tooltip>
-          <el-tooltip content="删除选中项" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+          <el-tooltip :content="t('sftp.deleteSelected')" placement="bottom" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button :icon="Delete" circle type="danger" :disabled="selectedEntries(paneName).length === 0" @click="deleteSelected(paneName)" />
           </el-tooltip>
           <input :ref="el => setUploadInput(paneName, 'file', el)" class="hidden-input" type="file" multiple @change="handleUploadInput(paneName, $event)" />
@@ -202,7 +203,7 @@
             <span role="columnheader" />
             <span class="file-header-cell" role="columnheader" :aria-sort="sortAria(paneName, 'name')">
               <button class="file-sort-button" type="button" :class="{ 'is-active': panes[paneName].sortKey === 'name' }" :title="sortTitle(paneName, 'name')" @click="toggleSort(paneName, 'name')">
-                <span>名称</span>
+                <span>{{ t('sftp.name') }}</span>
                 <span class="sort-icon-wrap">
                   <el-icon v-if="panes[paneName].sortKey === 'name'">
                     <CaretTop v-if="panes[paneName].sortDirection === 'asc'" />
@@ -215,14 +216,14 @@
               class="file-column-resizer file-column-resizer-name-size"
               type="button"
               role="separator"
-              aria-label="调整名称和大小列宽"
+              :aria-label="t('sftp.resizeNameSize')"
               tabindex="0"
               @pointerdown="startColumnResize(paneName, 'name-size', $event)"
               @dblclick="resetColumnWidths(paneName)"
             />
             <span class="file-header-cell file-header-size" role="columnheader" :aria-sort="sortAria(paneName, 'size')">
               <button class="file-sort-button" type="button" :class="{ 'is-active': panes[paneName].sortKey === 'size' }" :title="sortTitle(paneName, 'size')" @click="toggleSort(paneName, 'size')">
-                <span>大小</span>
+                <span>{{ t('sftp.size') }}</span>
                 <span class="sort-icon-wrap">
                   <el-icon v-if="panes[paneName].sortKey === 'size'">
                     <CaretTop v-if="panes[paneName].sortDirection === 'asc'" />
@@ -235,14 +236,14 @@
               class="file-column-resizer file-column-resizer-size-time"
               type="button"
               role="separator"
-              aria-label="调整大小和修改时间列宽"
+              :aria-label="t('sftp.resizeSizeModified')"
               tabindex="0"
               @pointerdown="startColumnResize(paneName, 'size-time', $event)"
               @dblclick="resetColumnWidths(paneName)"
             />
             <span class="file-header-cell" role="columnheader" :aria-sort="sortAria(paneName, 'mtime')">
               <button class="file-sort-button" type="button" :class="{ 'is-active': panes[paneName].sortKey === 'mtime' }" :title="sortTitle(paneName, 'mtime')" @click="toggleSort(paneName, 'mtime')">
-                <span>修改时间</span>
+                <span>{{ t('sftp.modified') }}</span>
                 <span class="sort-icon-wrap">
                   <el-icon v-if="panes[paneName].sortKey === 'mtime'">
                     <CaretTop v-if="panes[paneName].sortDirection === 'asc'" />
@@ -259,7 +260,7 @@
             @scroll="handleBodyScroll(paneName)"
             @mousedown.left="beginBlankSelect(paneName, $event)"
           >
-            <div v-if="!activeTab(paneName)" class="empty-state compact">没有打开的标签页，点击 + 新建。</div>
+            <div v-if="!activeTab(paneName)" class="empty-state compact">{{ t('sftp.noTabs') }}</div>
             <template v-else>
               <div
                 v-if="parentDirectoryEntry(paneName)"
@@ -295,7 +296,7 @@
                 <span class="file-cell file-time-cell" />
               </div>
               <div v-if="visibleEntries(paneName).length === 0" class="empty-state compact">
-                {{ activeTab(paneName)?.loading ? '正在读取目录...' : '目录为空。' }}
+                {{ activeTab(paneName)?.loading ? t('sftp.loadingDirectory') : t('sftp.emptyDirectory') }}
               </div>
               <div class="file-list-virtual-spacer" :style="{ height: `${topSpacerHeight(paneName)}px` }" aria-hidden="true" />
               <div
@@ -398,7 +399,7 @@
             @drop.stop.prevent="handleCurrentDirectoryDrop(paneName, $event)"
           >
             <el-icon><Upload /></el-icon>
-            <span>松开以传输到当前目录</span>
+            <span>{{ t('sftp.dropToCurrent') }}</span>
           </div>
         </div>
 
@@ -470,16 +471,16 @@
             <span class="transfer-status" :title="item.error || transferStatusLabel(item)">
               <i
                 class="status-dot"
-                :class="item.paused ? 'is-paused' : `is-${item.status}`"
+                :class="item.paused ? 'is-paused' : item.retrying ? 'is-retrying' : `is-${item.status}`"
                 aria-hidden="true"
               />
               {{ transferStatusLabel(item) }}
             </span>
             <div class="transfer-progress-cell">
-              <el-progress :percentage="transferPercent(item)" :show-text="false" :status="item.status === 'error' ? 'exception' : item.status === 'done' ? 'success' : undefined" />
-              <span>{{ transferPercent(item) }}%</span>
+              <el-progress :percentage="transferPercent(item)" :show-text="false" :status="item.status === 'error' ? 'exception' : item.status === 'done' ? 'success' : item.retrying ? 'warning' : undefined" />
+              <span>{{ transferPercentText(item) }}</span>
             </div>
-            <span>{{ formatBytes(item.loaded) }} / {{ item.total ? formatBytes(item.total) : t('sftp.unknownSize') }}</span>
+            <span>{{ formatBytes(item.loaded) || '0 B' }} / {{ item.total ? formatBytes(item.total) : t('sftp.unknownSize') }}</span>
             <span :title="`${transferEndpointLabel(item.sourceName)}: ${item.sourcePath}`">{{ transferEndpointLabel(item.sourceName) }}: {{ item.sourcePath }}</span>
             <span class="transfer-arrow-cell">→</span>
             <span :title="`${transferEndpointLabel(item.targetName)}: ${item.targetPath}`">{{ transferEndpointLabel(item.targetName) }}: {{ item.targetPath }}</span>
@@ -518,12 +519,12 @@
 
     <Teleport to="body">
       <div v-if="contextMenu.visible" class="sftp-context-menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" role="menu">
-        <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('open')">打开</button>
-        <button type="button" role="menuitem" :disabled="!contextMenu.entry || contextMenu.entry.is_dir" @click="runContextAction('openText')">用记事本编辑</button>
-        <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('copyPath')">复制路径</button>
+        <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('open')">{{ openMenuLabel }}</button>
+        <button type="button" role="menuitem" :disabled="!contextMenu.entry || contextMenu.entry.is_dir" @click="runContextAction('openText')">{{ t('sftp.editWithNotepad') }}</button>
+        <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('copyPath')">{{ t('sftp.copyPath') }}</button>
         <span class="sftp-context-separator" />
-        <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('rename')">重命名</button>
-        <button type="button" role="menuitem" class="is-danger" :disabled="!contextMenu.entry" @click="runContextAction('delete')">删除</button>
+        <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('rename')">{{ t('sftp.rename') }}</button>
+        <button type="button" role="menuitem" class="is-danger" :disabled="!contextMenu.entry" @click="runContextAction('delete')">{{ t('sftp.delete') }}</button>
       </div>
     </Teleport>
 
@@ -531,6 +532,7 @@
       <div v-if="transferContextMenu.visible" class="sftp-context-menu" :style="{ left: `${transferContextMenu.x}px`, top: `${transferContextMenu.y}px` }" role="menu">
         <button type="button" role="menuitem" :disabled="!canPauseTransfer(transferContextMenu.item)" @click="runTransferContextAction('pause')">{{ t('sftp.pause') }}</button>
         <button type="button" role="menuitem" :disabled="!canResumeTransfer(transferContextMenu.item)" @click="runTransferContextAction('resume')">{{ t('sftp.resume') }}</button>
+        <button type="button" role="menuitem" :disabled="!canRetryTransfer(transferContextMenu.item)" @click="runTransferContextAction('retry')">{{ t('sftp.retry') }}</button>
         <span class="sftp-context-separator" />
         <button type="button" role="menuitem" class="is-danger" :disabled="!canCancelTransfer(transferContextMenu.item)" @click="runTransferContextAction('cancel')">{{ t('sftp.cancel') }}</button>
       </div>
@@ -538,26 +540,26 @@
 
     <Teleport to="body">
       <div v-if="tabContextMenu.visible" class="sftp-context-menu" :style="{ left: `${tabContextMenu.x}px`, top: `${tabContextMenu.y}px` }" role="menu">
-        <button type="button" role="menuitem" @click="runTabContextAction('duplicate')">复制</button>
-        <button type="button" role="menuitem" @click="runTabContextAction('close')">关闭</button>
-        <button type="button" role="menuitem" class="is-danger" @click="runTabContextAction('closeAll')">全部关闭</button>
+        <button type="button" role="menuitem" @click="runTabContextAction('duplicate')">{{ t('sftp.duplicateTab') }}</button>
+        <button type="button" role="menuitem" @click="runTabContextAction('close')">{{ t('sftp.closeTab') }}</button>
+        <button type="button" role="menuitem" class="is-danger" @click="runTabContextAction('closeAll')">{{ t('sftp.closeAllTabs') }}</button>
       </div>
     </Teleport>
 
     <Teleport to="body">
       <div v-if="conflictDialog.visible" class="upload-conflict-backdrop">
         <div class="upload-conflict-dialog" role="dialog" aria-modal="true">
-          <div class="upload-conflict-title">目标中已存在同名项目</div>
-          <p>“{{ conflictDialog.name }}” 已存在。请选择如何处理。</p>
+          <div class="upload-conflict-title">{{ t('sftp.conflictTitle') }}</div>
+          <p>{{ t('sftp.conflictBody', { name: conflictDialog.name }) }}</p>
           <label class="upload-conflict-apply">
             <input v-model="conflictDialog.applyAll" type="checkbox" />
-            <span>对后续冲突应用相同操作</span>
+            <span>{{ t('sftp.conflictApplyAll') }}</span>
           </label>
           <div class="upload-conflict-actions">
-            <el-button type="primary" @click="chooseConflict('overwrite')">覆盖</el-button>
-            <el-button @click="chooseConflict('skip')">跳过</el-button>
-            <el-button @click="chooseConflict('suffix')">加后缀</el-button>
-            <el-button @click="chooseConflict('cancel')">取消</el-button>
+            <el-button type="primary" @click="chooseConflict('overwrite')">{{ t('sftp.overwrite') }}</el-button>
+            <el-button @click="chooseConflict('skip')">{{ t('sftp.skip') }}</el-button>
+            <el-button @click="chooseConflict('suffix')">{{ t('sftp.addSuffix') }}</el-button>
+            <el-button @click="chooseConflict('cancel')">{{ t('sftp.cancel') }}</el-button>
           </div>
         </div>
       </div>
@@ -735,6 +737,10 @@ interface TransferItem {
   error: string
   paused?: boolean
   cancelled?: boolean
+  retrying?: boolean
+  attempt?: number
+  maxAttempts?: number
+  retry?: () => Promise<void>
   parentID?: string
   isGroup?: boolean
   expanded?: boolean
@@ -748,6 +754,9 @@ interface TransferProgress {
   paused: boolean
   cancelled: boolean
   error: string
+  retrying?: boolean
+  attempt?: number
+  max_attempts?: number
 }
 
 interface OpenSyncEvent {
@@ -869,6 +878,13 @@ const tabContextMenu = ref<TabContextMenuState>({
   y: 0,
   pane: null,
   tabID: ''
+})
+const openMenuLabel = computed(() => {
+  const pane = contextMenu.value.pane
+  const entry = contextMenu.value.entry
+  if (!pane || !entry || !isSelected(pane, entry)) return t('sftp.open')
+  const count = selectedEntries(pane).filter(item => !item.is_dir).length
+  return count > 1 ? `${t('sftp.open')} (${count})` : t('sftp.open')
 })
 const tabDrag = reactive<TabDragState>({
   active: false,
@@ -1050,8 +1066,10 @@ function paneLabel(paneName: PaneName) {
   const tab = activeTab(paneName)
   if (!tab) return ''
   const count = tab.selected.length
-  const suffix = count > 0 ? `，已选 ${count} 项` : ''
-  return `${tab.kind === 'remote' ? `SFTP: ${tab.profileName}` : '本地文件'}${suffix}`
+  const base = tab.kind === 'remote'
+    ? t('sftp.paneRemote', { name: tab.profileName || t('sftp.remote') })
+    : t('sftp.paneLocal')
+  return count > 0 ? `${base}${t('sftp.selectedSuffix', { count })}` : base
 }
 
 function transferEndpointName(tab: FileTab | null | undefined) {
@@ -1107,7 +1125,7 @@ function log(message: string) {
   nextTick(() => transferLogScroller.scrollToBottom())
 }
 
-function createTransferItem(input: Pick<TransferItem, 'name' | 'kind' | 'sourceName' | 'targetName' | 'sourcePath' | 'targetPath' | 'total'> & Partial<Pick<TransferItem, 'parentID' | 'isGroup' | 'expanded'>>) {
+function createTransferItem(input: Pick<TransferItem, 'name' | 'kind' | 'sourceName' | 'targetName' | 'sourcePath' | 'targetPath' | 'total'> & Partial<Pick<TransferItem, 'parentID' | 'isGroup' | 'expanded' | 'retry'>>) {
   const item: TransferItem = {
     id: newID(),
     ...input,
@@ -1117,7 +1135,10 @@ function createTransferItem(input: Pick<TransferItem, 'name' | 'kind' | 'sourceN
     status: 'running',
     error: '',
     paused: false,
-    cancelled: false
+    cancelled: false,
+    retrying: false,
+    attempt: 0,
+    maxAttempts: 0
   }
   transferItems.value.unshift(item)
   if (transferItems.value.length > 300) transferItems.value = transferItems.value.slice(0, 300)
@@ -1141,11 +1162,27 @@ function finishTransferItem(item: TransferItem, status: TransferStatus, error = 
   target.error = error
   target.endedAt = Date.now()
   target.paused = false
+  target.retrying = false
+  target.attempt = 0
   if (status === 'error' && /(cancel|取消)/i.test(error)) target.cancelled = true
   if (status === 'done' && target.total > 0) target.loaded = target.total
   if (target.parentID) syncTransferGroup(target.parentID)
   touchTransferItems()
   nextTick(updateTransferScrollbars)
+}
+
+function restartTransferItem(item: TransferItem) {
+  const target = currentTransferItem(item)
+  target.status = 'running'
+  target.error = ''
+  target.cancelled = false
+  target.paused = false
+  target.retrying = false
+  target.attempt = 0
+  target.endedAt = null
+  target.startedAt = Date.now()
+  if (target.parentID) syncTransferGroup(target.parentID)
+  touchTransferItems()
 }
 
 function currentTransferItem(item: TransferItem) {
@@ -1165,6 +1202,9 @@ function syncTransferGroup(groupID: string) {
   group.loaded = children.reduce((sum, item) => sum + item.loaded, 0)
   group.status = children.some(item => item.status === 'running') ? 'running' : children.some(item => item.status === 'error') ? 'error' : 'done'
   group.paused = group.status === 'running' && children.some(item => item.paused)
+  group.retrying = group.status === 'running' && children.some(item => item.retrying)
+  group.attempt = Math.max(0, ...children.filter(item => item.retrying).map(item => item.attempt || 0))
+  group.maxAttempts = Math.max(0, ...children.filter(item => item.retrying).map(item => item.maxAttempts || 0))
   group.cancelled = children.every(item => item.cancelled)
   group.error = children.find(item => item.error)?.error || ''
   group.endedAt = group.status === 'running' ? null : Math.max(...children.map(item => item.endedAt || item.startedAt))
@@ -1256,7 +1296,18 @@ function handleBeforeUnload(event: BeforeUnloadEvent) {
 function transferPercent(item: TransferItem) {
   if (item.status === 'done') return 100
   if (!item.total) return item.loaded > 0 ? 100 : 0
-  return Math.min(99, Math.round((item.loaded / item.total) * 100))
+  return Math.min(99, Math.floor((item.loaded / item.total) * 100))
+}
+
+function transferPercentText(item: TransferItem) {
+  if (item.status === 'done') return '100%'
+  if (!item.total) return item.loaded > 0 ? '100%' : '0%'
+  const precise = (item.loaded / item.total) * 100
+  if (precise >= 99) return '99%'
+  if (precise >= 1) return `${Math.floor(precise)}%`
+  // A large transfer can sit below 1% for minutes; rounding to 0% makes the
+  // row look stalled even though bytes are moving.
+  return precise > 0 ? `${precise.toFixed(2)}%` : '0%'
 }
 
 function transferStatusLabel(item: TransferItem) {
@@ -1264,11 +1315,17 @@ function transferStatusLabel(item: TransferItem) {
   if (item.cancelled) return t('sftp.statusCancelled')
   if (item.status === 'error') return t('sftp.statusError')
   if (item.paused) return t('sftp.statusPaused')
+  if (item.retrying) return transferRetryLabel(item)
   return t('sftp.statusRunning')
+}
+
+function transferRetryLabel(item: TransferItem) {
+  return t('sftp.statusRetrying', { attempt: item.attempt || 1, max: item.maxAttempts || 0 })
 }
 
 function transferSpeed(item: TransferItem) {
   if (item.paused) return t('sftp.statusPaused')
+  if (item.retrying) return t('sftp.waitingData')
   const elapsed = Math.max(0.001, ((item.endedAt || Date.now()) - item.startedAt) / 1000)
   if (item.loaded <= 0) return t('sftp.waitingData')
   return `${formatBytes(item.loaded / elapsed)}/s`
@@ -1280,6 +1337,7 @@ function transferElapsed(item: TransferItem) {
 
 function transferEta(item: TransferItem) {
   if (item.paused) return t('sftp.statusPaused')
+  if (item.retrying) return t('sftp.waitingEstimate')
   if (item.status !== 'running') return t('sftp.seconds', { seconds: 0 })
   if (!item.total || item.loaded <= 0) return t('sftp.waitingEstimate')
   const elapsed = (Date.now() - item.startedAt) / 1000
@@ -1421,8 +1479,14 @@ function fileIconURL(entry: FileEntry) {
 
 function entryTooltip(entry: FileEntry) {
   if (!entry.is_symlink) return entry.path
-  if (entry.link_broken) return `${entry.path}\n链接目标不存在${entry.link_target ? `：${entry.link_target}` : ''}`
-  return entry.link_target ? `${entry.path}\n链接到：${entry.link_target}` : `${entry.path}\n符号链接`
+  if (entry.link_broken) {
+    return entry.link_target
+      ? t('sftp.linkTargetMissingWithTarget', { path: entry.path, target: entry.link_target })
+      : t('sftp.linkTargetMissing', { path: entry.path })
+  }
+  return entry.link_target
+    ? t('sftp.symlinkTo', { path: entry.path, target: entry.link_target })
+    : t('sftp.symlink', { path: entry.path })
 }
 
 function parentDirectoryIconURL(paneName: PaneName) {
@@ -1513,10 +1577,11 @@ function sortAria(paneName: PaneName, key: SortKey) {
 }
 
 function sortTitle(paneName: PaneName, key: SortKey) {
-  const field = key === 'name' ? '名称' : key === 'size' ? '大小' : '修改时间'
+  const field = key === 'name' ? t('sftp.name') : key === 'size' ? t('sftp.size') : t('sftp.modified')
   const pane = panes[paneName]
-  if (pane.sortKey !== key) return `按${field}排序`
-  return `按${field}排序：${pane.sortDirection === 'asc' ? '升序' : '降序'}`
+  if (pane.sortKey !== key) return t('sftp.sortBy', { field })
+  const direction = pane.sortDirection === 'asc' ? t('sftp.sortAscending') : t('sftp.sortDescending')
+  return t('sftp.sortByDirection', { field, direction })
 }
 
 function toggleSort(paneName: PaneName, key: SortKey) {
@@ -1836,7 +1901,7 @@ async function openRemoteTab(paneName: PaneName, profile: Profile, path: string)
   pane.tabs.push(tab)
   pane.active = tab.id
   pane.newMenuOpen = false
-  log(`连接 SFTP：${profile.name || profile.ssh_host}`)
+  log(t('sftp.logConnecting', { name: profile.name || profile.ssh_host }))
   try {
     const session = await withHostKey<{ id: string }>('/api/sftp/connect', { id: profile.id })
     const liveTab = tabByID(paneName, tab.id)
@@ -1850,10 +1915,10 @@ async function openRemoteTab(paneName: PaneName, profile: Profile, path: string)
     const liveTab = tabByID(paneName, tab.id)
     if (liveTab) {
       liveTab.loading = false
-      liveTab.title = `${profile.name || '远程'}:连接失败`
+      liveTab.title = t('sftp.connectionFailed', { name: profile.name || t('sftp.remote') })
     }
     ElMessage.error((error as Error).message)
-    log(`失败：${(error as Error).message}`)
+    log(t('sftp.logFailed', { error: (error as Error).message }))
   }
 }
 
@@ -1924,7 +1989,7 @@ async function duplicateTab(paneName: PaneName, tab: FileTab) {
   }
   const profile = remoteProfiles.value.find(item => item.id === tab.profileID)
   if (!profile) {
-    ElMessage.warning('找不到该标签页的服务器配置')
+    ElMessage.warning(t('sftp.profileNotFound'))
     return
   }
   await openRemoteTab(paneName, profile, tab.path || tab.loadedPath || '.')
@@ -2136,7 +2201,7 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
   } catch (error) {
     if (!isLatest()) return
     ElMessage.error((error as Error).message)
-    log(`失败：${(error as Error).message}`)
+    log(t('sftp.logFailed', { error: (error as Error).message }))
   } finally {
     if (isLatest()) {
       tab.loading = false
@@ -2483,7 +2548,7 @@ async function runContextAction(action: 'open' | 'openText' | 'copyPath' | 'rena
   closeContextMenu()
   if (!paneName || !entry) return
   if (action === 'open') {
-    await openEntry(paneName, entry)
+    await openSelectedEntries(paneName, entry)
   } else if (action === 'openText') {
     await openTextFile(paneName, entry)
   } else if (action === 'copyPath') {
@@ -2551,15 +2616,26 @@ function canCancelTransfer(item: TransferItem | null) {
   return transferControlTargets(item).some(target => target.status === 'running')
 }
 
-async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel') {
+function canRetryTransfer(item: TransferItem | null) {
+  return transferControlTargets(item).some(target => target.status === 'error' && target.retry)
+}
+
+async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel' | 'retry') {
   const item = transferContextMenu.value.item
   const targets = transferControlTargets(item).filter(target => {
     if (action === 'pause') return target.status === 'running' && !target.paused
     if (action === 'resume') return target.status === 'running' && target.paused
+    if (action === 'retry') return target.status === 'error' && Boolean(target.retry)
     return target.status === 'running'
   })
   closeTransferContextMenu()
   if (targets.length === 0) return
+  if (action === 'retry') {
+    // Sequential on purpose: parallel retries would hammer the same SSH peer
+    // while the connection pool is still recovering.
+    for (const target of targets) await target.retry?.()
+    return
+  }
   await Promise.all(targets.map(async target => {
     await postJSON('/api/transfer-control', { id: target.id, action })
     if (action === 'pause') {
@@ -2581,6 +2657,25 @@ async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel') {
   nextTick(updateTransferScrollbars)
 }
 
+// "Open" acts on the whole selection: right-clicking one row of a multi-row
+// selection must launch every selected file instead of only that row.
+async function openSelectedEntries(paneName: PaneName, entry: FileEntry) {
+  const tab = activeTab(paneName)
+  const selection = tab && isSelected(paneName, entry) ? selectedEntries(paneName) : [entry]
+  const files = selection.filter(item => !item.is_dir)
+  if (!files.length) {
+    await openEntry(paneName, entry)
+    return
+  }
+  for (const file of files) {
+    try {
+      await openEntry(paneName, file)
+    } catch (error) {
+      ElMessage.error(`${file.name}: ${(error as Error)?.message || ''}`.trim())
+    }
+  }
+}
+
 async function openEntry(paneName: PaneName, entry: FileEntry) {
   const tab = activeTab(paneName)
   if (!tab) return
@@ -2595,7 +2690,7 @@ async function openEntry(paneName: PaneName, entry: FileEntry) {
 
 async function createFolder(paneName: PaneName) {
   const tab = activeTab(paneName)
-  const name = await promptEntryName('新建文件夹', '文件夹名称')
+  const name = await promptEntryName(t('sftp.newFolder'), t('sftp.folderName'))
   if (!tab || !name) return
   const path = joinPath(tab.path, name, tab.kind)
   if (tab.kind === 'local') {
@@ -2603,13 +2698,13 @@ async function createFolder(paneName: PaneName) {
   } else {
     await postJSON('/api/sftp/mkdir', { session: tab.session, path })
   }
-  log(`创建目录：${path}`)
+  log(t('sftp.logCreateDirectory', { path }))
   await loadTab(paneName, tab)
 }
 
 async function createFile(paneName: PaneName) {
   const tab = activeTab(paneName)
-  const name = await promptEntryName('新建文件', '文件名称')
+  const name = await promptEntryName(t('sftp.newFile'), t('sftp.fileName'))
   if (!tab || !name) return
   const path = joinPath(tab.path, name, tab.kind)
   if (tab.kind === 'local') {
@@ -2617,7 +2712,7 @@ async function createFile(paneName: PaneName) {
   } else {
     await postJSON('/api/sftp/create-file', { session: tab.session, path })
   }
-  log(`创建文件：${path}`)
+  log(t('sftp.logCreateFile', { path }))
   await loadTab(paneName, tab)
 }
 
@@ -2626,9 +2721,9 @@ async function promptEntryName(title: string, message: string) {
   try {
     result = await ElMessageBox.prompt(message, title, {
       inputPattern: safeNamePattern,
-      inputErrorMessage: '名称不能包含路径分隔符',
-      confirmButtonText: '确定',
-      cancelButtonText: '取消'
+      inputErrorMessage: t('sftp.nameInvalid'),
+      confirmButtonText: t('sftp.ok'),
+      cancelButtonText: t('sftp.cancel')
     })
   } catch {
     return ''
@@ -2641,7 +2736,7 @@ async function deleteSelected(paneName: PaneName) {
   const tab = activeTab(paneName)
   const selected = selectedEntries(paneName)
   if (!tab || selected.length === 0) {
-    ElMessage.warning('请先选择文件或目录')
+    ElMessage.warning(t('sftp.selectFirst'))
     return
   }
   if (tab.kind === 'remote') {
@@ -2649,31 +2744,31 @@ async function deleteSelected(paneName: PaneName) {
     if (directories.length > 0) {
       const summary = await inspectDeleteDirectories(tab, directories)
       const emptyText = summary.empty.length > 0
-        ? `<p class="delete-confirm-note">检测到 ${summary.empty.length} 个文件夹为空。</p>`
+        ? `<p class="delete-confirm-note">${t('sftp.emptyFolders', { count: summary.empty.length })}</p>`
         : ''
       const nonEmptyText = summary.nonEmpty.length > 0
-        ? `<div class="delete-confirm-danger"><strong>检测到 ${summary.nonEmpty.length} 个非空文件夹</strong><span>这些文件夹会连同内部所有文件和子文件夹一起删除。</span>${deleteConfirmList(summary.nonEmpty)}</div>`
+        ? `<div class="delete-confirm-danger"><strong>${t('sftp.nonEmptyFolders', { count: summary.nonEmpty.length })}</strong><span>${t('sftp.nonEmptyFoldersNote')}</span>${deleteConfirmList(summary.nonEmpty)}</div>`
         : ''
       const unknownText = summary.unknown.length > 0
-        ? `<p class="delete-confirm-note">有 ${summary.unknown.length} 个文件夹无法确认是否为空，将按文件夹删除处理。</p>`
+        ? `<p class="delete-confirm-note">${t('sftp.unknownFolders', { count: summary.unknown.length })}</p>`
         : ''
-      const title = summary.nonEmpty.length > 0 ? '递归删除确认' : '确认删除'
+      const title = summary.nonEmpty.length > 0 ? t('sftp.recursiveDeleteTitle') : t('sftp.deleteTitle')
       await ElMessageBox.confirm(
-        `<div class="delete-confirm-content"><p>将删除选中的 <strong>${selected.length}</strong> 项，其中包含 <strong>${directories.length}</strong> 个文件夹。</p>${emptyText}${nonEmptyText}${unknownText}<p class="delete-confirm-tail">此操作不可撤销。</p></div>`,
+        `<div class="delete-confirm-content">${t('sftp.deleteSummary', { selected: selected.length, directories: directories.length })}${emptyText}${nonEmptyText}${unknownText}<p class="delete-confirm-tail">${t('sftp.deleteIrreversible')}</p></div>`,
         title,
         {
           dangerouslyUseHTMLString: true,
           type: summary.nonEmpty.length > 0 ? 'error' : 'warning',
-          confirmButtonText: summary.nonEmpty.length > 0 ? '递归删除' : '删除',
-          cancelButtonText: '取消',
+          confirmButtonText: summary.nonEmpty.length > 0 ? t('sftp.deleteRecursive') : t('sftp.delete'),
+          cancelButtonText: t('sftp.cancel'),
           confirmButtonClass: summary.nonEmpty.length > 0 ? 'el-button--danger' : undefined
         }
       )
     } else {
-      await ElMessageBox.confirm(`删除选中的 ${selected.length} 项？此操作不可撤销。`, '确认删除', {
+      await ElMessageBox.confirm(t('sftp.deleteConfirmSimple', { count: selected.length }), t('sftp.deleteTitle'), {
         type: 'warning',
-        confirmButtonText: '删除',
-        cancelButtonText: '取消'
+        confirmButtonText: t('sftp.delete'),
+        cancelButtonText: t('sftp.cancel')
       })
     }
   }
@@ -2682,10 +2777,10 @@ async function deleteSelected(paneName: PaneName) {
     for (const entry of selected) {
       if (tab.kind === 'local') {
         await postJSON('/api/local/delete', { path: entry.path })
-        log(`移到回收站：${entry.path}`)
+        log(t('sftp.logTrash', { path: entry.path }))
       } else {
         await postJSON('/api/sftp/delete', { session: tab.session, path: entry.path })
-        log(`删除：${entry.path}`)
+        log(t('sftp.logDeleted', { path: entry.path }))
       }
     }
   } catch (error) {
@@ -2714,7 +2809,7 @@ async function inspectDeleteDirectories(tab: FileTab, directories: FileEntry[]) 
 
 function deleteConfirmList(entries: FileEntry[]) {
   const shown = entries.slice(0, 4).map(entry => `<li>${escapeHTML(entry.name || entry.path)}</li>`).join('')
-  const more = entries.length > 4 ? `<li>以及另外 ${entries.length - 4} 个文件夹...</li>` : ''
+  const more = entries.length > 4 ? `<li>${t('sftp.moreFolders', { count: entries.length - 4 })}</li>` : ''
   return `<ul>${shown}${more}</ul>`
 }
 
@@ -2734,8 +2829,8 @@ async function transferEntries(sourcePane: PaneName, targetPane: PaneName, entri
   const targetBasePath = targetPathOverride || target.path
   const expanded = await expandTransferEntries(source, entries)
   const normalized = normalizeTransferTasks(expanded)
-  if (normalized.invalidCount > 0) ElMessage.error(`已跳过 ${normalized.invalidCount} 个不安全路径`)
-  if (normalized.renamedCount > 0) ElMessage.info(`已将 ${normalized.renamedCount} 个传输路径中的空格重命名为下划线`)
+  if (normalized.invalidCount > 0) ElMessage.error(t('sftp.skippedUnsafe', { count: normalized.invalidCount }))
+  if (normalized.renamedCount > 0) ElMessage.info(t('sftp.renamedSpaces', { count: normalized.renamedCount }))
   const prepared = await prepareRelativeTransfers(normalized.tasks, target, targetBasePath)
   if (prepared.cancelled || prepared.tasks.length === 0) return
   const ordered = orderTransferTasks(prepared.tasks)
@@ -2767,6 +2862,7 @@ async function transferEntries(sourcePane: PaneName, targetPane: PaneName, entri
     })
     if (group) syncTransferGroup(group.id)
     itemsByTask.set(task, item)
+    item.retry = () => retryFileTransfer(source, target, task, item, targetBasePath, targetPane)
   }
 
   for (const task of fileTasks) {
@@ -2777,15 +2873,16 @@ async function transferEntries(sourcePane: PaneName, targetPane: PaneName, entri
       continue
     }
     const targetPath = joinPath(targetBasePath, task.relativePath, target.kind)
-    log(`开始传输：${task.payload.path} -> ${targetPath}`)
+    log(t('sftp.logTransferStart', { path: task.payload.path, target: targetPath }))
     try {
-      await runWithTransferProgress(item, item.id, () => transferFileTask(source, target, task, targetBasePath, item.id))
-      finishTransferItem(item, 'done')
-      log(`完成传输：${task.displayPath}`)
+      await runFileTransfer(source, target, task, item, targetBasePath, false)
     } catch (error) {
       finishTransferItem(item, 'error', (error as Error).message)
-      if (!isTransferCancelledError(error)) throw error
-      log(`取消传输：${task.displayPath}`)
+      if (!isTransferCancelledError(error)) {
+        abortQueuedTransfers(itemsByTask, (error as Error).message)
+        throw error
+      }
+      log(t('sftp.logTransferCancelled', { path: task.displayPath }))
     }
   }
   finishEmptyTransferGroups(transferGroups)
@@ -2841,6 +2938,41 @@ function isTransferCancelledError(error: unknown) {
   return error instanceof Error && /(cancel|取消)/i.test(error.message)
 }
 
+async function runFileTransfer(source: FileTab, target: FileTab, task: RelativeTransfer<FileEntry>, item: TransferItem, targetBasePath: string, resume: boolean) {
+  await runWithTransferProgress(item, item.id, () => transferFileTask(source, target, task, targetBasePath, item.id, resume))
+  finishTransferItem(item, 'done')
+  log(t('sftp.logTransferDone', { path: task.displayPath }))
+}
+
+async function retryFileTransfer(source: FileTab, target: FileTab, task: RelativeTransfer<FileEntry>, item: TransferItem, targetBasePath: string, targetPane: PaneName) {
+  const current = currentTransferItem(item)
+  if (current.status === 'running') return
+  try {
+    await postJSON('/api/transfer-control', { id: current.id, action: 'reset' })
+  } catch (error) {
+    // The automatic retry loop can still own this transfer id; report that
+    // instead of starting a second copy of the same file.
+    finishTransferItem(current, 'error', (error as Error).message)
+    return
+  }
+  restartTransferItem(current)
+  log(t('sftp.logTransferRetry', { path: current.name }))
+  try {
+    await runFileTransfer(source, target, task, current, targetBasePath, true)
+  } catch (error) {
+    finishTransferItem(current, 'error', (error as Error).message)
+  }
+  if (activeTab(targetPane) === target) await loadTab(targetPane, target)
+}
+
+function abortQueuedTransfers(items: Map<RelativeTransfer<FileEntry>, TransferItem>, reason: string) {
+  for (const item of items.values()) {
+    const current = currentTransferItem(item)
+    if (current.status !== 'running') continue
+    finishTransferItem(current, 'error', t('sftp.transferAborted', { error: reason }))
+  }
+}
+
 async function expandTransferEntries(source: FileTab, entries: FileEntry[]) {
   const tasks: RelativeTransfer<FileEntry>[] = []
   for (const entry of entries) {
@@ -2861,7 +2993,7 @@ async function collectTransferEntry(source: FileTab, entry: FileEntry, relativeP
   })
   if (!entry.is_dir) return
   if (relativeDepth(cleanRelative) >= TRANSFER_MAX_DEPTH) {
-    throw new Error(`目录层级超过 ${TRANSFER_MAX_DEPTH} 层，可能存在循环符号链接：${entry.path}`)
+    throw new Error(t('sftp.maxDepth', { max: TRANSFER_MAX_DEPTH, path: entry.path }))
   }
   const listing = await listTabDirectory(source, entry.path)
   for (const child of listing.entries) {
@@ -2876,13 +3008,13 @@ function orderTransferTasks<T>(tasks: RelativeTransfer<T>[]) {
   })
 }
 
-async function transferFileTask(source: FileTab, target: FileTab, task: RelativeTransfer<FileEntry>, targetBasePath: string, transferID: string) {
+async function transferFileTask(source: FileTab, target: FileTab, task: RelativeTransfer<FileEntry>, targetBasePath: string, transferID: string, resume = false) {
   if (source.kind === 'local' && target.kind === 'local') {
-    await postJSON('/api/local/copy', { source_path: task.payload.path, target_path: targetBasePath, relative_path: task.relativePath, transfer_id: transferID })
+    await postJSON('/api/local/copy', { source_path: task.payload.path, target_path: targetBasePath, relative_path: task.relativePath, transfer_id: transferID, resume })
   } else if (source.kind === 'local' && target.kind === 'remote') {
-    await postJSON('/api/sftp/upload-local', { session: target.session, path: targetBasePath, local_path: task.payload.path, relative_path: task.relativePath, transfer_id: transferID })
+    await postJSON('/api/sftp/upload-local', { session: target.session, path: targetBasePath, local_path: task.payload.path, relative_path: task.relativePath, transfer_id: transferID, resume })
   } else if (source.kind === 'remote' && target.kind === 'local') {
-    await postJSON('/api/sftp/download-local', { session: source.session, path: task.payload.path, local_path: targetBasePath, relative_path: task.relativePath, transfer_id: transferID })
+    await postJSON('/api/sftp/download-local', { session: source.session, path: task.payload.path, local_path: targetBasePath, relative_path: task.relativePath, transfer_id: transferID, resume })
   } else {
     await postJSON('/api/sftp/copy-remote', {
       source_session: source.session,
@@ -2890,7 +3022,8 @@ async function transferFileTask(source: FileTab, target: FileTab, task: Relative
       target_session: target.session,
       target_path: targetBasePath,
       relative_path: task.relativePath,
-      transfer_id: transferID
+      transfer_id: transferID,
+      resume
     })
   }
 }
@@ -2970,7 +3103,7 @@ async function ensureTargetDirectory(target: FileTab, relativePath: string, targ
   const targetPath = joinPath(targetBasePath, relativePath, target.kind)
   const existing = await findEntryAtPath(target, targetPath)
   if (existing) {
-    if (!existing.is_dir) throw new Error(`目标已存在同名文件：${targetPath}`)
+    if (!existing.is_dir) throw new Error(t('sftp.targetFileExists', { path: targetPath }))
     return
   }
   if (target.kind === 'local') {
@@ -3051,13 +3184,13 @@ async function openFile(paneName: PaneName, entry: FileEntry) {
   if (!tab || entry.is_dir) return
   if (tab.kind === 'local') {
     await postJSON('/api/local/open', { path: entry.path })
-    log(`打开本地文件：${entry.path}`)
+    log(t('sftp.logOpenLocal', { path: entry.path }))
     return
   }
   if (!tab.session) return
   if (rejectOversizedRemoteOpen(entry)) return
   const result = await postJSON<{ path: string }>('/api/sftp/open', { session: tab.session, path: entry.path })
-  log(`打开远程文件缓存：${entry.path} -> ${result.path}`)
+  log(t('sftp.logOpenRemoteCache', { path: entry.path, cache: result.path }))
 }
 
 function rejectOversizedRemoteOpen(entry: FileEntry) {
@@ -3071,13 +3204,13 @@ async function openTextFile(paneName: PaneName, entry: FileEntry) {
   if (!tab || entry.is_dir) return
   if (tab.kind === 'local') {
     await postJSON('/api/local/open-text', { path: entry.path })
-    log(`用记事本编辑本地文件：${entry.path}`)
+    log(t('sftp.logEditLocal', { path: entry.path }))
     return
   }
   if (!tab.session) return
   if (rejectOversizedRemoteOpen(entry)) return
   const result = await postJSON<{ path: string }>('/api/sftp/open-text', { session: tab.session, path: entry.path })
-  log(`用记事本编辑远程文件缓存：${entry.path} -> ${result.path}`)
+  log(t('sftp.logEditRemoteCache', { path: entry.path, cache: result.path }))
 }
 
 async function copyEntryPath(paneName: PaneName, entry: FileEntry) {
@@ -3090,7 +3223,7 @@ async function copyEntryPath(paneName: PaneName, entry: FileEntry) {
     if (resolved?.path) value = resolved.path
   }
   await writeClipboard(value)
-  ElMessage.success('已复制路径')
+  ElMessage.success(t('sftp.pathCopied'))
 }
 
 async function writeClipboard(value: string) {
@@ -3112,7 +3245,7 @@ async function writeClipboard(value: string) {
   input.select()
   const copied = document.execCommand('copy')
   input.remove()
-  if (!copied) throw new Error('复制路径失败')
+  if (!copied) throw new Error(t('sftp.pathCopyFailed'))
 }
 
 async function renameEntry(paneName: PaneName, entry: FileEntry) {
@@ -3120,12 +3253,12 @@ async function renameEntry(paneName: PaneName, entry: FileEntry) {
   if (!tab) return
   let result: { value: string }
   try {
-    result = await ElMessageBox.prompt('输入新的名称', `重命名：${entry.name}`, {
+    result = await ElMessageBox.prompt(t('sftp.renamePrompt'), t('sftp.renameTitle', { name: entry.name }), {
       inputValue: entry.name,
       inputPattern: safeNamePattern,
-      inputErrorMessage: '名称不能包含路径分隔符',
-      confirmButtonText: '确定',
-      cancelButtonText: '取消'
+      inputErrorMessage: t('sftp.nameInvalid'),
+      confirmButtonText: t('sftp.ok'),
+      cancelButtonText: t('sftp.cancel')
     })
   } catch {
     return
@@ -3138,7 +3271,7 @@ async function renameEntry(paneName: PaneName, entry: FileEntry) {
   } else {
     await postJSON('/api/sftp/rename', { session: tab.session, path: entry.path, new_path: newPath })
   }
-  log(`重命名：${entry.path} -> ${newPath}`)
+  log(t('sftp.logRenamed', { path: entry.path, newPath }))
   await loadTab(paneName, tab)
 }
 
@@ -3497,7 +3630,7 @@ async function moveEntriesToFolderPath(paneName: PaneName, payload: DragPayload,
   const blocked = entries.filter(entry => existingNames.has(entry.name))
   const movable = entries.filter(entry => !existingNames.has(entry.name))
   if (blocked.length > 0) {
-    ElMessage.warning(`目标目录已存在同名项目，已跳过：${blocked.map(entry => entry.name).join('、')}`)
+    ElMessage.warning(t('sftp.moveSkipped', { names: blocked.map(entry => entry.name).join(t('sftp.listSeparator')) }))
   }
   let moved = 0
   for (const entry of movable) {
@@ -3509,9 +3642,9 @@ async function moveEntriesToFolderPath(paneName: PaneName, payload: DragPayload,
         await postJSON('/api/sftp/rename', { session: tab.session, path: entry.path, new_path: newPath })
       }
       moved += 1
-      log(`移动：${entry.path} -> ${newPath}`)
+      log(t('sftp.logMoved', { path: entry.path, newPath }))
     } catch (error) {
-      ElMessage.error(`${entry.name}：${(error as Error).message}`)
+      ElMessage.error(t('sftp.entryError', { name: entry.name, error: (error as Error).message }))
     }
   }
   if (moved > 0) await loadTab(paneName, tab)
@@ -3520,13 +3653,13 @@ async function moveEntriesToFolderPath(paneName: PaneName, payload: DragPayload,
 async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetPathOverride?: string) {
   const tab = activeTab(paneName)
   if (!tab || tab.kind !== 'remote' || !tab.session) {
-    ElMessage.warning('请先在目标窗口打开远程 SFTP 标签页')
+    ElMessage.warning(t('sftp.openRemoteFirst'))
     return
   }
   const targetBasePath = targetPathOverride || tab.path
   const normalized = normalizeUploadEntries(entries)
-  if (normalized.invalidCount > 0) ElMessage.error(`已跳过 ${normalized.invalidCount} 个不安全路径`)
-  if (normalized.renamedCount > 0) ElMessage.info(`已规范化 ${normalized.renamedCount} 个上传路径`)
+  if (normalized.invalidCount > 0) ElMessage.error(t('sftp.skippedUnsafe', { count: normalized.invalidCount }))
+  if (normalized.renamedCount > 0) ElMessage.info(t('sftp.normalizedUploads', { count: normalized.renamedCount }))
   const tasks = normalized.entries.map(entry => ({
     payload: entry,
     relativePath: entry.relativePath,
@@ -3579,7 +3712,7 @@ async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetP
     })
     form.append('transfer_id', item.id)
     if (parentID) syncTransferGroup(parentID)
-    log(`上传：${task.displayPath} -> ${targetBasePath}`)
+    log(t('sftp.logUpload', { path: task.displayPath, target: targetBasePath }))
     try {
       await runWithTransferProgress(item, item.id, () => uploadForm(form))
       finishTransferItem(item, 'done')
@@ -3607,6 +3740,9 @@ async function runWithTransferProgress(item: TransferItem, transferID: string, a
     const target = currentTransferItem(item)
     target.paused = progress.paused
     target.cancelled = progress.cancelled
+    target.retrying = Boolean(progress.retrying) && !progress.done
+    target.attempt = progress.attempt || 0
+    target.maxAttempts = progress.max_attempts || 0
     updateTransferItem(target, progress.loaded, progress.total || target.total)
     if (progress.cancelled) {
       stopped = true
@@ -3665,8 +3801,8 @@ function uploadForm(form: FormData) {
 }
 
 function dropHint(paneName: PaneName) {
-  if (dragging.value) return '松开后传输到此窗口'
-  return activeTab(paneName)?.kind === 'remote' ? '拖拽文件上传到当前远程目录' : '本地窗口只能接收另一个窗口的文件'
+  if (dragging.value) return t('sftp.dropIntoWindow')
+  return activeTab(paneName)?.kind === 'remote' ? t('sftp.uploadHintRemote') : t('sftp.uploadHintLocal')
 }
 
 async function refreshAll() {

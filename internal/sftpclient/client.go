@@ -2,6 +2,7 @@ package sftpclient
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -31,8 +32,9 @@ type ListResult struct {
 }
 
 type FileInfo struct {
-	Name string
-	Size int64
+	Name    string
+	Size    int64
+	ModTime time.Time
 }
 
 // linkResolveWorkers bounds the parallel stat lookups used to follow symlinks
@@ -149,7 +151,35 @@ func createFile(client *sftp.Client, remotePath string) error {
 	return dst.Close()
 }
 
-func downloadFile(client *sftp.Client, remotePath string) (*sftp.File, FileInfo, error) {
+func uploadFileAt(client *sftp.Client, remotePath string, offset int64) (*sftp.File, error) {
+	target := CleanPath(remotePath)
+	if target == "." || target == "/" {
+		return nil, errors.New("invalid upload file path")
+	}
+	parent := path.Dir(target)
+	if parent != "." && parent != "/" {
+		if err := client.MkdirAll(parent); err != nil {
+			return nil, err
+		}
+	}
+	dst, err := client.OpenFile(target, os.O_CREATE|os.O_WRONLY)
+	if err != nil {
+		return nil, err
+	}
+	if err := dst.Truncate(offset); err != nil {
+		_ = dst.Close()
+		return nil, err
+	}
+	if offset > 0 {
+		if _, err := dst.Seek(offset, io.SeekStart); err != nil {
+			_ = dst.Close()
+			return nil, err
+		}
+	}
+	return dst, nil
+}
+
+func downloadFileAt(client *sftp.Client, remotePath string, offset int64) (*sftp.File, FileInfo, error) {
 	cleanPath := CleanPath(remotePath)
 	info, err := client.Stat(cleanPath)
 	if err != nil {
@@ -158,11 +188,24 @@ func downloadFile(client *sftp.Client, remotePath string) (*sftp.File, FileInfo,
 	if info.IsDir() {
 		return nil, FileInfo{}, errors.New("cannot download a directory")
 	}
+	if offset < 0 || offset > info.Size() {
+		return nil, FileInfo{}, fmt.Errorf("resume offset %d is outside the remote file (%d bytes)", offset, info.Size())
+	}
 	file, err := client.Open(cleanPath)
 	if err != nil {
 		return nil, FileInfo{}, err
 	}
-	return file, FileInfo{Name: info.Name(), Size: info.Size()}, nil
+	if offset > 0 {
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			_ = file.Close()
+			return nil, FileInfo{}, err
+		}
+	}
+	return file, FileInfo{Name: info.Name(), Size: info.Size(), ModTime: info.ModTime()}, nil
+}
+
+func downloadFile(client *sftp.Client, remotePath string) (*sftp.File, FileInfo, error) {
+	return downloadFileAt(client, remotePath, 0)
 }
 
 func makeDirectory(client *sftp.Client, remotePath string) error {
@@ -289,4 +332,14 @@ func cleanUploadName(value string) (string, error) {
 		return "", errors.New("invalid upload file name")
 	}
 	return cleaned, nil
+}
+
+// UploadTargetPath resolves the final remote file path for an upload into a
+// directory, rejecting names that would escape it.
+func UploadTargetPath(remoteDir, fileName string) (string, error) {
+	name, err := cleanUploadName(fileName)
+	if err != nil {
+		return "", err
+	}
+	return joinRemotePath(remoteDir, name), nil
 }

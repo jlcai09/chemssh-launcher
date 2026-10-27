@@ -53,6 +53,25 @@ func TestPasswordAuthRegistersBothPasswordAndKeyboardInteractive(t *testing.T) {
 	}
 }
 
+// TestPasswordAuthRejectsEmptyStoredPassword ensures an empty secret is treated
+// as "not set" instead of being sent to the server, which only produced the
+// opaque "unable to authenticate" handshake error.
+func TestPasswordAuthRejectsEmptyStoredPassword(t *testing.T) {
+	store := fakeSecretStore{secrets: map[string]string{}}
+	if err := store.Set("p1", secret.KeyPassword, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	profile := config.NewProfileDefaults()
+	profile.ID = "p1"
+	profile.Name = "test"
+	profile.AuthMethod = config.AuthPassword
+
+	if _, err := ClientConfigWithHostKeyPolicy(profile, store, HostKeyAcceptNew); err == nil {
+		t.Fatal("expected an error for an empty stored password")
+	}
+}
+
 // TestKeyboardInteractivePasswordReturnsPasswordForEveryChallenge verifies the
 // keyboard-interactive callback answers each challenge with the stored password.
 func TestKeyboardInteractivePasswordReturnsPasswordForEveryChallenge(t *testing.T) {

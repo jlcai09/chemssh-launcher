@@ -63,6 +63,9 @@ type Server struct {
 	mu                       sync.Mutex
 	session                  *activeSession
 	sessions                 map[string]*activeSession
+	pendingStart             map[string]bool
+	lastFailure              map[string]sessionFailure
+	retiredProfiles          map[string]bool
 	proxyProfileID           string
 	sessionOpenSeq           uint64
 	bridge                   chemSSHBridgeState
@@ -106,6 +109,14 @@ type activeSession struct {
 	stopping      bool
 	remotePID     int
 	workspaceRoot string
+}
+
+// sessionFailure records why the most recent start attempt for a profile
+// failed. It lives on the Server rather than on activeSession because some
+// failures happen before a session exists or after one has been removed.
+type sessionFailure struct {
+	Message string    `json:"message"`
+	At      time.Time `json:"at"`
 }
 
 type chemSSHBridgeState struct {
@@ -247,17 +258,20 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 
 func NewServer(rt *runtime.Runtime) *Server {
 	s := &Server{
-		rt:             rt,
-		mux:            http.NewServeMux(),
-		logs:           &safeLog{},
-		profileLogs:    newProfileLogStore(),
-		localLog:       &safeLog{},
-		sftp:           sftpclient.NewManager(),
-		transfers:      newTransferProgressStore(),
-		shells:         newShellManager(),
-		apiToken:       newLauncherAPIToken(),
-		sessions:       map[string]*activeSession{},
-		browserClients: map[string]time.Time{},
+		rt:              rt,
+		mux:             http.NewServeMux(),
+		logs:            &safeLog{},
+		profileLogs:     newProfileLogStore(),
+		localLog:        &safeLog{},
+		sftp:            sftpclient.NewManager(),
+		transfers:       newTransferProgressStore(),
+		shells:          newShellManager(),
+		apiToken:        newLauncherAPIToken(),
+		sessions:        map[string]*activeSession{},
+		pendingStart:    map[string]bool{},
+		lastFailure:     map[string]sessionFailure{},
+		retiredProfiles: map[string]bool{},
+		browserClients:  map[string]time.Time{},
 	}
 	s.sftpSync = newSFTPOpenSyncManager(s.sftp, s.logs)
 	s.routes()
@@ -287,6 +301,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/stop", s.apiHandler(gzipHandler(s.handleStop)))
 	s.mux.HandleFunc("/api/session/stop-service", s.apiHandler(gzipHandler(s.handleStopService)))
 	s.mux.HandleFunc("/api/session/status", s.apiHandler(gzipHandler(s.handleStatus)))
+	s.mux.HandleFunc("/api/session/statuses", s.apiHandler(gzipHandler(s.handleStatuses)))
+	s.mux.HandleFunc("/api/session/activate", s.apiHandler(gzipHandler(s.handleActivate)))
 	s.mux.HandleFunc("/api/session/shell/open", s.apiHandler(gzipHandler(s.handleShellOpen)))
 	s.mux.HandleFunc("/api/session/shell/output", s.handleShellOutput)
 	s.mux.HandleFunc("/api/session/shell/input", s.apiHandler(s.handleShellInput))
@@ -518,7 +534,7 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 			p.ID = id
 		}
 		if err := s.saveProfileWithSecrets(p, req.Secrets); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+			writeProfileSaveError(w, err)
 			return
 		}
 		writeJSON(w, p, nil)
@@ -621,11 +637,17 @@ func (s *Server) handleDuplicateProfile(w http.ResponseWriter, r *http.Request) 
 	clone.HasPassword = hasPassword
 	clone.HasPrivateKeyPassphrase = hasPassphrase
 	clone.HasSecurityToken = hasToken
+	if err := clone.Validate(); err != nil {
+		rollback()
+		writeProfileSaveError(w, err)
+		return
+	}
 	if err := s.rt.Profiles.Save(clone); err != nil {
 		rollback()
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.reviveProfile(clone.ID)
 	writeJSON(w, clone, nil)
 }
 
@@ -649,12 +671,38 @@ func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Profile.ID = id
 		if err := s.saveProfileWithSecrets(req.Profile, req.Secrets); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+			writeProfileSaveError(w, err)
 			return
 		}
 		writeJSON(w, req.Profile, nil)
 	case http.MethodDelete:
+		existing, err := s.rt.Profiles.Get(id)
+		if err != nil {
+			if errors.Is(err, config.ErrProfileNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		id = existing.ID
+		s.mu.Lock()
+		session := s.sessionForProfileLocked(id)
+		if s.retiredProfiles == nil {
+			s.retiredProfiles = map[string]bool{}
+		}
+		s.retiredProfiles[id] = true
+		delete(s.pendingStart, id)
+		delete(s.lastFailure, id)
+		s.mu.Unlock()
+
+		if session != nil {
+			s.stopSessionResources(session, true)
+		}
 		if err := s.rt.Profiles.Delete(id); err != nil {
+			// The profile is still stored, so it must remain startable; keeping
+			// the retired marker would turn every later start into a silent no-op.
+			s.reviveProfile(id)
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -662,6 +710,9 @@ func (s *Server) handleProfileByID(w http.ResponseWriter, r *http.Request) {
 		_ = s.rt.Secrets.Delete(id, secret.KeyPassword)
 		_ = s.rt.Secrets.Delete(id, secret.KeyPrivatePassphrase)
 		_ = s.rt.Secrets.Delete(id, secret.KeySecurityToken)
+		if s.profileLogs != nil {
+			s.profileLogs.delete(id)
+		}
 		writeJSON(w, map[string]bool{"ok": true}, nil)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -687,6 +738,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if s.profileRetired(p.ID) {
+		writeError(w, http.StatusConflict, errors.New("profile was deleted"))
+		return
+	}
 	sessionLog := s.profileLogWriter(p.ID)
 	s.profileLog(p.ID, "start requested for "+p.Name)
 	if p.IsLocal() {
@@ -696,9 +751,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if warning := sshclient.PortWarning(p); warning != "" {
 		s.profileLog(p.ID, "warning: "+warning)
 	}
-	if p.UsesNonLoopbackLocalHost() {
-		s.profileLog(p.ID, "warning: local bind host "+p.LocalHost+" may expose the tunnel")
-	}
+	s.logProfileWarnings(p)
 	s.stopActiveForwardingBeforeStart(p.ID)
 	if err := s.blockActiveForwardingConflict(p); err != nil {
 		writeError(w, http.StatusConflict, err)
@@ -730,15 +783,22 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	// Continue asynchronously after host-key verification so the frontend can
 	// receive and confirm unknown fingerprints before startup is queued.
+	s.markStartPending(p.ID)
 	go s.startRemoteSessionAsync(p, client, sessionLog)
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
 func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, sessionLog io.Writer) {
+	defer s.clearStartPending(p.ID)
+	if s.profileRetired(p.ID) {
+		_ = client.Close()
+		return
+	}
 	check, err := sshclient.RunCheckPortCommand(client, p, sessionLog, sessionLog)
 	if err != nil {
 		_ = client.Close()
 		s.profileLog(p.ID, "ChemSSH port check failed for "+p.Name+": "+err.Error())
+		s.recordSessionFailure(p.ID, "ChemSSH port check failed: "+err.Error())
 		return
 	}
 	if check.Reusable {
@@ -748,6 +808,11 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, s
 	}
 
 	s.mu.Lock()
+	if s.retiredProfiles[p.ID] {
+		s.mu.Unlock()
+		_ = client.Close()
+		return
+	}
 	if s.sessionForProfileLocked(p.ID) != nil {
 		s.mu.Unlock()
 		_ = client.Close()
@@ -762,6 +827,7 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, s
 			s.mu.Unlock()
 			_ = client.Close()
 			s.profileLog(p.ID, "failed to start remote command: "+err.Error())
+			s.recordSessionFailure(p.ID, "failed to start remote command: "+err.Error())
 			return
 		}
 	}
@@ -773,6 +839,7 @@ func (s *Server) startRemoteSessionAsync(p config.Profile, client *ssh.Client, s
 		s.mu.Unlock()
 		_ = client.Close()
 		s.profileLog(p.ID, "failed to start tunnel: "+err.Error())
+		s.recordSessionFailure(p.ID, "failed to start tunnel: "+err.Error())
 		return
 	}
 
@@ -844,6 +911,13 @@ func (s *Server) startLocalSession(w http.ResponseWriter, p config.Profile) {
 	}
 
 	s.mu.Lock()
+	if s.retiredProfiles[p.ID] {
+		s.mu.Unlock()
+		healthStop()
+		stopLocalProcess(cmd)
+		writeError(w, http.StatusConflict, errors.New("profile was deleted"))
+		return
+	}
 	if s.sessionForProfileLocked(p.ID) != nil {
 		s.mu.Unlock()
 		healthStop()
@@ -892,6 +966,7 @@ func (s *Server) waitForLocalHealth(session *activeSession, p config.Profile, ct
 			return
 		}
 		s.profileLog(p.ID, "local health check failed: "+err.Error())
+		s.recordSessionFailure(p.ID, "local health check failed: "+err.Error())
 		s.stopSessionResources(session, true)
 		return
 	}
@@ -1091,6 +1166,7 @@ func (s *Server) waitForRestartedForwardingHealth(session *activeSession, p conf
 			return
 		}
 		s.profileLog(p.ID, "health check failed after forwarding restart: "+err.Error())
+		s.recordSessionFailure(p.ID, "health check failed after forwarding restart: "+err.Error())
 		s.stopSessionResources(session, true)
 		return
 	}
@@ -1108,6 +1184,7 @@ func (s *Server) waitForRemoteHealth(session *activeSession, p config.Profile, c
 			return
 		}
 		s.profileLog(p.ID, "health check failed: "+err.Error())
+		s.recordSessionFailure(p.ID, "health check failed: "+err.Error())
 		s.stopSessionResources(session, true)
 		return
 	}
@@ -1119,10 +1196,64 @@ func (s *Server) waitForRemoteHealth(session *activeSession, p config.Profile, c
 	}
 }
 
+// markStartPending flags a profile as starting and drops the previous failure.
+// It is called before the asynchronous start goroutine is spawned.
+func (s *Server) markStartPending(profileID string) {
+	if profileID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retiredProfiles[profileID] {
+		return
+	}
+	if s.pendingStart == nil {
+		s.pendingStart = map[string]bool{}
+	}
+	s.pendingStart[profileID] = true
+	delete(s.lastFailure, profileID)
+}
+
+// clearStartPending clears the starting flag once the start attempt has
+// finished, whether it succeeded or failed.
+func (s *Server) clearStartPending(profileID string) {
+	if profileID == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.pendingStart, profileID)
+	retired := s.retiredProfiles[profileID]
+	s.mu.Unlock()
+	if retired && s.profileLogs != nil {
+		// A start attempt that was in flight during deletion may have written
+		// log lines after the delete handler cleared them.
+		s.profileLogs.delete(profileID)
+	}
+}
+
+// recordSessionFailure stores the reason a start attempt failed. The record is
+// keyed by profile ID and survives session teardown so status polling can still
+// report the failure.
+func (s *Server) recordSessionFailure(profileID, message string) {
+	if profileID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retiredProfiles[profileID] {
+		return
+	}
+	if s.lastFailure == nil {
+		s.lastFailure = map[string]sessionFailure{}
+	}
+	s.lastFailure[profileID] = sessionFailure{Message: message, At: time.Now()}
+}
+
 func (s *Server) markSessionReady(session *activeSession) {
 	s.mu.Lock()
 	if s.sessionStillActiveLocked(session) && session.forwarding {
 		session.ready = true
+		delete(s.lastFailure, session.id)
 	}
 	s.mu.Unlock()
 }
@@ -1884,6 +2015,7 @@ func (s *Server) watchRemoteProcess(session *activeSession) {
 
 	s.closeChemSSHBridgeSessionForProfile(session.id)
 	s.sessionLog(session, "remote command stopped with error: "+err.Error())
+	s.recordSessionFailure(session.id, "remote command stopped with error: "+err.Error())
 	if healthStop != nil {
 		healthStop()
 	}
@@ -1924,6 +2056,7 @@ func (s *Server) watchLocalProcess(session *activeSession, cmd *exec.Cmd) {
 		return
 	}
 	s.sessionLog(session, "local ChemSSH command stopped with error: "+err.Error())
+	s.recordSessionFailure(session.id, "local ChemSSH command stopped with error: "+err.Error())
 }
 
 func (s *Server) stopForwarding(profileID string) {
@@ -2179,6 +2312,35 @@ func (s *Server) handleStopService(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
+// handleActivate makes one session the one the local proxy serves. Promotion is
+// a write, so it lives in its own endpoint instead of piggybacking on the status
+// poll that runs every couple of seconds.
+func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	req := decodeSessionActionRequest(r)
+	s.mu.Lock()
+	session := s.sessionForProfileLocked(req.ID)
+	if session == nil && req.ID == "" {
+		session = s.currentProxySessionLocked()
+	}
+	activated := false
+	if session != nil && session.forwarding {
+		s.promoteProxySessionLocked(session)
+		activated = true
+	}
+	id := ""
+	openSeq := uint64(0)
+	if session != nil {
+		id = session.id
+		openSeq = session.openSeq
+	}
+	s.mu.Unlock()
+	writeJSON(w, map[string]any{"ok": true, "activated": activated, "id": id, "open_seq": openSeq}, nil)
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -2190,11 +2352,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if session == nil && profileID == "" {
 		session = s.currentProxySessionLocked()
 	}
-	if session != nil && profileID != "" && session.forwarding && r.URL.Query().Get("activate") == "1" {
-		s.promoteProxySessionLocked(session)
-	}
 	running := session != nil
 	forwarding := false
+	ready := false
 	name := ""
 	id := ""
 	openSeq := uint64(0)
@@ -2204,17 +2364,118 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		name = session.name
 		id = session.id
 		forwarding = session.forwarding
+		ready = session.forwarding && session.ready
 		openSeq = session.openSeq
 		profile = session.profile
 		openBrowser = session.profile.OpenBrowser
 	}
+	statusProfileID := profileID
+	if statusProfileID == "" && session != nil {
+		statusProfileID = session.id
+	}
+	pendingStart := false
+	var lastFailure *sessionFailure
+	if statusProfileID != "" {
+		pendingStart = s.pendingStart[statusProfileID]
+		lastFailure = sessionFailurePtr(s.lastFailure, statusProfileID)
+	}
+	phase := deriveSessionPhase(running, forwarding, ready, pendingStart, lastFailure != nil)
 	s.mu.Unlock()
 
 	url := ""
 	if running && forwarding {
 		url = s.sessionProxyURL(profile, openSeq)
 	}
-	writeJSON(w, map[string]any{"running": running, "forwarding": forwarding, "id": id, "name": name, "url": url, "open_browser": openBrowser, "open_seq": openSeq}, nil)
+	writeJSON(w, map[string]any{
+		"running":       running,
+		"forwarding":    forwarding,
+		"id":            id,
+		"name":          name,
+		"url":           url,
+		"open_browser":  openBrowser,
+		"open_seq":      openSeq,
+		"ready":         ready,
+		"pending_start": pendingStart,
+		"last_failure":  lastFailure,
+		"phase":         phase,
+	}, nil)
+}
+
+// deriveSessionPhase collapses the session and per-profile start records into
+// the single phase the UI renders. A session that still exists but has stopped
+// forwarding reports paused rather than stopped, because its remote command may
+// still be running.
+func deriveSessionPhase(running, forwarding, ready, pendingStart, hasFailure bool) string {
+	switch {
+	case running && forwarding && ready:
+		return "ready"
+	case running && forwarding:
+		return "starting"
+	case running:
+		return "paused"
+	case pendingStart:
+		return "starting"
+	case hasFailure:
+		return "failed"
+	default:
+		return "stopped"
+	}
+}
+
+func sessionFailurePtr(failures map[string]sessionFailure, profileID string) *sessionFailure {
+	failure, ok := failures[profileID]
+	if !ok {
+		return nil
+	}
+	record := failure
+	return &record
+}
+
+// handleStatuses reports every profile that has a session or a start record, so
+// the launcher can poll all of them with one request instead of one per profile.
+func (s *Server) handleStatuses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	s.mu.Lock()
+	statuses := make(map[string]map[string]any, len(s.sessions)+len(s.pendingStart)+len(s.lastFailure))
+	for id, session := range s.sessions {
+		ready := session.forwarding && session.ready
+		failure := sessionFailurePtr(s.lastFailure, id)
+		statuses[id] = map[string]any{
+			"running":      true,
+			"forwarding":   session.forwarding,
+			"ready":        ready,
+			"name":         session.name,
+			"open_seq":     session.openSeq,
+			"phase":        deriveSessionPhase(true, session.forwarding, ready, s.pendingStart[id], failure != nil),
+			"last_failure": failure,
+		}
+	}
+	for id := range s.pendingStart {
+		if _, ok := statuses[id]; ok {
+			continue
+		}
+		failure := sessionFailurePtr(s.lastFailure, id)
+		statuses[id] = map[string]any{
+			"running":      false,
+			"phase":        "starting",
+			"last_failure": failure,
+		}
+	}
+	for id := range s.lastFailure {
+		if _, ok := statuses[id]; ok {
+			continue
+		}
+		statuses[id] = map[string]any{
+			"running":      false,
+			"phase":        "failed",
+			"last_failure": sessionFailurePtr(s.lastFailure, id),
+		}
+	}
+	s.mu.Unlock()
+	writeJSON(w, map[string]any{"statuses": statuses}, nil)
 }
 
 type browserClientRequest struct {
@@ -2369,6 +2630,9 @@ func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	for _, line := range existingLines {
 		fmt.Fprintf(w, "data: %s\n\n", line)
 	}
+	// Mark the end of the replay so the client can swap the whole buffer in one
+	// step instead of appending the replay on top of what it already shows.
+	fmt.Fprint(w, "event: replay-end\ndata: {}\n\n")
 	flusher.Flush()
 
 	// Create channel for new log lines
@@ -2410,15 +2674,12 @@ func (s *Server) handleUISettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, settings, err)
 	case http.MethodPost:
 		var payload struct {
-			Language string `json:"language"`
+			Language           *string `json:"language"`
+			TerminalFontSize   *int    `json:"terminal_font_size"`
+			TerminalScrollback *int    `json:"terminal_scrollback"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		language, ok := config.NormalizeUILanguage(payload.Language)
-		if !ok {
-			writeError(w, http.StatusBadRequest, errors.New("unsupported UI language"))
 			return
 		}
 		settings, err := config.LoadUISettings()
@@ -2426,12 +2687,40 @@ func (s *Server) handleUISettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		settings.Language = language
+		languageChanged := ""
+		if payload.Language != nil {
+			language, ok := config.NormalizeUILanguage(*payload.Language)
+			if !ok {
+				writeError(w, http.StatusBadRequest, errors.New("unsupported UI language"))
+				return
+			}
+			settings.Language = language
+			languageChanged = language
+		}
+		if payload.TerminalFontSize != nil {
+			if *payload.TerminalFontSize < config.MinTerminalFontSize || *payload.TerminalFontSize > config.MaxTerminalFontSize {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("terminal font size must be between %d and %d", config.MinTerminalFontSize, config.MaxTerminalFontSize))
+				return
+			}
+			settings.TerminalFontSize = *payload.TerminalFontSize
+		}
+		if payload.TerminalScrollback != nil {
+			if *payload.TerminalScrollback < config.MinTerminalScrollback || *payload.TerminalScrollback > config.MaxTerminalScrollback {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("terminal scrollback must be between %d and %d", config.MinTerminalScrollback, config.MaxTerminalScrollback))
+				return
+			}
+			settings.TerminalScrollback = *payload.TerminalScrollback
+		}
 		if err := config.SaveUISettings(settings); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		s.localLog.add("UI language set to " + language)
+		if languageChanged != "" {
+			s.localLog.add("UI language set to " + languageChanged)
+		}
+		if payload.TerminalFontSize != nil || payload.TerminalScrollback != nil {
+			s.localLog.add(fmt.Sprintf("terminal display settings updated: font %dpx, scrollback %d lines", settings.TerminalFontSize, settings.TerminalScrollback))
+		}
 		writeJSON(w, settings, nil)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -2510,6 +2799,12 @@ func (s *Server) handleImportProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, profile := range profiles {
+		if err := profile.Validate(); err != nil {
+			writeProfileSaveError(w, err)
+			return
+		}
+	}
+	for _, profile := range profiles {
 		_ = s.rt.Secrets.Delete(profile.ID, secret.KeyPassword)
 		_ = s.rt.Secrets.Delete(profile.ID, secret.KeyPrivatePassphrase)
 		_ = s.rt.Secrets.Delete(profile.ID, secret.KeySecurityToken)
@@ -2517,6 +2812,7 @@ func (s *Server) handleImportProfiles(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		s.reviveProfile(profile.ID)
 	}
 	s.localLog.add("imported profiles: " + strconv.Itoa(len(profiles)))
 	writeJSON(w, map[string]any{"ok": true, "count": len(profiles)}, nil)
@@ -2565,6 +2861,9 @@ type secretRequest struct {
 }
 
 func (s *Server) saveProfileWithSecrets(p config.Profile, req secretRequest) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
 	if p.IsLocal() {
 		p.AuthMethod = ""
 		p.SSHHost = ""
@@ -2579,6 +2878,12 @@ func (s *Server) saveProfileWithSecrets(p config.Profile, req secretRequest) err
 		if p.AuthMethod == config.AuthPassword {
 			switch req.PasswordAction {
 			case "replace":
+				if req.Password == "" {
+					// The editor shows an empty field as "leave unchanged", and an
+					// empty secret is unusable for SSH. Never clobber a stored
+					// password with an empty value; require "clear" to remove it.
+					break
+				}
 				started := time.Now()
 				if err := s.rt.Secrets.Set(p.ID, secret.KeyPassword, req.Password); err != nil {
 					return err
@@ -2601,6 +2906,9 @@ func (s *Server) saveProfileWithSecrets(p config.Profile, req secretRequest) err
 		if p.AuthMethod == config.AuthPrivateKey {
 			switch req.PassphraseAction {
 			case "replace":
+				if req.Passphrase == "" {
+					break
+				}
 				started := time.Now()
 				if err := s.rt.Secrets.Set(p.ID, secret.KeyPrivatePassphrase, req.Passphrase); err != nil {
 					return err
@@ -2622,6 +2930,9 @@ func (s *Server) saveProfileWithSecrets(p config.Profile, req secretRequest) err
 	}
 	switch req.SecurityTokenAction {
 	case "replace":
+		if req.SecurityToken == "" {
+			break
+		}
 		started := time.Now()
 		if err := s.rt.Secrets.Set(p.ID, secret.KeySecurityToken, req.SecurityToken); err != nil {
 			return err
@@ -2637,7 +2948,70 @@ func (s *Server) saveProfileWithSecrets(p config.Profile, req secretRequest) err
 		p.HasSecurityToken = false
 	case "keep":
 	}
-	return s.rt.Profiles.Save(p)
+	s.syncSecretFlags(&p)
+	if err := s.rt.Profiles.Save(p); err != nil {
+		return err
+	}
+	s.reviveProfile(p.ID)
+	s.logProfileWarnings(p)
+	return nil
+}
+
+// syncSecretFlags makes the cached "has secret" flags match the secret store. A
+// flag without a usable secret makes the editor claim "已保存" while
+// authentication can never succeed, and a secret without the flag hides a
+// working credential. Read failures keep the incoming flags, since the store may
+// only be temporarily unavailable.
+func (s *Server) syncSecretFlags(p *config.Profile) {
+	if !p.IsLocal() {
+		switch p.AuthMethod {
+		case config.AuthPassword:
+			p.HasPassword = s.alignSecretFlag(p.ID, secret.KeyPassword, p.HasPassword, "password")
+			p.HasPrivateKeyPassphrase = false
+		case config.AuthPrivateKey:
+			p.HasPrivateKeyPassphrase = s.alignSecretFlag(p.ID, secret.KeyPrivatePassphrase, p.HasPrivateKeyPassphrase, "private key passphrase")
+			p.HasPassword = false
+		}
+	}
+	p.HasSecurityToken = s.alignSecretFlag(p.ID, secret.KeySecurityToken, p.HasSecurityToken, "security token")
+}
+
+func (s *Server) alignSecretFlag(profileID, key string, claimed bool, label string) bool {
+	value, ok, err := s.rt.Secrets.Get(profileID, key)
+	if err != nil {
+		return claimed
+	}
+	usable := ok && value != ""
+	if claimed && !usable {
+		s.profileLog(profileID, label+" flag cleared: secret store has no usable value")
+	}
+	return usable
+}
+
+func writeProfileSaveError(w http.ResponseWriter, err error) {
+	if errors.Is(err, config.ErrProfileInvalid) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err)
+}
+
+func (s *Server) reviveProfile(profileID string) {
+	if profileID == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.retiredProfiles, profileID)
+	s.mu.Unlock()
+}
+
+func (s *Server) profileRetired(profileID string) bool {
+	if profileID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retiredProfiles[profileID]
 }
 
 func (l *safeLog) Write(p []byte) (int, error) {
@@ -2716,6 +3090,16 @@ func (s *profileLogStore) snapshot(profileID string) []string {
 	return s.forProfile(profileID).snapshot()
 }
 
+func (s *profileLogStore) delete(profileID string) {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		profileID = "_unspecified"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.logs, profileID)
+}
+
 func (w profileLogWriter) Write(p []byte) (int, error) {
 	w.store.forProfile(w.profileID).Write(p)
 	return len(p), nil
@@ -2727,6 +3111,14 @@ func (s *Server) profileLog(profileID, line string) {
 		return
 	}
 	s.profileLogs.add(profileID, line)
+}
+
+// logProfileWarnings writes the non-fatal configuration warnings into the
+// profile log, which is the one channel both the GUI and the tunnel side can see.
+func (s *Server) logProfileWarnings(p config.Profile) {
+	for _, warning := range p.Warnings() {
+		s.profileLog(p.ID, "warning: "+warning)
+	}
 }
 
 func (s *Server) sessionLog(session *activeSession, line string) {

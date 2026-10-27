@@ -84,7 +84,7 @@ If the remote ChemSSH port is already serving a reusable ChemSSH instance, the l
 - Same-origin launcher proxy for embedded ChemSSH (`/<profile-name>/chemssh`; the bare `/chemssh` path works too), including WebView2-friendly file dragging.
 - Remote and local profile support.
 - Server-profile sidebar with drag-to-reorder and a right-click menu for duplicating, deleting, and opening a remote server in SFTP.
-- Profile-scoped logs plus launcher/backend logs.
+- Profile-scoped logs plus launcher/backend logs, with keyword filtering, copy-all, and export.
 - OS credential-store secrets, encrypted vault fallback, and OpenSSH-compatible `known_hosts`.
 - Standalone SSH debug terminal at `/terminal` that works before ChemSSH is installed, with an Xshell-style server sidebar.
 - Drag files or folders from the OS into the SSH terminal, or use the upload button in the bottom status bar, to upload them over SFTP with a progress ring.
@@ -92,7 +92,7 @@ If the remote ChemSSH port is already serving a reusable ChemSSH instance, the l
 - Xftp-style two-pane file manager with local and remote tabs.
 - File operations: list, open, open in text editor, create file, create directory, rename, delete, copy path.
 - File transfers between local and remote panes, remote and remote panes, and local panes.
-- Transfer queue with progress, speed/ETA, grouped folder transfers, pause, resume, and cancel.
+- Transfer queue with progress, speed/ETA, grouped folder transfers, pause, resume, cancel, byte-offset resume, and automatic retry.
 - Remote file open cache with automatic upload-back sync after local edits.
 - System file icons where supported, with fallback icons elsewhere.
 - Backend page for interface language and version, config/cache paths, profile export/import, and cache cleanup.
@@ -157,7 +157,7 @@ The terminal page provides a basic interactive SSH shell for remote profiles wit
 
 It can be used before ChemSSH is installed to inspect the server, check paths, load modules, or run simple commands. The launcher opens a direct SSH connection and requests a remote PTY (`xterm-256color`); authentication and host-key verification use the same profile and `known_hosts` policy as normal sessions. Terminal size is forwarded on resize, and sessions are closed when you disconnect, delete the profile, or exit the launcher. Local profiles do not provide an SSH terminal.
 
-The page follows an Xshell-style layout: a left sidebar lists the saved remote profiles; clicking one selects it, and double-clicking one connects it. If that server already has a session, the matching tab is activated; otherwise the active idle tab is reused or a new tab is opened. On narrow windows the sidebar collapses to a compact icon column. The clear and upload buttons, the `ssh://user@host:port` address, and the connection status live in the status bar at the bottom of the terminal.
+The page follows an Xshell-style layout: a left sidebar lists the saved remote profiles; clicking one selects it, and double-clicking one connects it. The refresh button in the sidebar header reloads the profile list, so profiles added, renamed, or deleted on the launcher page show up without reloading the terminal page. If that server already has a session, the matching tab is activated; otherwise the active idle tab is reused or a new tab is opened. On narrow windows the sidebar collapses to a compact icon column. The clear and upload buttons, the `ssh://user@host:port` address, and the connection status live in the status bar at the bottom of the terminal.
 
 Each tab holds its own SSH shell and transfer session. Click `+` in the tab strip to open another tab, right-click a tab to duplicate it, close it, or close all tabs, or double-click a tab to duplicate it. A duplicated tab reconnects to the same profile and runs `cd` into the directory the source tab was in, so parallel shells start in the same place. Drag a tab left or right to reorder the tab strip.
 
@@ -189,9 +189,13 @@ Supported transfer paths include:
 - Local to local through the launcher.
 - External file/folder drop upload to a remote tab.
 
+Single-file copies (local to remote, remote to remote, and local to local) resume by byte offset: the launcher only counts bytes whose write has been confirmed, and when a transfer breaks it re-dials SSH and retries with exponential backoff (up to 5 attempts, never waiting more than 15 seconds between them), continuing from the last confirmed offset instead of copying again from the start. While it is waiting, the transfer row shows `Retry n/5` and reports waiting data / estimating instead of a speed and ETA. Errors that cannot be recovered by retrying — permission denied, missing target, a full disk, a source file that changed mid-transfer — fail immediately, and the failed row can be retried from the transfer panel with the context menu (single row or multi-selection), still continuing from its offset. If the source file size or mtime changes during a transfer, the launcher stops and reports it rather than producing a corrupt file; a manual retry against a changed source restarts that file from zero. A cancelled task restarts from zero when it is retried. The browser file-picker upload and the browser download paths do not use this queue — a request body or a response stream cannot be replayed — so they support neither resume nor automatic retry and must be started again after an interruption.
+
+`Open` acts on the whole selection: with several rows selected, every selected file is opened instead of only the row that was right-clicked, and the menu label shows the count.
+
 Remote files opened through `Open` or `Open in text editor` are downloaded to a local cache directory and opened with the OS file association; `Open in text editor` uses Notepad on Windows, TextEdit on macOS, and the system default app (xdg-open) on Linux. They are watched for changes and uploaded back to the remote path while the SFTP session remains connected. This cache is temporary and is cleaned when the launcher exits when possible.
 
-Directory transfer support is implemented by expanding directories into file tasks. Some backend paths still only copy individual files, so a local-to-local directory transfer may fail with `directory transfer is not supported yet`.
+Directory transfer support is implemented by expanding directories into file tasks. Some backend paths still only copy individual files, so such a transfer fails with a directory-transfer error instead of being expanded.
 
 ## ChemSSH Bridge
 
@@ -274,7 +278,7 @@ ChemSSH Launcher relies on SSH for authentication, encryption, host-key verifica
 
 On the first connection to a server, the GUI/CLI shows the host key type and SHA256 fingerprint. Trust it only after comparing it with a reliable source, such as a server administrator or an existing trusted SSH client. If a saved host key changes later, the GUI blocks the connection and shows both the saved and the new fingerprint; the old key is replaced in `known_hosts` only after you verify the new fingerprint and explicitly confirm. The CLI continues to reject changed keys.
 
-Binding `Local Host` to anything other than loopback, such as `0.0.0.0`, can expose the tunnel or local ChemSSH target to other machines. The launcher logs a warning, but the setting is still your responsibility.
+Binding `Local Host` to anything other than loopback, such as `0.0.0.0`, can expose the tunnel or local ChemSSH target to other machines. The launcher warns about it in the tunnel form, writes a warning to the profile log when the session starts, and prints one from the CLI when the profile is saved; the setting is still your responsibility.
 
 The launcher's local GUI API additionally protects write operations (non-GET requests): every launch generates a random token, stores it in the `chemssh_launcher_token` cookie, and requires write requests to carry a matching `X-ChemSSH-Launcher-Token` header plus a valid Origin/Sec-Fetch-Site. The launcher's own frontend sends that header itself; for proxied ChemSSH pages the launcher injects a small script that reads the cookie and fills the header in, so bridge write endpoints (such as opening a file locally) need no extra configuration.
 
