@@ -68,7 +68,6 @@ button {
 }
 
 .log-panel pre::selection,
-.transfer-log pre::selection,
 .transfer-panel pre::selection {
   color: #ffffff;
   background: rgba(22, 115, 143, 0.72);
@@ -168,7 +167,6 @@ p,
 .log-panel,
 .xftp-pane,
 .terminal-sessions,
-.transfer-log,
 .transfer-panel {
   min-width: 0;
   min-height: 0;
@@ -523,14 +521,12 @@ p,
 }
 
 .log-panel,
-.transfer-log,
 .transfer-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
 }
 
 .log-panel pre,
-.transfer-log pre,
 .transfer-panel pre {
   min-height: 0;
   margin: 0;
@@ -1622,7 +1618,6 @@ p,
   color: #667085;
 }
 
-.transfer-log,
 .transfer-panel {
   min-height: 0;
 }
@@ -1890,11 +1885,6 @@ p,
   left: 4px;
   right: 12px;
   bottom: 4px;
-}
-
-.transfer-error {
-  color: var(--danger);
-  overflow-wrap: anywhere;
 }
 
 .backend-view {
@@ -2307,7 +2297,6 @@ body,
 .log-panel,
 .xftp-pane,
 .terminal-sessions,
-.transfer-log,
 .transfer-panel,
 .toolbar-submenu,
 .sftp-context-menu,
@@ -2341,7 +2330,6 @@ body,
 .log-panel,
 .xftp-pane,
 .terminal-sessions,
-.transfer-log,
 .transfer-panel,
 .form-section,
 .cache-entry,
@@ -2552,7 +2540,6 @@ body,
 
 .file-row.is-drag-export,
 .file-row.is-move-drop-target,
-.file-row.is-context-target,
 .file-row.is-drop-target {
   outline: 2px solid var(--accent-2);
   outline-offset: -2px;
@@ -2572,7 +2559,6 @@ body,
    Low effects mode: solid surfaces, no backdrop-filter, no decorative
    shadows, only transform/opacity animations). Higher specificity win for
    rules that the low-effects section sets via !important. */
-.Launcherview-section.section-boundary,
 .form-section {
   border-top: 3px solid var(--control-border);
   padding-top: 14px;
@@ -2775,7 +2761,6 @@ body,
 .log-panel,
 .xftp-pane,
 .terminal-sessions,
-.transfer-log,
 .transfer-panel {
   background: #ffffff;
   border-top: 1px solid var(--rim-light);
@@ -2835,7 +2820,6 @@ body,
   .log-panel,
   .xftp-pane,
   .terminal-sessions,
-  .transfer-log,
   .transfer-panel,
   .browser-chrome {
     backdrop-filter: none;

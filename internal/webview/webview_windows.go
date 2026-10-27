@@ -32,10 +32,6 @@ const (
 	idNo          = 7
 )
 
-func Available() bool {
-	return true
-}
-
 func DefaultEnabled() bool {
 	return true
 }
@@ -185,11 +181,7 @@ func configureChromium(w webview2.WebView, opts Options) {
 	if err := settings.PutAreDevToolsEnabled(!opts.DisableDevTools); err != nil {
 		log.Printf("warning: could not configure WebView2 DevTools: %v", err)
 	}
-	userAgent := opts.UserAgent
-	if userAgent == "" {
-		userAgent = desktopChromeUserAgent
-	}
-	if err := settings.PutUserAgent(userAgent); err != nil {
+	if err := settings.PutUserAgent(desktopChromeUserAgent); err != nil {
 		log.Printf("warning: could not configure WebView2 user agent: %v", err)
 	}
 }

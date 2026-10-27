@@ -403,9 +403,6 @@ type SessionPhase = 'stopped' | 'starting' | 'ready' | 'paused' | 'failed'
 
 interface SessionStatus {
   running: boolean
-  forwarding?: boolean
-  ready?: boolean
-  name?: string
   open_seq?: number
   phase: SessionPhase
   last_failure?: { message: string; at: string } | null

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"chemssh-launcher/internal/config"
@@ -102,16 +101,6 @@ func normalizeImportedProfile(profile config.Profile) config.Profile {
 		profile.StartCommand = defaults.StartCommand
 	}
 	if profile.IsLocal() {
-		localDefaults := config.NewLocalProfileDefaults()
-		if profile.LocalHost == "" {
-			profile.LocalHost = localDefaults.LocalHost
-		}
-		if profile.LocalPort == 0 {
-			profile.LocalPort = localDefaults.LocalPort
-		}
-		if profile.LocalURLPath == "" {
-			profile.LocalURLPath = localDefaults.LocalURLPath
-		}
 		profile.SSHHost = ""
 		profile.SSHPort = 0
 		profile.SSHUser = ""
@@ -294,8 +283,4 @@ func cleanupSFTPOpenCache(logs *safeLog) {
 	if logs != nil {
 		logs.add("SFTP file cache cleaned: " + dir)
 	}
-}
-
-func ensureParentDir(path string) error {
-	return os.MkdirAll(filepath.Dir(path), 0o700)
 }

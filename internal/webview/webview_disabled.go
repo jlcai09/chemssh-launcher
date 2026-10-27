@@ -4,10 +4,6 @@ package webview
 
 import "context"
 
-func Available() bool {
-	return false
-}
-
 func DefaultEnabled() bool {
 	return false
 }

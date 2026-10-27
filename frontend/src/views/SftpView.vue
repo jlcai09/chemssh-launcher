@@ -316,7 +316,7 @@
                 draggable="true"
                 @mousedown.left="beginSelect(paneName, index, entry, $event)"
                 @click.prevent="handleRowClick(paneName, entry, $event)"
-                @contextmenu.prevent="openFileContextMenu(paneName, index, entry, $event)"
+                @contextmenu.prevent="openFileContextMenu(paneName, entry, $event)"
                 @mouseenter="extendSelection(paneName, index)"
                 @dragstart="startFileDrag(paneName, index, entry, $event)"
                 @dragenter="handleFolderDragOver(paneName, entry, $event)"
@@ -2511,7 +2511,7 @@ function isInDragRange(paneName: PaneName, index: number, entry: FileEntry) {
   return index >= from && index <= to
 }
 
-function openFileContextMenu(paneName: PaneName, index: number, entry: FileEntry, event: MouseEvent) {
+function openFileContextMenu(paneName: PaneName, entry: FileEntry, event: MouseEvent) {
   const tab = activeTab(paneName)
   if (!tab) return
   event.preventDefault()
@@ -3373,7 +3373,7 @@ function handleFolderDragOver(paneName: PaneName, entry: FileEntry, event: DragE
   if (!entry.is_dir || (!hasExternalFiles(event) && !hasAppDrag(event))) return
   const valid = hasExternalFiles(event)
     ? Boolean(activeTab(paneName)?.kind === 'remote')
-    : isValidFolderTransferTarget(paneName, entry, folderDragPayload(event))
+    : isValidFolderTransferTarget(entry, folderDragPayload(event))
   if (!valid) {
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'
     if (isFolderDropTarget(paneName, entry)) folderDropTarget.value = null
@@ -3398,7 +3398,7 @@ async function handleFolderDrop(paneName: PaneName, entry: FileEntry, event: Dra
   if (!entry.is_dir || (!hasExternalFiles(event) && !hasAppDrag(event))) return
   const payload = folderDragPayload(event)
   const external = hasExternalFiles(event)
-  if (!external && !isValidFolderTransferTarget(paneName, entry, payload)) return
+  if (!external && !isValidFolderTransferTarget(entry, payload)) return
   if (external && activeTab(paneName)?.kind !== 'remote') return
 
   event.preventDefault()
@@ -3472,7 +3472,7 @@ async function handleParentDrop(paneName: PaneName, event: DragEvent) {
   }
 }
 
-function isValidFolderTransferTarget(targetPane: PaneName, target: FileEntry, payload: DragPayload | null) {
+function isValidFolderTransferTarget(target: FileEntry, payload: DragPayload | null) {
   if (!target.is_dir || !payload || payload.paths.length === 0) return false
   const source = tabByID(payload.pane, payload.tabID)
   if (!source) return false

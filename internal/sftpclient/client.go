@@ -301,18 +301,6 @@ func CleanPath(value string) string {
 	return cleaned
 }
 
-func ParentPath(value string) string {
-	cleaned := CleanPath(value)
-	if cleaned == "." || cleaned == "/" {
-		return cleaned
-	}
-	parent := path.Dir(cleaned)
-	if parent == "" {
-		return "."
-	}
-	return parent
-}
-
 func joinRemotePath(parent, name string) string {
 	parent = CleanPath(parent)
 	if parent == "." {

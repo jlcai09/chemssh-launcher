@@ -19,19 +19,3 @@ func TestCleanPath(t *testing.T) {
 		}
 	}
 }
-
-func TestParentPath(t *testing.T) {
-	tests := map[string]string{
-		".":              ".",
-		"/":              "/",
-		"file":           ".",
-		"dir/file":       "dir",
-		"/home/user":     "/home",
-		"/home/user/app": "/home/user",
-	}
-	for input, want := range tests {
-		if got := ParentPath(input); got != want {
-			t.Fatalf("ParentPath(%q) = %q, want %q", input, got, want)
-		}
-	}
-}

@@ -1595,7 +1595,6 @@ body {
 
 /* ------------------------------------------------------------- shared UI */
 
-.lumen-window .page-title,
 .lumen-window .panel-header strong,
 .lumen-window .logs-title h2 {
   color: #2c2c2e;
@@ -2793,7 +2792,6 @@ body {
 
 .lumen-window .file-row.is-drag-export,
 .lumen-window .file-row.is-move-drop-target,
-.lumen-window .file-row.is-context-target,
 .lumen-window .file-row.is-drop-target {
   outline: 1.5px solid var(--lumen-blue);
   outline-offset: -2px;
@@ -2933,7 +2931,6 @@ body {
   font-size: calc(11px * var(--lumen-ui-scale));
 }
 
-.lumen-window .transfer-log pre,
 .lumen-window .transfer-panel pre {
   flex: 1 1 auto;
   min-height: 0;

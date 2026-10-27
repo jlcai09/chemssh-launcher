@@ -12,7 +12,7 @@ export type UploadEntry = {
   rootName: string
 }
 
-export type FileSystemEntryLike = {
+type FileSystemEntryLike = {
   isFile: boolean
   isDirectory: boolean
   name: string
@@ -22,7 +22,7 @@ export type FileSystemEntryLike = {
   }
 }
 
-export const SAFE_UPLOAD_SEGMENT_RE = /^[A-Za-z0-9._()\-]+$/
+const SAFE_UPLOAD_SEGMENT_RE = /^[A-Za-z0-9._()\-]+$/
 
 export function filesToUploadEntries(files: File[]) {
   return files
@@ -64,7 +64,7 @@ export function normalizeUploadEntries(entries: UploadEntry[]) {
   return { entries: normalized, invalidCount, renamedCount }
 }
 
-export function sanitizeRelativePath(path: string) {
+function sanitizeRelativePath(path: string) {
   return path.replace(/\\/g, '/').split('/').filter(part => part && part !== '.' && part !== '..').join('/')
 }
 
@@ -76,7 +76,7 @@ export function normalizeUploadRelativePath(path: string) {
     .join('/')
 }
 
-export function normalizeUploadSegment(value: string) {
+function normalizeUploadSegment(value: string) {
   return value.replace(/\s+/g, '_')
 }
 
@@ -103,7 +103,7 @@ export async function collectDropUploadEntries(event: DragEvent) {
   return filesToUploadEntries(Array.from(event.dataTransfer?.files ?? []).filter(file => file.name))
 }
 
-export async function collectDataTransferItem(item: DataTransferItem): Promise<UploadEntry[]> {
+async function collectDataTransferItem(item: DataTransferItem): Promise<UploadEntry[]> {
   if (item.kind !== 'file') return []
   const getEntry = (item as DataTransferItem & { webkitGetAsEntry?: () => FileSystemEntryLike | null }).webkitGetAsEntry
   const entry = getEntry?.call(item)
@@ -114,7 +114,7 @@ export async function collectDataTransferItem(item: DataTransferItem): Promise<U
   return collectFileSystemEntry(entry, '')
 }
 
-export async function collectFileSystemEntry(entry: FileSystemEntryLike, parentPath: string): Promise<UploadEntry[]> {
+async function collectFileSystemEntry(entry: FileSystemEntryLike, parentPath: string): Promise<UploadEntry[]> {
   const relativePath = sanitizeRelativePath(parentPath ? `${parentPath}/${entry.name}` : entry.name)
   if (entry.isFile) {
     const file = await readFileSystemEntryFile(entry)
@@ -133,7 +133,7 @@ export async function collectFileSystemEntry(entry: FileSystemEntryLike, parentP
   return nested.flat()
 }
 
-export function readFileSystemEntryFile(entry: FileSystemEntryLike) {
+function readFileSystemEntryFile(entry: FileSystemEntryLike) {
   return new Promise<File | null>(resolve => {
     if (!entry.file) {
       resolve(null)
@@ -143,7 +143,7 @@ export function readFileSystemEntryFile(entry: FileSystemEntryLike) {
   })
 }
 
-export async function readAllDirectoryEntries(entry: FileSystemEntryLike) {
+async function readAllDirectoryEntries(entry: FileSystemEntryLike) {
   const reader = entry.createReader?.()
   if (!reader) return []
   const entries: FileSystemEntryLike[] = []

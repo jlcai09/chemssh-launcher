@@ -31,6 +31,7 @@ import (
 	"chemssh-launcher/internal/chemssh"
 	"chemssh-launcher/internal/config"
 	"chemssh-launcher/internal/fileicon"
+	"chemssh-launcher/internal/health"
 	"chemssh-launcher/internal/netcheck"
 	"chemssh-launcher/internal/runtime"
 	"chemssh-launcher/internal/secret"
@@ -1462,7 +1463,7 @@ func profileProxySlug(p config.Profile) string {
 	return p.ID
 }
 
-const chemsshProxyMaxRetries = 3 // 从 5 次减少到 3 次，减少等待时间
+const chemsshProxyMaxRetries = 3
 const chemsshProxyRetryBase = 200 * time.Millisecond
 const chemsshBridgeSFTPWarmDelay = 2 * time.Second
 
@@ -1640,31 +1641,19 @@ func (s *Server) applySecurityToken(req *http.Request, session *activeSession) {
 	}
 }
 
+func (s *Server) secretStore() secret.Store {
+	if s.rt == nil {
+		return nil
+	}
+	return s.rt.Secrets
+}
+
 func (s *Server) healthURLWithToken(p config.Profile) string {
-	baseURL := p.HealthURL()
-	if s.rt == nil || s.rt.Secrets == nil {
-		return baseURL
-	}
-	token, ok, err := s.rt.Secrets.Get(p.ID, secret.KeySecurityToken)
-	if err != nil || !ok || token == "" {
-		return baseURL
-	}
-	separator := "?"
-	if strings.Contains(baseURL, "?") {
-		separator = "&"
-	}
-	return baseURL + separator + "token=" + url.QueryEscape(token)
+	return health.URLWithToken(p, s.secretStore())
 }
 
 func (s *Server) waitForProfileHealth(ctx context.Context, p config.Profile, timeout, interval time.Duration) error {
-	options := netcheck.HealthOptions{}
-	if p.HasSecurityToken {
-		options.RejectStatuses = map[int]string{
-			http.StatusUnauthorized: "ChemSSH rejected the configured security token",
-			http.StatusForbidden:    "ChemSSH rejected the configured security token",
-		}
-	}
-	return netcheck.WaitForURLWithOptions(ctx, s.healthURLWithToken(p), timeout, interval, options)
+	return health.WaitForProfileHealth(ctx, p, s.secretStore(), timeout, interval)
 }
 
 func isTerminalWebSocketPath(path string) bool {
@@ -2352,23 +2341,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if session == nil && profileID == "" {
 		session = s.currentProxySessionLocked()
 	}
-	running := session != nil
-	forwarding := false
-	ready := false
-	name := ""
-	id := ""
-	openSeq := uint64(0)
-	profile := config.Profile{}
-	openBrowser := false
-	if running {
-		name = session.name
-		id = session.id
-		forwarding = session.forwarding
-		ready = session.forwarding && session.ready
-		openSeq = session.openSeq
-		profile = session.profile
-		openBrowser = session.profile.OpenBrowser
-	}
 	statusProfileID := profileID
 	if statusProfileID == "" && session != nil {
 		statusProfileID = session.id
@@ -2379,26 +2351,53 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		pendingStart = s.pendingStart[statusProfileID]
 		lastFailure = sessionFailurePtr(s.lastFailure, statusProfileID)
 	}
-	phase := deriveSessionPhase(running, forwarding, ready, pendingStart, lastFailure != nil)
+	payload := sessionStatusPayload(session, pendingStart, lastFailure)
+	id := ""
+	openSeq := uint64(0)
+	openBrowser := false
+	forwarding := false
+	profile := config.Profile{}
+	if session != nil {
+		id = session.id
+		openSeq = session.openSeq
+		openBrowser = session.profile.OpenBrowser
+		forwarding = session.forwarding
+		profile = session.profile
+	}
 	s.mu.Unlock()
 
 	url := ""
-	if running && forwarding {
+	if forwarding {
 		url = s.sessionProxyURL(profile, openSeq)
 	}
-	writeJSON(w, map[string]any{
-		"running":       running,
-		"forwarding":    forwarding,
-		"id":            id,
-		"name":          name,
-		"url":           url,
-		"open_browser":  openBrowser,
-		"open_seq":      openSeq,
-		"ready":         ready,
-		"pending_start": pendingStart,
-		"last_failure":  lastFailure,
-		"phase":         phase,
-	}, nil)
+	payload["id"] = id
+	payload["url"] = url
+	payload["open_browser"] = openBrowser
+	payload["pending_start"] = pendingStart
+	writeJSON(w, payload, nil)
+}
+
+func sessionStatusPayload(session *activeSession, pendingStart bool, failure *sessionFailure) map[string]any {
+	running := session != nil
+	forwarding := false
+	ready := false
+	name := ""
+	openSeq := uint64(0)
+	if running {
+		forwarding = session.forwarding
+		ready = session.forwarding && session.ready
+		name = session.name
+		openSeq = session.openSeq
+	}
+	return map[string]any{
+		"running":      running,
+		"forwarding":   forwarding,
+		"name":         name,
+		"open_seq":     openSeq,
+		"ready":        ready,
+		"phase":        deriveSessionPhase(running, forwarding, ready, pendingStart, failure != nil),
+		"last_failure": failure,
+	}
 }
 
 // deriveSessionPhase collapses the session and per-profile start records into
@@ -2441,38 +2440,19 @@ func (s *Server) handleStatuses(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	statuses := make(map[string]map[string]any, len(s.sessions)+len(s.pendingStart)+len(s.lastFailure))
 	for id, session := range s.sessions {
-		ready := session.forwarding && session.ready
-		failure := sessionFailurePtr(s.lastFailure, id)
-		statuses[id] = map[string]any{
-			"running":      true,
-			"forwarding":   session.forwarding,
-			"ready":        ready,
-			"name":         session.name,
-			"open_seq":     session.openSeq,
-			"phase":        deriveSessionPhase(true, session.forwarding, ready, s.pendingStart[id], failure != nil),
-			"last_failure": failure,
-		}
+		statuses[id] = sessionStatusPayload(session, s.pendingStart[id], sessionFailurePtr(s.lastFailure, id))
 	}
 	for id := range s.pendingStart {
 		if _, ok := statuses[id]; ok {
 			continue
 		}
-		failure := sessionFailurePtr(s.lastFailure, id)
-		statuses[id] = map[string]any{
-			"running":      false,
-			"phase":        "starting",
-			"last_failure": failure,
-		}
+		statuses[id] = sessionStatusPayload(nil, true, sessionFailurePtr(s.lastFailure, id))
 	}
 	for id := range s.lastFailure {
 		if _, ok := statuses[id]; ok {
 			continue
 		}
-		statuses[id] = map[string]any{
-			"running":      false,
-			"phase":        "failed",
-			"last_failure": sessionFailurePtr(s.lastFailure, id),
-		}
+		statuses[id] = sessionStatusPayload(nil, false, sessionFailurePtr(s.lastFailure, id))
 	}
 	s.mu.Unlock()
 	writeJSON(w, map[string]any{"statuses": statuses}, nil)
