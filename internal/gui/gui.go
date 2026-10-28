@@ -317,6 +317,7 @@ func (s *Server) routes() {
 	// SFTP API - list operations benefit from compression
 	s.mux.HandleFunc("/api/sftp/connect", s.apiHandler(gzipHandler(s.handleSFTPConnect)))
 	s.mux.HandleFunc("/api/sftp/disconnect", s.apiHandler(gzipHandler(s.handleSFTPDisconnect)))
+	s.mux.HandleFunc("/api/sftp/reconnect", s.apiHandler(gzipHandler(s.handleSFTPReconnect)))
 	s.mux.HandleFunc("/api/sftp/list", s.apiHandler(gzipHandler(s.handleSFTPList)))
 	s.mux.HandleFunc("/api/sftp/realpath", s.apiHandler(gzipHandler(s.handleSFTPRealPath)))
 	s.mux.HandleFunc("/api/sftp/mkdir", s.apiHandler(gzipHandler(s.handleSFTPMkdir)))

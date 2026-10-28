@@ -80,6 +80,25 @@ func (s *Server) handleSFTPDisconnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
+func (s *Server) handleSFTPReconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	var req sftpSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.sftp.Reconnect(req.Session); err != nil {
+		s.logs.add("SFTP reconnect failed: " + err.Error())
+		writeSFTPError(w, err)
+		return
+	}
+	s.logs.add("SFTP reconnected")
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
 func (s *Server) handleSFTPList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -495,7 +514,15 @@ func (s *Server) handleSFTPCopyRemote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
+// sftpTransportLostHeader marks responses whose failure was caused by a dead
+// SSH transport, so the UI knows a reconnect can recover instead of treating it
+// as a permanent server-side rejection.
+const sftpTransportLostHeader = "X-ChemSSH-SFTP-Transport"
+
 func writeSFTPError(w http.ResponseWriter, err error) {
+	if sftpclient.IsTransportError(err) {
+		w.Header().Set(sftpTransportLostHeader, "lost")
+	}
 	if errors.Is(err, sftpclient.ErrSessionNotFound) {
 		writeError(w, http.StatusGone, err)
 		return

@@ -187,6 +187,66 @@ func drainAvailable(pool *connectionPool) []*pooledConn {
 	}
 }
 
+// A connection whose transport died while idle must never be handed to a
+// caller: the failure has to surface as a retryable error instead.
+func TestAcquireSkipsDeadConnections(t *testing.T) {
+	pool := newTestConnectionPool()
+	dead := &pooledConn{client: newTestSFTPClient(t), lastUsed: time.Now()}
+	_ = dead.client.Close()
+	healthy := &pooledConn{client: newTestSFTPClient(t), lastUsed: time.Now()}
+	pool.conns = []*pooledConn{dead, healthy}
+	pool.available <- dead
+	pool.available <- healthy
+
+	conn, err := pool.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if conn != healthy {
+		t.Fatal("acquire handed out a dead connection")
+	}
+	if !dead.failed {
+		t.Fatal("the dead connection was not marked failed")
+	}
+	if len(pool.conns) != 1 {
+		t.Fatalf("dead connection stayed in the pool: %d entries", len(pool.conns))
+	}
+}
+
+// acquire must report a transport failure rather than blocking when the pool is
+// empty and no SSH client is available to open a new channel on.
+func TestAcquireReportsMissingTransport(t *testing.T) {
+	pool := newTestConnectionPool()
+	dead := &pooledConn{client: newTestSFTPClient(t), lastUsed: time.Now()}
+	_ = dead.client.Close()
+	pool.conns = []*pooledConn{dead}
+	pool.available <- dead
+
+	if _, err := pool.acquire(context.Background()); !errors.Is(err, errTransportUnavailable) {
+		t.Fatalf("acquire error = %v, want errTransportUnavailable", err)
+	}
+}
+
+// Building the new transport before swapping keeps the pool usable for the next
+// attempt when the dial fails.
+func TestReconnectKeepsPoolWhenDialFails(t *testing.T) {
+	pool := newTestConnectionPool()
+	healthy := &pooledConn{client: newTestSFTPClient(t), lastUsed: time.Now()}
+	pool.conns = []*pooledConn{healthy}
+	pool.available <- healthy
+	pool.dial = func() (*ssh.Client, error) { return nil, errors.New("simulated dial failure") }
+
+	if err := pool.reconnect(); err == nil {
+		t.Fatal("reconnect reported success with a failing dial")
+	}
+	if len(pool.conns) != 1 || pool.conns[0] != healthy {
+		t.Fatal("reconnect dropped the pool after a failed dial")
+	}
+	if got := drainAvailable(pool); len(got) != 1 || got[0] != healthy {
+		t.Fatalf("available queue was cleared after a failed dial: %d entries", len(got))
+	}
+}
+
 func TestReconnectDialsWithoutHoldingPoolLock(t *testing.T) {
 	pool := newTestConnectionPool()
 

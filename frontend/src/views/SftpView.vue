@@ -593,7 +593,7 @@ import {
   Upload,
   View
 } from '@element-plus/icons-vue'
-import { api, baseName, formatBytes, formatDate, joinPath, launcherToken, launcherTokenHeader, parentPath, postJSON, type FileEntry, type Profile } from '../api'
+import { APIError, api, baseName, formatBytes, formatDate, joinPath, launcherToken, launcherTokenHeader, parentPath, postJSON, type FileEntry, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import {
@@ -789,6 +789,7 @@ interface TransferScrollbarDragState {
 
 const paneNames = ['left', 'right'] as const
 const appDragType = 'application/x-chemssh-launcher-file-transfer'
+const externalDownloadMime = 'application/octet-stream'
 const safeNamePattern = /^[^/\\]+$/
 const LONG_PRESS_MS = 430
 const SELECT_DRAG_THRESHOLD = 4
@@ -2162,7 +2163,7 @@ async function resolveTabPath(tab: FileTab, path: string) {
 
 const tabLoadSequence = new WeakMap<FileTab, number>()
 
-async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: { recordHistory?: boolean } = {}) {
+async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: { recordHistory?: boolean; retried?: boolean } = {}) {
   if (!tab) return
   const sequence = (tabLoadSequence.get(tab) ?? 0) + 1
   tabLoadSequence.set(tab, sequence)
@@ -2200,6 +2201,19 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
     clearSystemIconFailure('dir')
   } catch (error) {
     if (!isLatest()) return
+    // 断网后旧 SSH 传输层会失效，服务端已支持重建；这里重连一次再重试，
+    // 避免用户只能关掉标签页重开。
+    const transportLost = error instanceof APIError && error.transportLost
+    if (transportLost && tab.kind === 'remote' && tab.session && !options.retried) {
+      try {
+        await postJSON('/api/sftp/reconnect', { session: tab.session })
+        if (!isLatest()) return
+        await loadTab(paneName, tab, { ...options, retried: true })
+        return
+      } catch {
+        // 重连失败，按原始错误提示
+      }
+    }
     ElMessage.error((error as Error).message)
     log(t('sftp.logFailed', { error: (error as Error).message }))
   } finally {
@@ -3332,7 +3346,28 @@ function startFileDrag(paneName: PaneName, index: number, entry: FileEntry, even
   event.dataTransfer.effectAllowed = 'copyMove'
   event.dataTransfer.setData(appDragType, JSON.stringify(payload))
   event.dataTransfer.setData('text/plain', paths.join('\n'))
+  // Chromium turns a drag carrying DownloadURL into a real OS file drag: dropping
+  // it on Explorer or the desktop saves the remote file locally, which is what
+  // ChemSSH itself does. Chromium only honours a single DownloadURL, so multi-file
+  // drags keep their in-app behaviour.
+  const external = items.length === 1 && !items[0].is_dir ? externalDownloadURL(tab, items[0]) : ''
+  if (external) {
+    event.dataTransfer.setData('DownloadURL', `${externalDownloadMime}:${sanitizeDownloadName(items[0].name)}:${external}`)
+  }
   setDragImage(event, items)
+}
+
+function externalDownloadURL(tab: FileTab, entry: FileEntry) {
+  if (tab.kind !== 'remote' || !tab.session) return ''
+  const query = `session=${encodeURIComponent(tab.session)}&path=${encodeURIComponent(entry.path)}`
+  return `${window.location.origin}/api/sftp/download?${query}`
+}
+
+// DownloadURL is colon-delimited, so a name containing ':' would corrupt the
+// payload; path separators and control characters are invalid on Windows too.
+function sanitizeDownloadName(name: string) {
+  const cleaned = name.replace(/[:\\/]/g, '_').replace(/[\u0000-\u001f]/g, '').trim()
+  return cleaned || 'download'
 }
 
 function finishFileDrag() {

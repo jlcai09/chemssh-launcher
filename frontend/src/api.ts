@@ -54,6 +54,9 @@ export interface HostKeyInfo {
 export class APIError extends Error {
   status = 0
   data: any
+  // True when the request failed because the SSH transport died (network drop),
+  // which a reconnect can recover, rather than because the server refused it.
+  transportLost = false
 }
 
 export const launcherTokenCookieName = 'chemssh_launcher_token'
@@ -96,6 +99,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     const err = new APIError(data.error || 'Request failed')
     err.status = res.status
     err.data = data
+    err.transportLost = res.headers.get('X-ChemSSH-SFTP-Transport') === 'lost'
     throw err
   }
   return data as T

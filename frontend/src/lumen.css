@@ -3155,6 +3155,39 @@ body {
   font-size: calc(11.5px * var(--lumen-ui-scale));
 }
 
+/* The fixed 28px height plus a tight line box clipped glyph descenders (the
+   tail of "g" in "gpu18") once the UI scale enlarged the font, and flex-shrink
+   could squeeze a tab below its text width. Let the tab grow with its label and
+   keep it at its natural width so overflow scrolls instead of clipping. */
+.browser-tab {
+  flex: 0 0 auto;
+  height: auto;
+  min-height: 28px;
+  padding: 2px 9px;
+  line-height: 1.45;
+}
+
+.browser-tab > span {
+  line-height: inherit;
+  padding-block: 1px;
+}
+
+/* Tab labels and profile names are ellipsized spans, so their line box is the
+   only thing between the glyph and the clip. Give each one a line box that is
+   taller than the glyph box: a tight line box cuts a descender in half (the
+   tail of "g" in "gpu18") as soon as the UI scale grows the font. */
+.xftp-tab > span:nth-child(2),
+.browser-tab > span,
+.terminal-tab-label {
+  line-height: 1.5;
+  padding-block: 1px;
+}
+
+.profile-meta strong,
+.profile-meta small {
+  line-height: 1.35;
+}
+
 .browser-tab:hover {
   border-color: rgba(0, 0, 0, 0.26);
   background: rgba(255, 255, 255, 0.8);
