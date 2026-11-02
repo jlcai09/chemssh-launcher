@@ -514,6 +514,96 @@ func (s *Server) handleSFTPCopyRemote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
+// serverCopyResponse answers whether a paste between two sessions can run on the
+// server. Both endpoints report it inside a successful HTTP response because an
+// unsupported paste is a normal outcome that makes the UI fall back to a
+// streamed copy.
+type serverCopyResponse struct {
+	Supported bool                          `json:"supported"`
+	Reason    string                        `json:"reason,omitempty"`
+	Results   []sftpclient.RemoteCopyResult `json:"results,omitempty"`
+}
+
+// handleSFTPServerCopySupport reports whether copying between two sessions can be
+// performed by the remote host. The UI asks before it walks the source tree, so
+// the same-server case never pays for a recursive listing and a per-file copy.
+func (s *Server) handleSFTPServerCopySupport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	source := r.URL.Query().Get("source")
+	target := r.URL.Query().Get("target")
+	if !s.sftp.SameServer(source, target) {
+		writeJSON(w, serverCopyResponse{Reason: "the two sessions are not on the same server"}, nil)
+		return
+	}
+	supported, err := s.sftp.RemoteCopySupported(target)
+	if err != nil {
+		writeJSON(w, serverCopyResponse{Reason: err.Error()}, nil)
+		return
+	}
+	if !supported {
+		writeJSON(w, serverCopyResponse{Reason: "the remote host does not provide cp with -T"}, nil)
+		return
+	}
+	writeJSON(w, serverCopyResponse{Supported: true}, nil)
+}
+
+type serverCopyItem struct {
+	SourcePath   string `json:"source_path"`
+	RelativePath string `json:"relative_path"`
+}
+
+// handleSFTPCopyOnServer copies entries with the remote `cp` command, which keeps
+// the bytes on the server instead of streaming them down and back up.
+func (s *Server) handleSFTPCopyOnServer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	var req struct {
+		SourceSession string           `json:"source_session"`
+		TargetSession string           `json:"target_session"`
+		TargetPath    string           `json:"target_path"`
+		Items         []serverCopyItem `json:"items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !s.sftp.SameServer(req.SourceSession, req.TargetSession) {
+		writeJSON(w, serverCopyResponse{Reason: "the two sessions are not on the same server"}, nil)
+		return
+	}
+	items := make([]sftpclient.RemoteCopyItem, 0, len(req.Items))
+	for _, item := range req.Items {
+		name := item.RelativePath
+		if name == "" {
+			name = path.Base(item.SourcePath)
+		}
+		targetPath, err := sftpclient.UploadTargetPath(req.TargetPath, name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		items = append(items, sftpclient.RemoteCopyItem{SourcePath: item.SourcePath, TargetPath: targetPath})
+	}
+	results, err := s.sftp.CopyOnServer(req.TargetSession, items)
+	if err != nil {
+		writeSFTPError(w, err)
+		return
+	}
+	copied := 0
+	for _, result := range results {
+		if result.OK {
+			copied++
+		}
+	}
+	s.logs.add(fmt.Sprintf("SFTP server-side copy: %d/%d item(s) -> %s", copied, len(results), req.TargetPath))
+	writeJSON(w, serverCopyResponse{Supported: true, Results: results}, nil)
+}
+
 // sftpTransportLostHeader marks responses whose failure was caused by a dead
 // SSH transport, so the UI knows a reconnect can recover instead of treating it
 // as a permanent server-side rejection.

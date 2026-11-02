@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"chemssh-launcher/internal/sshclient"
 
 	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 var ErrSessionNotFound = errors.New("SFTP session is not connected")
@@ -37,8 +39,17 @@ type Manager struct {
 
 type activeSession struct {
 	info Session
-	pool *connectionPool // 使用连接池替代单个连接
-	refs int
+	// profile is the snapshot used to dial this session. It identifies the
+	// remote account so a copy between two sessions can be executed on the
+	// server instead of streaming the data through this process.
+	profile config.Profile
+	pool    *connectionPool // 使用连接池替代单个连接
+	refs    int
+	// remoteCopyProbe caches whether the account provides `cp -aT`; the probe
+	// costs one round trip and the answer never changes for a session.
+	remoteCopyMu   sync.Mutex
+	remoteCopyDone bool
+	remoteCopyOK   bool
 }
 
 func NewManager() *Manager {
@@ -105,9 +116,10 @@ func (m *Manager) connect(profile config.Profile, secrets secret.Store, policy s
 	}
 	m.mu.Lock()
 	session := &activeSession{
-		info: info,
-		pool: pool,
-		refs: 1,
+		info:    info,
+		profile: profile,
+		pool:    pool,
+		refs:    1,
 	}
 	m.sessions[id] = session
 	if reuseByProfile {
@@ -263,6 +275,65 @@ func (m *Manager) Rename(id, oldPath, newPath string) error {
 	return err
 }
 
+// RunCommand executes argv on the remote host inside remoteDir over the pooled
+// SSH transport and returns the combined output.
+func (m *Manager) RunCommand(id, remoteDir string, argv []string) (string, error) {
+	return m.RunCommandTimeout(id, remoteDir, argv, 0)
+}
+
+// RunCommandTimeout is RunCommand with an explicit timeout; zero means wait for
+// the command to finish.
+func (m *Manager) RunCommandTimeout(id, remoteDir string, argv []string, timeout time.Duration) (string, error) {
+	return withSSHConn(m, id, func(client *ssh.Client) (string, error) {
+		return sshclient.RunCommandTimeout(client, remoteDir, argv, timeout)
+	})
+}
+
+// SameServer reports whether two sessions reach the same remote account, so a
+// copy between them can be executed on the server. Sessions of one profile
+// always qualify. Different profiles qualify when their SSH endpoint and login
+// user match, because both transports then address the same files; an
+// unreachable assumption is harmless because the caller falls back to a streamed
+// copy on failure.
+func (m *Manager) SameServer(first, second string) bool {
+	if first != "" && first == second {
+		return true
+	}
+	left, err := m.get(first)
+	if err != nil {
+		return false
+	}
+	right, err := m.get(second)
+	if err != nil {
+		return false
+	}
+	return sameServerProfile(left.profile, right.profile)
+}
+
+func sameServerProfile(left, right config.Profile) bool {
+	if left.ID != "" && left.ID == right.ID {
+		return true
+	}
+	leftHost := strings.ToLower(strings.TrimSpace(left.SSHHost))
+	rightHost := strings.ToLower(strings.TrimSpace(right.SSHHost))
+	if leftHost == "" || leftHost != rightHost {
+		return false
+	}
+	leftUser := strings.TrimSpace(left.SSHUser)
+	rightUser := strings.TrimSpace(right.SSHUser)
+	if leftUser == "" || leftUser != rightUser {
+		return false
+	}
+	return sshPortOrDefault(left.SSHPort) == sshPortOrDefault(right.SSHPort)
+}
+
+func sshPortOrDefault(port int) int {
+	if port <= 0 {
+		return 22
+	}
+	return port
+}
+
 func (m *Manager) Delete(id, remotePath string) error {
 	_, err := withConn(m, id, func(client *sftp.Client) (struct{}, error) {
 		return struct{}{}, deletePath(client, remotePath)
@@ -334,6 +405,46 @@ func withConn[T any](m *Manager, id string, fn func(*sftp.Client) (T, error)) (T
 		}
 
 		value, opErr := fn(conn.client)
+		if opErr == nil {
+			session.pool.release(conn)
+			return value, nil
+		}
+
+		session.pool.markFailed(conn)
+		session.pool.release(conn)
+		if attempt == 0 && isTransportError(opErr) {
+			if reconnectErr := session.pool.reconnect(); reconnectErr == nil {
+				continue
+			}
+		}
+		return zero, opErr
+	}
+}
+
+// withSSHConn is withConn for commands: the pooled connection is only held so
+// its SSH transport cannot be recycled while the command runs.
+func withSSHConn[T any](m *Manager, id string, fn func(*ssh.Client) (T, error)) (T, error) {
+	var zero T
+	session, err := m.get(id)
+	if err != nil {
+		return zero, err
+	}
+	for attempt := 0; ; attempt++ {
+		conn, err := session.pool.acquireWithTimeout()
+		if err != nil {
+			if attempt == 0 && isTransportError(err) {
+				if reconnectErr := session.pool.reconnect(); reconnectErr == nil {
+					continue
+				}
+			}
+			return zero, err
+		}
+
+		if conn.ssh == nil {
+			session.pool.release(conn)
+			return zero, errTransportUnavailable
+		}
+		value, opErr := fn(conn.ssh)
 		if opErr == nil {
 			session.pool.release(conn)
 			return value, nil

@@ -782,11 +782,52 @@ p,
 }
 
 .xftp-new-group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 8px 8px 2px;
   color: #667085;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
+}
+
+/* The new-tab menu caches the profile list, so it carries its own refresh. */
+.xftp-new-refresh {
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #667085;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.xftp-new-refresh:hover,
+.xftp-new-refresh:focus-visible {
+  background: var(--accent-weak);
+  color: var(--accent);
+  outline: 0;
+}
+
+.xftp-new-refresh:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.xftp-new-refresh.is-refreshing .el-icon {
+  animation: xftp-new-refresh-spin 0.7s linear infinite;
+}
+
+@keyframes xftp-new-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .xftp-new-empty {
@@ -973,7 +1014,7 @@ p,
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: 36px minmax(0, 1fr);
+  grid-template-rows: 36px minmax(0, 1fr) auto;
   overflow: hidden;
 }
 
@@ -1105,6 +1146,23 @@ p,
 .file-list-body::-webkit-scrollbar {
   width: 0;
   height: 0;
+}
+
+/* Shows the selection (or the directory total) the way the ChemSSH file manager does. */
+.sftp-file-status {
+  min-width: 0;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(248, 250, 252, 0.76);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .file-list-virtual-spacer {
@@ -1321,14 +1379,15 @@ p,
 .file-floating-scrollbar.is-vertical {
   top: 40px;
   right: 4px;
-  bottom: 4px;
+  /* Clear the status row under the list. */
+  bottom: 26px;
   width: 8px;
 }
 
 .file-floating-scrollbar.is-horizontal {
   left: 8px;
   right: 12px;
-  bottom: 4px;
+  bottom: 26px;
   height: 8px;
 }
 
@@ -1417,6 +1476,80 @@ p,
   color: #98a2b3;
   background: transparent;
   cursor: not-allowed;
+}
+
+/* Directory menu: the "New" entry opens a nested menu on hover or focus. */
+.sftp-context-menu .sftp-submenu-parent {
+  position: relative;
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: #24313d;
+  font-size: 13px;
+  cursor: default;
+}
+
+.sftp-context-menu .sftp-submenu-parent:hover,
+.sftp-context-menu .sftp-submenu-parent:focus-within {
+  color: #103f50;
+  background: var(--accent-weak);
+  outline: 0;
+}
+
+/* The submenu overlaps its parent and the parent carries an invisible bridge, so
+   moving the pointer to the right never crosses dead space and drops the hover. */
+.sftp-context-menu .sftp-submenu-parent::after {
+  content: '';
+  position: absolute;
+  top: -4px;
+  right: -8px;
+  bottom: -4px;
+  width: 10px;
+  pointer-events: none;
+}
+
+.sftp-context-menu .sftp-submenu {
+  position: absolute;
+  top: -7px;
+  left: calc(100% - 2px);
+  z-index: 1;
+  min-width: 168px;
+  display: none;
+}
+
+.sftp-context-menu .sftp-submenu-parent:hover .sftp-submenu,
+.sftp-context-menu .sftp-submenu-parent:focus-within .sftp-submenu {
+  display: grid;
+}
+
+/* Near the right edge the nested menu opens to the left instead of off-screen. */
+.sftp-context-menu.opens-left .sftp-submenu {
+  left: auto;
+  right: calc(100% - 2px);
+}
+
+.sftp-context-menu.opens-left .sftp-submenu-parent::after {
+  right: auto;
+  left: -8px;
+}
+
+.terminal-tab-menu .terminal-tab-menu-hint {
+  margin-left: auto;
+  padding-left: 16px;
+  color: #98a2b3;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.terminal-tab-menu button:hover .terminal-tab-menu-hint,
+.terminal-tab-menu button:focus-visible .terminal-tab-menu-hint {
+  color: inherit;
+  opacity: 0.72;
 }
 
 .sftp-context-separator {
@@ -2890,16 +3023,270 @@ body,
 
 .terminal-view {
   display: grid;
-  grid-template-columns: 224px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: var(--terminal-sidebar-width, 224px) 10px minmax(0, 1fr);
+  gap: 0;
 }
 
 .terminal-sessions {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-side-section {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-servers-section {
+  flex: 1 1 0;
+  min-height: 118px;
+}
+
+.terminal-servers-section.is-collapsed {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.terminal-sftp-section {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--panel-border);
+}
+
+.terminal-sftp-section.is-open {
+  flex: 1 1 0;
+  min-height: 168px;
+}
+
+.terminal-side-toggle {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.terminal-side-toggle:hover {
+  color: var(--text);
+}
+
+.terminal-side-resizer {
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.terminal-side-resizer::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.terminal-side-resizer:hover::after,
+.terminal-side-resizer:active::after {
+  background: rgba(14, 116, 144, 0.34);
+}
+
+.terminal-sftp-sync {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.terminal-sftp-sync:hover:not(:disabled) {
+  background: var(--soft-bg);
+  color: var(--text);
+}
+
+.terminal-sftp-sync.is-on {
+  background: #0e7490;
+  color: #ffffff;
+}
+
+.terminal-sftp-sync.is-on:hover:not(:disabled) {
+  background: #0b5f75;
+  color: #ffffff;
+}
+
+.terminal-sftp-sync:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.terminal-sftp-body {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  overflow: hidden;
+}
+
+.terminal-sftp-body.is-drop-active {
+  outline: 2px dashed rgba(14, 116, 144, 0.6);
+  outline-offset: -4px;
+  border-radius: 8px;
+}
+
+.terminal-sftp-drop-hint {
+  position: absolute;
+  inset: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  place-items: center;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(240, 249, 255, 0.9);
+  color: #0e7490;
+  font-size: 11.5px;
+  font-weight: 650;
+  text-align: center;
+  pointer-events: none;
+}
+
+.terminal-sftp-pathbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-sftp-path-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.terminal-sftp-path-action:hover:not(:disabled) {
+  background: var(--soft-bg);
+  color: var(--text);
+}
+
+.terminal-sftp-path-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.terminal-sftp-path-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.terminal-sftp-path-input:focus {
+  border-color: rgba(14, 116, 144, 0.55);
+  outline: 0;
+}
+
+.terminal-sftp-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: auto;
+}
+
+.terminal-sftp-entry {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.terminal-sftp-entry:hover {
+  background: var(--soft-bg);
+}
+
+.terminal-sftp-entry-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.terminal-sftp-entry.is-dir .terminal-sftp-entry-icon {
+  color: #0e7490;
+}
+
+.terminal-sftp-entry-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-sftp-entry-size {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.terminal-sftp-hint {
+  padding: 3px 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.terminal-sftp-hint.is-error {
+  color: var(--danger);
 }
 
 .terminal-sessions-title {
+  flex: 0 0 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -2975,6 +3362,7 @@ body,
 }
 
 .terminal-session-list {
+  flex: 1 1 auto;
   min-height: 0;
   display: grid;
   align-content: start;
@@ -3151,6 +3539,20 @@ body,
   background: transparent;
   color: rgba(148, 163, 184, 0.35);
   cursor: not-allowed;
+}
+
+/* A dropped session is recovered from this button, so it carries the accent. */
+.terminal-footer .el-button.is-circle.terminal-footer-reconnect {
+  border-color: rgba(125, 211, 252, 0.45);
+  background: rgba(125, 211, 252, 0.16);
+  color: #7dd3fc;
+}
+
+.terminal-footer .el-button.is-circle.terminal-footer-reconnect:hover,
+.terminal-footer .el-button.is-circle.terminal-footer-reconnect:focus-visible {
+  border-color: rgba(125, 211, 252, 0.7);
+  background: rgba(125, 211, 252, 0.26);
+  color: #e0f2fe;
 }
 
 .terminal-footer .terminal-upload-ring {
@@ -3372,6 +3774,11 @@ body,
 @media (max-width: 900px) {
   .terminal-view {
     grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .terminal-side-resizer,
+  .terminal-sftp-section {
+    display: none;
   }
 
   .terminal-sessions-title {

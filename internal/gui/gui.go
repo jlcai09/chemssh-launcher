@@ -54,6 +54,7 @@ type Server struct {
 	localLog                 *safeLog
 	sftp                     *sftpclient.Manager
 	sftpSync                 *sftpOpenSyncManager
+	archiveTools             *archiveToolCache
 	icons                    *fileicon.Service
 	iconsOnce                sync.Once
 	transfers                *transferProgressStore
@@ -267,6 +268,7 @@ func NewServer(rt *runtime.Runtime) *Server {
 		profileLogs:     newProfileLogStore(),
 		localLog:        &safeLog{},
 		sftp:            sftpclient.NewManager(),
+		archiveTools:    newArchiveToolCache(),
 		transfers:       newTransferProgressStore(),
 		shells:          newShellManager(),
 		apiToken:        newLauncherAPIToken(),
@@ -324,6 +326,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sftp/create-file", s.apiHandler(gzipHandler(s.handleSFTPCreateFile)))
 	s.mux.HandleFunc("/api/sftp/rename", s.apiHandler(gzipHandler(s.handleSFTPRename)))
 	s.mux.HandleFunc("/api/sftp/delete", s.apiHandler(gzipHandler(s.handleSFTPDelete)))
+	s.mux.HandleFunc("/api/sftp/archive-tools", s.apiHandler(gzipHandler(s.handleSFTPArchiveTools)))
+	s.mux.HandleFunc("/api/sftp/compress", s.apiHandler(gzipHandler(s.handleSFTPCompress)))
+	s.mux.HandleFunc("/api/sftp/extract", s.apiHandler(gzipHandler(s.handleSFTPExtract)))
 
 	// SFTP upload/download - no compression (binary data)
 	s.mux.HandleFunc("/api/sftp/upload", s.apiHandler(s.handleSFTPUpload))
@@ -344,6 +349,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sftp/upload-local", s.apiHandler(s.handleSFTPUploadLocal))
 	s.mux.HandleFunc("/api/sftp/download-local", s.apiHandler(s.handleSFTPDownloadLocal))
 	s.mux.HandleFunc("/api/sftp/copy-remote", s.apiHandler(gzipHandler(s.handleSFTPCopyRemote)))
+	s.mux.HandleFunc("/api/sftp/server-copy-support", s.apiHandler(gzipHandler(s.handleSFTPServerCopySupport)))
+	s.mux.HandleFunc("/api/sftp/copy-on-server", s.apiHandler(gzipHandler(s.handleSFTPCopyOnServer)))
 
 	// Local file API
 	s.mux.HandleFunc("/api/local/home", s.apiHandler(gzipHandler(s.handleLocalHome)))
@@ -352,6 +359,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/local/create-file", s.apiHandler(gzipHandler(s.handleLocalCreateFile)))
 	s.mux.HandleFunc("/api/local/rename", s.apiHandler(gzipHandler(s.handleLocalRename)))
 	s.mux.HandleFunc("/api/local/delete", s.apiHandler(gzipHandler(s.handleLocalDelete)))
+	s.mux.HandleFunc("/api/local/archive-tools", s.apiHandler(gzipHandler(s.handleLocalArchiveTools)))
+	s.mux.HandleFunc("/api/local/compress", s.apiHandler(gzipHandler(s.handleLocalCompress)))
+	s.mux.HandleFunc("/api/local/extract", s.apiHandler(gzipHandler(s.handleLocalExtract)))
 	s.mux.HandleFunc("/api/local/copy", s.apiHandler(gzipHandler(s.handleLocalCopy)))
 	s.mux.HandleFunc("/api/local/open", s.apiHandler(gzipHandler(s.handleLocalOpen)))
 	s.mux.HandleFunc("/api/local/open-text", s.apiHandler(gzipHandler(s.handleLocalOpenText)))
@@ -509,12 +519,16 @@ func (s *Server) handleLauncherLogsPage(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) serveVueApp(w http.ResponseWriter, r *http.Request) {
 	s.setLauncherAPITokenCookie(w)
-	if file, err := assets.Open("static/vue/index.html"); err == nil {
-		_ = file.Close()
-		http.ServeFileFS(w, r, assets, "static/vue/index.html")
+	// The shell page must never be cached: it names the current hashed bundle,
+	// and a stale copy keeps a rebuilt launcher running the old UI.
+	data, err := assets.ReadFile("static/vue/index.html")
+	if err != nil {
+		http.Error(w, "frontend assets are not built; run go run ./tools/build", http.StatusInternalServerError)
 		return
 	}
-	http.Error(w, "frontend assets are not built; run go run ./tools/build", http.StatusInternalServerError)
+	setNoStore(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {

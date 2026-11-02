@@ -118,7 +118,12 @@ const reloadTimers = new Map<string, number>()
 // A page is only addressable once it announces it is ready: booting takes an
 // async settings fetch, so the iframe load event fires before it can answer.
 const readyTabs = new Set<string>()
-const pendingSftpProfiles = new Map<string, string[]>()
+interface SftpOpenRequest {
+  profile: string
+  path: string
+  forceNew: boolean
+}
+const pendingSftpProfiles = new Map<string, SftpOpenRequest[]>()
 
 function setTabFrame(id: string, element: unknown) {
   if (element instanceof HTMLIFrameElement) tabFrames.set(id, element)
@@ -147,7 +152,9 @@ function markTabReady(source: Window | null) {
   const queued = pendingSftpProfiles.get(tab.id)
   if (!queued) return
   pendingSftpProfiles.delete(tab.id)
-  queued.forEach(profileID => postToTab(tab.id, { type: 'chemssh-sftp:open-profile', profile: profileID }))
+  queued.forEach(request =>
+    postToTab(tab.id, { type: 'chemssh-sftp:open-profile', profile: request.profile, path: request.path, forceNew: request.forceNew })
+  )
 }
 
 const activeTab = computed(() => tabs.find(tab => tab.id === activeID.value))
@@ -364,16 +371,21 @@ function isSftpTabURL(url: string) {
 
 // A server profile opens inside the SFTP page that is already on screen, so
 // repeated launches grow that page's pane tabs instead of stacking shell tabs.
-function openSftpProfile(profileID: string, profileName: string) {
+// `path` is empty unless a terminal tab asked for the SFTP tab to land in the
+// directory that shell is in; the sidebar and launcher commands omit it.
+// `forceNew` comes from the terminal shortcut and makes the SFTP page append a
+// pane tab instead of focusing one that already shows the requested directory.
+function openSftpProfile(profileID: string, profileName: string, path = '', forceNew = false) {
+  const targetPath = String(path || '').trim()
   const sftpTabs = tabs.filter(tab => isSftpTabURL(tab.url))
   const existing = sftpTabs.find(tab => tab.id === activeID.value) || sftpTabs[0]
   if (existing) {
     activate(existing.id)
     if (readyTabs.has(existing.id)) {
-      postToTab(existing.id, { type: 'chemssh-sftp:open-profile', profile: profileID })
+      postToTab(existing.id, { type: 'chemssh-sftp:open-profile', profile: profileID, path: targetPath, forceNew })
     } else {
       const queued = pendingSftpProfiles.get(existing.id) || []
-      queued.push(profileID)
+      queued.push({ profile: profileID, path: targetPath, forceNew })
       pendingSftpProfiles.set(existing.id, queued)
     }
     return
@@ -381,6 +393,7 @@ function openSftpProfile(profileID: string, profileName: string) {
   const url = new URL('/sftp', window.location.origin)
   url.searchParams.set('profile', profileID)
   if (profileName) url.searchParams.set('name', profileName)
+  if (targetPath) url.searchParams.set('path', targetPath)
   createTab(profileName, url.href)
 }
 
@@ -404,11 +417,27 @@ function isDismissedSession(url: string, openSeq: number) {
   return url === dismissedSessionURL.value
 }
 
+// An already-open terminal page keeps its iframe, so its mount hook never runs
+// again. Ask it to start the session the launcher wanted instead of only
+// switching to a page the user still has to start by hand.
+function nudgeTerminalTab(id: string, url: string) {
+  let parsed: URL
+  try {
+    parsed = new URL(url, window.location.origin)
+  } catch {
+    return
+  }
+  if (parsed.origin !== window.location.origin || parsed.pathname !== '/terminal') return
+  const profile = parsed.searchParams.get('profile') || ''
+  if (profile) postToTab(id, { type: 'chemssh-launcher:terminal-connect', profile })
+}
+
 function openOrFocus(title: string, url: string) {
   const existing = findTabByURL(url)
   if (existing) {
     if (title && !existing.titleKey) existing.title = title
     activate(existing.id)
+    nudgeTerminalTab(existing.id, url)
     return
   }
   createTab(title, url)
@@ -483,7 +512,7 @@ function handleWindowMessage(event: MessageEvent) {
     openOrFocus(titleForURL(finalURL).title, finalURL)
   }
   if (data.type === 'chemssh-launcher:open-sftp' && data.profile) {
-    openSftpProfile(String(data.profile), String(data.name || ''))
+    openSftpProfile(String(data.profile), String(data.name || ''), String(data.path || ''), data.forceNew === true)
   }
   if (data.type === 'chemssh-launcher:close-downloads') closeDownloadsPanel()
   if (data.type === 'chemssh-launcher:suppress-auto-open') suppressAutoOpenUntil = Date.now() + 10000

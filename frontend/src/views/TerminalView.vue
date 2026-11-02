@@ -1,52 +1,181 @@
 <template>
-  <section class="terminal-view">
+  <section class="terminal-view" :style="{ '--terminal-sidebar-width': `${sidebarWidth}px` }">
     <aside class="terminal-sessions">
-      <header class="terminal-sessions-title">
-        <span class="terminal-sessions-label">{{ t('terminal.servers') }}</span>
-        <span class="terminal-sessions-actions">
+      <section class="terminal-side-section terminal-servers-section" :class="{ 'is-collapsed': serverSectionCollapsed }">
+        <header class="terminal-sessions-title">
           <button
             type="button"
-            class="terminal-sessions-refresh"
-            :class="{ 'is-refreshing': refreshingProfiles }"
-            :title="t('terminal.refreshServers')"
-            :aria-label="t('terminal.refreshServers')"
-            :disabled="refreshingProfiles"
-            @click="refreshProfiles"
+            class="terminal-side-toggle"
+            :title="serverSectionCollapsed ? t('terminal.serversExpand') : t('terminal.serversCollapse')"
+            @click="toggleServerSection"
           >
-            <el-icon><Refresh /></el-icon>
+            <el-icon><ArrowRight v-if="serverSectionCollapsed" /><ArrowDown v-else /></el-icon>
+            <span class="terminal-sessions-label">{{ t('terminal.servers') }}</span>
           </button>
-          <span class="terminal-sessions-count">{{ remoteProfiles.length }}</span>
-        </span>
-      </header>
-      <div class="terminal-session-list" role="list">
-        <button
-          v-for="profile in remoteProfiles"
-          :key="profile.id"
-          class="terminal-session"
-          :class="{ 'is-active': profile.id === selectedProfileID }"
-          type="button"
-          :title="profileSessionTitle(profile)"
-          @click="selectProfile(profile)"
-          @dblclick="openProfileSession(profile)"
-          @contextmenu.prevent.stop="openProfileMenu(profile, $event)"
-        >
-          <span class="terminal-session-icon"><el-icon><Connection /></el-icon></span>
-          <span class="terminal-session-text">
-            <strong>{{ profile.name || profile.ssh_host || profile.id }}</strong>
-            <small>{{ profileMeta(profile) }}</small>
+          <span class="terminal-sessions-actions">
+            <button
+              type="button"
+              class="terminal-sessions-refresh"
+              :class="{ 'is-refreshing': refreshingProfiles }"
+              :title="t('terminal.refreshServers')"
+              :aria-label="t('terminal.refreshServers')"
+              :disabled="refreshingProfiles"
+              @click="refreshProfiles"
+            >
+              <el-icon><Refresh /></el-icon>
+            </button>
+            <span class="terminal-sessions-count">{{ remoteProfiles.length }}</span>
           </span>
-          <span
-            v-if="profileHasOpenTab(profile.id)"
-            class="terminal-session-dot"
-            :class="{ 'is-live': profileIsConnected(profile.id) }"
-          />
-        </button>
-        <div v-if="!remoteProfiles.length" class="terminal-sessions-empty">
-          <span>{{ t('terminal.noProfiles') }}</span>
-          <small>{{ t('terminal.noProfilesHint') }}</small>
+        </header>
+        <div v-show="!serverSectionCollapsed" class="terminal-session-list" role="list">
+          <button
+            v-for="profile in remoteProfiles"
+            :key="profile.id"
+            class="terminal-session"
+            :class="{ 'is-active': profile.id === selectedProfileID }"
+            type="button"
+            :title="profileSessionTitle(profile)"
+            @click="selectProfile(profile)"
+            @dblclick="openProfileSession(profile)"
+            @contextmenu.prevent.stop="openProfileMenu(profile, $event)"
+          >
+            <span class="terminal-session-icon"><el-icon><Connection /></el-icon></span>
+            <span class="terminal-session-text">
+              <strong>{{ profile.name || profile.ssh_host || profile.id }}</strong>
+              <small>{{ profileMeta(profile) }}</small>
+            </span>
+            <span
+              v-if="profileHasOpenTab(profile.id)"
+              class="terminal-session-dot"
+              :class="{ 'is-live': profileIsConnected(profile.id) }"
+            />
+          </button>
+          <div v-if="!remoteProfiles.length" class="terminal-sessions-empty">
+            <span>{{ t('terminal.noProfiles') }}</span>
+            <small>{{ t('terminal.noProfilesHint') }}</small>
+          </div>
         </div>
-      </div>
+      </section>
+      <section
+        class="terminal-side-section terminal-sftp-section"
+        :class="{ 'is-open': sftpPanelOpen }"
+      >
+        <header class="terminal-sessions-title terminal-sftp-title">
+          <button
+            type="button"
+            class="terminal-side-toggle"
+            :title="sftpPanelOpen ? t('terminal.sftpCollapse') : t('terminal.sftpExpand')"
+            @click="toggleSftpSection"
+          >
+            <el-icon><ArrowRight v-if="!sftpPanelOpen" /><ArrowDown v-else /></el-icon>
+            <span class="terminal-sessions-label">SFTP</span>
+          </button>
+          <span v-if="sftpPanelOpen" class="terminal-sessions-actions">
+            <button
+              type="button"
+              class="terminal-sftp-sync"
+              :class="{ 'is-on': sftpSyncOn }"
+              :title="sftpSyncOn ? t('terminal.sftpSyncDisable') : t('terminal.sftpSyncEnable')"
+              :aria-pressed="sftpSyncOn"
+              :disabled="!sftpPanelAvailable"
+              @click="toggleSftpSync"
+            >
+              <el-icon><Link /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="terminal-sessions-refresh"
+              :class="{ 'is-refreshing': sftpPanelLoading }"
+              :title="t('terminal.sftpRefresh')"
+              :aria-label="t('terminal.sftpRefresh')"
+              :disabled="sftpPanelLoading || !sftpPanelAvailable"
+              @click="refreshSftpPanel"
+            >
+              <el-icon><Refresh /></el-icon>
+            </button>
+          </span>
+        </header>
+        <div
+          v-if="sftpPanelOpen"
+          class="terminal-sftp-body"
+          :class="{ 'is-drop-active': sftpDropActive }"
+          @dragenter="handleSftpDragEnter"
+          @dragover="handleSftpDragOver"
+          @dragleave="handleSftpDragLeave"
+          @drop="handleSftpDrop"
+        >
+          <div v-if="!sftpPanelAvailable" class="terminal-sftp-hint">{{ t('terminal.sftpNeedsTerminal') }}</div>
+          <template v-else>
+            <div class="terminal-sftp-pathbar">
+              <button
+                type="button"
+                class="terminal-sftp-path-action"
+                :title="t('terminal.sftpBack')"
+                :disabled="!sftpCanGoBack"
+                @click="goSftpBack"
+              >
+                <el-icon><Back /></el-icon>
+              </button>
+              <input
+                v-model="sftpPathInput"
+                class="terminal-sftp-path-input"
+                type="text"
+                spellcheck="false"
+                autocomplete="off"
+                :placeholder="t('terminal.sftpPathPlaceholder')"
+                @keydown.enter.prevent.stop="goSftpPath"
+              />
+            </div>
+            <div v-if="sftpPanelError" class="terminal-sftp-hint is-error">
+              {{ t('terminal.sftpLoadFailed', { error: sftpPanelError }) }}
+            </div>
+            <div v-else-if="sftpPanelLoading && !sftpEntries.length && !sftpParentPath" class="terminal-sftp-hint">
+              {{ t('terminal.sftpLoading') }}
+            </div>
+            <div v-else-if="!sftpEntries.length && !sftpParentPath" class="terminal-sftp-hint">
+              {{ t('terminal.sftpEmpty') }}
+            </div>
+            <div v-else class="terminal-sftp-list" role="list">
+              <button
+                v-if="sftpParentPath"
+                type="button"
+                class="terminal-sftp-entry is-dir is-parent"
+                :title="t('terminal.sftpUp')"
+                @dblclick="openSftpParent"
+              >
+                <span class="terminal-sftp-entry-icon"><el-icon><FolderOpened /></el-icon></span>
+                <span class="terminal-sftp-entry-name">..</span>
+              </button>
+              <button
+                v-for="entry in sftpEntries"
+                :key="entry.path || entry.name"
+                type="button"
+                class="terminal-sftp-entry"
+                :class="{ 'is-dir': entry.is_dir }"
+                draggable="true"
+                :title="entry.is_dir ? t('terminal.sftpEntryDirTitle', { name: entry.path }) : t('terminal.sftpEntryFileTitle', { name: entry.path })"
+                @dblclick="openSftpEntry(entry)"
+                @dragstart="startSftpEntryDrag(entry, $event)"
+              >
+                <span class="terminal-sftp-entry-icon">
+                  <el-icon><FolderOpened v-if="entry.is_dir" /><Document v-else /></el-icon>
+                </span>
+                <span class="terminal-sftp-entry-name">{{ entry.name }}</span>
+                <span v-if="!entry.is_dir" class="terminal-sftp-entry-size">{{ formatBytes(entry.size) }}</span>
+              </button>
+            </div>
+          </template>
+          <div v-if="sftpDropActive" class="terminal-sftp-drop-hint">{{ t('terminal.sftpDropUpload') }}</div>
+        </div>
+      </section>
     </aside>
+    <div
+      class="terminal-side-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      :title="t('terminal.sidebarResize')"
+      @mousedown.prevent="beginSidebarResize"
+    />
     <div class="terminal-card">
       <div class="terminal-tabs">
         <button
@@ -223,6 +352,9 @@
           <el-tooltip v-if="connected" :content="t('terminal.disconnect')" placement="top" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
             <el-button class="terminal-footer-disconnect" :icon="SwitchButton" circle @click="disconnectActiveTab" />
           </el-tooltip>
+          <el-tooltip v-else-if="canReconnect" :content="t('terminal.reconnect')" placement="top" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+            <el-button class="terminal-footer-reconnect" :icon="RefreshRight" circle @click="reconnectActiveTab" />
+          </el-tooltip>
         </div>
       </footer>
     </div>
@@ -233,6 +365,10 @@
       role="menu"
     >
       <button type="button" role="menuitem" @click="runTabAction('duplicate')">{{ t('terminal.tabDuplicate') }}</button>
+      <button type="button" role="menuitem" @click="runTabAction('sftp')">
+        {{ t('terminal.tabOpenSftp') }}
+        <span class="terminal-tab-menu-hint">Ctrl+Alt+F</span>
+      </button>
       <button type="button" role="menuitem" @click="runTabAction('close')">{{ t('terminal.tabClose') }}</button>
       <button type="button" role="menuitem" class="is-danger" @click="runTabAction('closeAll')">{{ t('terminal.tabCloseAll') }}</button>
     </div>
@@ -253,12 +389,31 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowUp, Close, Connection, Minus, Plus, Refresh, Search, Setting, SwitchButton, Upload, UploadFilled } from '@element-plus/icons-vue'
+import {
+  ArrowDown,
+  ArrowRight,
+  ArrowUp,
+  Back,
+  Close,
+  Connection,
+  Document,
+  FolderOpened,
+  Link,
+  Minus,
+  Plus,
+  Refresh,
+  RefreshRight,
+  Search,
+  Setting,
+  SwitchButton,
+  Upload,
+  UploadFilled
+} from '@element-plus/icons-vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import '@xterm/xterm/css/xterm.css'
-import { api, APIError, postJSON, withLauncherToken, type Profile } from '../api'
+import { api, APIError, formatBytes, joinPath, parentPath, postJSON, withLauncherToken, type FileEntry, type Profile } from '../api'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import {
   collectDropUploadEntries,
@@ -272,17 +427,62 @@ import { t } from '../i18n'
 const props = defineProps<{ active: boolean }>()
 
 const TERMINAL_PROFILE_KEY = 'chemssh-launcher.terminal-profile'
+const SIDEBAR_WIDTH_KEY = 'chemssh-launcher.terminal-sidebar-width'
+const SERVER_COLLAPSED_KEY = 'chemssh-launcher.terminal-server-collapsed'
+const SFTP_SYNC_KEY = 'chemssh-launcher.terminal-sftp-sync'
+const SIDEBAR_WIDTH_DEFAULT = 224
+const SIDEBAR_WIDTH_MIN = 172
+const SIDEBAR_WIDTH_MAX = 560
 
 type TerminalStatus = 'idle' | 'connecting' | 'connected' | 'error'
-type TabAction = 'duplicate' | 'close' | 'closeAll'
+type TabAction = 'duplicate' | 'sftp' | 'close' | 'closeAll'
+
+// Same limit the SFTP page applies before it opens a cached, auto-synced copy.
+const REMOTE_OPEN_SYNC_MAX_BYTES = 100 * 1024 * 1024
+const OPEN_SYNC_POLL_INTERVAL = 1500
+const SFTP_HISTORY_LIMIT = 20
+const SFTP_EXTERNAL_DOWNLOAD_MIME = 'application/octet-stream'
+
+interface OpenSyncEvent {
+  seq: number
+  session: string
+  remote_path: string
+  local_path: string
+  status: 'done' | 'error'
+  error?: string
+}
+
+// Per-tab sidebar SFTP browser. It stays closed until the user opens it, so a
+// new terminal never dials an extra SFTP channel on its own.
+interface TerminalSftpPanel {
+  open: boolean
+  sync: boolean
+  path: string
+  loadedPath: string
+  // Previous directories, most recent first, mirroring the SFTP page's
+  // back-history dropdown.
+  history: string[]
+  entries: FileEntry[]
+  loading: boolean
+  error: string
+  dropActive: boolean
+  seq: number
+}
 
 interface TerminalTab {
   id: string
   profileID: string
   status: TerminalStatus
   cwd: string
+  // Directory the shell sat in when the session dropped, so a reconnect can
+  // `cd` back into it instead of landing in the remote home.
+  resumePath: string
+  // Only a tab that already reached the server offers reconnect; a brand new
+  // tab still starts from the server list.
+  wasConnected: boolean
   uploading: boolean
   uploadPercent: number
+  sftp: TerminalSftpPanel
 }
 
 interface TerminalRuntime {
@@ -304,6 +504,10 @@ interface TerminalRuntime {
   sftpSessionID: string
   sftpProfileID: string
   sftpReleasePending: boolean
+  sftpConnectPromise: Promise<string> | null
+  // Remote paths opened for local editing; the backend keeps watching them and
+  // uploading edits, so this session must outlive a collapsed sidebar panel.
+  sftpSyncedFiles: Set<string>
   pendingCd: string
   disposed: boolean
 }
@@ -324,6 +528,9 @@ const displaySettings = reactive({ fontSize: 13, scrollback: 5000 })
 const tabMenu = reactive({ visible: false, x: 0, y: 0, tabID: '' })
 const profileMenu = reactive({ visible: false, x: 0, y: 0, profileID: '' })
 const tabDrag = reactive({ active: false, tabID: '', targetID: '', position: 'before' as 'before' | 'after' })
+const sidebarWidth = ref(readSidebarWidth())
+const serverSectionCollapsed = ref(readStoredFlag(SERVER_COLLAPSED_KEY))
+const sftpSyncPreferred = ref(readStoredFlag(SFTP_SYNC_KEY))
 
 const TERMINAL_FONT_MIN = 10
 const TERMINAL_FONT_MAX = 24
@@ -345,6 +552,12 @@ let lastProfileID = localStorage.getItem(TERMINAL_PROFILE_KEY) || ''
 let resizeObserver: ResizeObserver | null = null
 let settingsSaveTimer: number | null = null
 let tabSeq = 0
+let viewDisposed = false
+// Own cursor into the backend's edited-file upload log; each page polls the
+// same global log with its own sequence, so the SFTP page is unaffected.
+let lastOpenSyncSeq = 0
+let openSyncPolling = false
+let openSyncPollTimer: number | undefined
 
 const ZMODEM_SIGNATURES = [
   'rz waiting to receive',
@@ -361,10 +574,39 @@ const activeProfile = computed(() => remoteProfiles.value.find(profile => profil
 const connectionAddress = computed(() => activeProfile.value ? profileSessionURL(activeProfile.value) : '')
 const connected = computed(() => activeTab.value?.status === 'connected')
 const statusKind = computed<TerminalStatus>(() => activeTab.value?.status || 'idle')
+const canReconnect = computed(() => {
+  const tab = activeTab.value
+  if (!tab || !tab.profileID) return false
+  if (tab.status === 'connected' || tab.status === 'connecting') return false
+  return tab.wasConnected || tab.status === 'error'
+})
 const currentDir = computed(() => activeTab.value?.cwd || '')
 const uploading = computed(() => activeTab.value?.uploading || false)
 const uploadPercent = computed(() => activeTab.value?.uploadPercent || 0)
 const uploadTargetLabel = computed(() => currentDir.value.trim() || t('terminal.remoteHome'))
+const sftpPanelOpen = computed(() => Boolean(activeTab.value?.sftp.open))
+const sftpPanelAvailable = computed(() => activeTab.value?.status === 'connected')
+const sftpSyncOn = computed(() => Boolean(activeTab.value?.sftp.open && activeTab.value?.sftp.sync))
+const sftpPanelLoading = computed(() => Boolean(activeTab.value?.sftp.loading))
+const sftpPanelError = computed(() => activeTab.value?.sftp.error || '')
+const sftpEntries = computed(() => activeTab.value?.sftp.entries || [])
+const sftpCanGoBack = computed(() => Boolean(activeTab.value?.sftp.history.length))
+const sftpDropActive = computed(() => Boolean(activeTab.value?.sftp.dropActive))
+const sftpParentPath = computed(() => {
+  const tab = activeTab.value
+  if (!tab?.sftp.open) return ''
+  const current = tab.sftp.loadedPath || tab.sftp.path
+  if (!current) return ''
+  const parent = parentPath(current, 'remote')
+  return parent && parent !== current ? parent : ''
+})
+const sftpPathInput = computed({
+  get: () => activeTab.value?.sftp.path || '',
+  set: value => {
+    const tab = activeTab.value
+    if (tab) tab.sftp.path = value
+  }
+})
 const statusText = computed(() => {
   switch (statusKind.value) {
     case 'connecting':
@@ -422,13 +664,401 @@ function selectProfile(profile: Profile) {
   persistProfile(profile.id)
 }
 
-async function openProfileSession(profile: Profile) {
-  selectProfile(profile)
-  const openTab = tabs.value.find(tab => tab.profileID === profile.id && (tab.status === 'connected' || tab.status === 'connecting'))
-  if (openTab) {
-    await activateTab(openTab.id)
+function readStoredFlag(key: string) {
+  try {
+    return localStorage.getItem(key) === '1'
+  } catch {
+    return false
+  }
+}
+
+function persistFlag(key: string, enabled: boolean) {
+  try {
+    localStorage.setItem(key, enabled ? '1' : '0')
+  } catch {
+    // Sidebar preferences are best-effort.
+  }
+}
+
+function readSidebarWidth() {
+  try {
+    const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
+    if (Number.isFinite(stored) && stored >= SIDEBAR_WIDTH_MIN && stored <= SIDEBAR_WIDTH_MAX) return Math.round(stored)
+  } catch {
+    // Fall through to the default width.
+  }
+  return SIDEBAR_WIDTH_DEFAULT
+}
+
+function toggleServerSection() {
+  serverSectionCollapsed.value = !serverSectionCollapsed.value
+  persistFlag(SERVER_COLLAPSED_KEY, serverSectionCollapsed.value)
+}
+
+function beginSidebarResize(event: MouseEvent) {
+  const startX = event.clientX
+  const startWidth = sidebarWidth.value
+  const previousCursor = document.body.style.cursor
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  const handleMove = (move: MouseEvent) => {
+    const next = Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, startWidth + move.clientX - startX))
+    sidebarWidth.value = Math.round(next)
+  }
+  const handleUp = () => {
+    window.removeEventListener('mousemove', handleMove)
+    window.removeEventListener('mouseup', handleUp)
+    document.body.style.cursor = previousCursor
+    document.body.style.userSelect = ''
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth.value))
+    } catch {
+      // Width persistence is best-effort.
+    }
+    fitTerminal(activeTab.value)
+  }
+  window.addEventListener('mousemove', handleMove)
+  window.addEventListener('mouseup', handleUp)
+}
+
+function emptySftpPanel(): TerminalSftpPanel {
+  return {
+    open: false,
+    sync: sftpSyncPreferred.value,
+    path: '',
+    loadedPath: '',
+    history: [],
+    entries: [],
+    loading: false,
+    error: '',
+    dropActive: false,
+    seq: 0
+  }
+}
+
+// Clears the browser contents when the shell session goes away; the panel keeps
+// its open/sync state so reconnecting restores the same place.
+function resetSftpPanelData(tab: TerminalTab) {
+  tab.sftp.entries = []
+  tab.sftp.error = ''
+  tab.sftp.loading = false
+  tab.sftp.loadedPath = ''
+  tab.sftp.seq += 1
+}
+
+function sortSftpEntries(entries: FileEntry[]) {
+  return [...entries].sort((left, right) => {
+    if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1
+    return left.name.localeCompare(right.name)
+  })
+}
+
+// Relative input (".", "..", "user/data") is resolved through the server so
+// the panel always shows an absolute path that the shell can `cd` into.
+async function resolveSftpPanelPath(sessionID: string, target: string) {
+  if (target.startsWith('/')) return target
+  const resolved = await api<{ path?: string }>(
+    `/api/sftp/realpath?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(target)}`
+  ).catch(() => null)
+  const value = resolved?.path?.trim() || ''
+  return value.startsWith('/') ? value : target
+}
+
+// `recordHistory: false` is used when the new path is itself a history entry,
+// matching the SFTP page: going back does not push the directory you left.
+async function loadSftpPanel(
+  tab: TerminalTab,
+  path?: string,
+  options: { recordHistory?: boolean } = {}
+) {
+  const state = tab.sftp
+  if (!state.open) return ''
+  if (tab.status !== 'connected') {
+    resetSftpPanelData(tab)
+    return ''
+  }
+  const requested = (path ?? state.path) || tab.cwd || '.'
+  state.path = requested
+  const seq = state.seq + 1
+  state.seq = seq
+  state.loading = true
+  state.error = ''
+  try {
+    const sessionID = await connectSftp(tab)
+    const target = await resolveSftpPanelPath(sessionID, requested)
+    if (state.seq !== seq || !state.open || !runtimeFor(tab)) return ''
+    state.path = target
+    const data = await api<{ path: string; entries: FileEntry[] }>(
+      `/api/sftp/list?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(target)}`
+    )
+    if (state.seq !== seq || !state.open || !runtimeFor(tab)) return ''
+    const previous = state.loadedPath
+    state.path = data.path || target
+    state.loadedPath = state.path
+    state.entries = sortSftpEntries(data.entries || [])
+    if (options.recordHistory !== false && previous && previous !== state.loadedPath) {
+      state.history = [previous, ...state.history.filter(item => item !== previous)].slice(0, SFTP_HISTORY_LIMIT)
+    }
+    return state.loadedPath
+  } catch (error) {
+    if (state.seq !== seq || !state.open || !runtimeFor(tab)) return ''
+    state.entries = []
+    state.error = errorMessage(error)
+    return ''
+  } finally {
+    if (state.seq === seq) state.loading = false
+  }
+}
+
+function toggleSftpSection() {
+  const tab = activeTab.value
+  if (!tab) return
+  const open = !tab.sftp.open
+  tab.sftp.open = open
+  if (!open) {
+    resetSftpPanelData(tab)
+    tab.sftp.path = ''
+    tab.sftp.history = []
+    tab.sftp.dropActive = false
+    // Closing the browser frees the extra SFTP channel; uploads reconnect on
+    // demand, and an in-flight upload delays the release until it finishes.
+    releaseSftpIfIdle(tab)
     return
   }
+  tab.sftp.path = tab.cwd || tab.sftp.path || '.'
+  void loadSftpPanel(tab, tab.sftp.path)
+}
+
+function toggleSftpSync() {
+  const tab = activeTab.value
+  if (!tab || !tab.sftp.open) return
+  tab.sftp.sync = !tab.sftp.sync
+  sftpSyncPreferred.value = tab.sftp.sync
+  persistFlag(SFTP_SYNC_KEY, tab.sftp.sync)
+  // Enabling sync treats the shell as the source of truth.
+  if (tab.sftp.sync && tab.cwd && tab.cwd !== tab.sftp.loadedPath) void loadSftpPanel(tab, tab.cwd)
+}
+
+function refreshSftpPanel() {
+  const tab = activeTab.value
+  if (!tab || !tab.sftp.open) return
+  void loadSftpPanel(tab, tab.sftp.loadedPath || tab.sftp.path || tab.cwd || '.')
+}
+
+function goSftpPath() {
+  const tab = activeTab.value
+  if (!tab || !tab.sftp.open) return
+  void navigateSftpPanel(tab, tab.sftp.path.trim() || tab.cwd || '.')
+}
+
+function goSftpBack() {
+  const tab = activeTab.value
+  if (!tab || !tab.sftp.open) return
+  const path = tab.sftp.history[0]
+  if (!path) return
+  tab.sftp.history = tab.sftp.history.slice(1)
+  void navigateSftpPanel(tab, path, { recordHistory: false })
+}
+
+function openSftpParent() {
+  const tab = activeTab.value
+  if (!tab || !tab.sftp.open) return
+  const current = tab.sftp.loadedPath || tab.sftp.path
+  const parent = parentPath(current || '/', 'remote')
+  if (!parent || parent === current) return
+  void navigateSftpPanel(tab, parent)
+}
+
+function openSftpEntry(entry: FileEntry) {
+  const tab = activeTab.value
+  if (!tab || !tab.sftp.open) return
+  const path = entry.path || joinPath(tab.sftp.loadedPath || '.', entry.name, 'remote')
+  if (entry.is_dir) {
+    void navigateSftpPanel(tab, path)
+    return
+  }
+  void openSftpFile(tab, entry, path)
+}
+
+// Mirrors the SFTP page's Open action: cache the file locally, hand it to the
+// OS file association, and let the backend watch it and upload every change
+// back to the remote path while the session stays connected.
+async function openSftpFile(tab: TerminalTab, entry: FileEntry, path: string) {
+  if (entry.size > REMOTE_OPEN_SYNC_MAX_BYTES) {
+    ElMessage.warning(t('sftp.openTooLarge'))
+    return
+  }
+  try {
+    const sessionID = await connectSftp(tab)
+    await postJSON<{ path: string }>('/api/sftp/open', { session: sessionID, path })
+    runtimeFor(tab)?.sftpSyncedFiles.add(path)
+  } catch (error) {
+    ElMessage.error(t('terminal.sftpOpenFailed', { error: errorMessage(error) }))
+  }
+}
+
+// Mirrors the SFTP page's row drag: Chromium turns a DownloadURL payload into a
+// real OS file drag, so the row can be dropped on Explorer or the desktop.
+function startSftpEntryDrag(entry: FileEntry, event: DragEvent) {
+  const tab = activeTab.value
+  if (!tab || !event.dataTransfer) return
+  const path = entry.path || joinPath(tab.sftp.loadedPath || '.', entry.name, 'remote')
+  event.dataTransfer.effectAllowed = 'copy'
+  event.dataTransfer.setData('text/plain', path)
+  const sessionID = runtimeFor(tab)?.sftpSessionID || ''
+  if (!sessionID || entry.is_dir) return
+  const url = `${window.location.origin}/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(path)}`
+  event.dataTransfer.setData(
+    'DownloadURL',
+    `${SFTP_EXTERNAL_DOWNLOAD_MIME}:${sanitizeSftpDownloadName(entry.name)}:${url}`
+  )
+}
+
+// DownloadURL is colon-delimited, so ':' and path separators would corrupt it.
+function sanitizeSftpDownloadName(name: string) {
+  return name.replace(/[:\\/]/g, '_').replace(/[\u0000-\u001f]/g, '').trim() || 'download'
+}
+
+function handleSftpDragEnter(event: DragEvent) {
+  if (!hasFileDrag(event)) return
+  event.preventDefault()
+  const tab = activeTab.value
+  if (tab?.sftp.open) tab.sftp.dropActive = true
+}
+
+function handleSftpDragOver(event: DragEvent) {
+  if (!hasFileDrag(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+  const tab = activeTab.value
+  if (tab?.sftp.open) tab.sftp.dropActive = true
+}
+
+function handleSftpDragLeave(event: DragEvent) {
+  const tab = activeTab.value
+  if (!tab?.sftp.dropActive) return
+  const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  const related = event.relatedTarget instanceof Node ? event.relatedTarget : null
+  if (target && related && target.contains(related)) return
+  tab.sftp.dropActive = false
+}
+
+// Files dropped on the browser upload into the directory it is showing.
+async function handleSftpDrop(event: DragEvent) {
+  if (!hasFileDrag(event)) return
+  event.preventDefault()
+  const tab = activeTab.value
+  if (!tab?.sftp.open) return
+  tab.sftp.dropActive = false
+  if (tab.status !== 'connected') {
+    ElMessage.warning(t('terminal.sftpNeedsTerminal'))
+    return
+  }
+  const dir = tab.sftp.loadedPath || tab.sftp.path || null
+  try {
+    const entries = await collectDropUploadEntries(event)
+    await uploadEntriesToDir(tab, entries, dir)
+    if (dir) void loadSftpPanel(tab, dir)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(`${t('terminal.uploadFailed')}: ${errorMessage(error)}`)
+  }
+}
+
+// The backend reports each edited-file upload here; refresh the directory that
+// holds the file so sizes and timestamps stay truthful.
+async function pollOpenSyncEvents() {
+  if (openSyncPolling || viewDisposed) return
+  // Without an SFTP channel there is nothing this page could have opened.
+  const hasChannel = [...runtimes.values()].some(
+    runtime => !runtime.disposed && (runtime.sftpSessionID !== '' || runtime.sftpSyncedFiles.size > 0)
+  )
+  if (!hasChannel) return
+  openSyncPolling = true
+  try {
+    const result = await api<{ events: OpenSyncEvent[] }>(
+      `/api/sftp/open-sync-events?after=${lastOpenSyncSeq}`
+    )
+    const events = Array.isArray(result.events) ? result.events : []
+    for (const event of events) {
+      lastOpenSyncSeq = Math.max(lastOpenSyncSeq, event.seq || 0)
+      if (!event.session) continue
+      const tab = tabs.value.find(item => {
+        if (!item.sftp.open) return false
+        return runtimeFor(item)?.sftpSessionID === event.session
+      })
+      if (!tab) continue
+      if (event.status !== 'done') {
+        ElMessage.error(t('sftp.openSyncFailed', { path: event.remote_path, error: event.error || '' }))
+        continue
+      }
+      const parent = parentPath(event.remote_path, 'remote')
+      const current = tab.sftp.loadedPath
+      if (!current || current === parent) void loadSftpPanel(tab, current || tab.sftp.path)
+    }
+  } catch {
+    // Polling stays quiet while the backend restarts or the session is gone.
+  } finally {
+    openSyncPolling = false
+  }
+}
+
+// A user navigation in the sidebar browser drives the shell when syncing.
+async function navigateSftpPanel(tab: TerminalTab, path: string, options: { recordHistory?: boolean } = {}) {
+  const resolved = await loadSftpPanel(tab, path, options)
+  if (!resolved || !tab.sftp.open || !tab.sftp.sync) return
+  applySftpPathToTerminal(tab, resolved)
+}
+
+function applySftpPathToTerminal(tab: TerminalTab, path: string) {
+  if (!path || tab.status !== 'connected') return
+  if (tab.cwd === path) return
+  const runtime = runtimeFor(tab)
+  if (!runtime?.sessionID) return
+  tab.cwd = path
+  if (runtime.pendingCd) {
+    runtime.pendingCd = path
+    return
+  }
+  runtime.pendingInput = `cd ${quoteShellPath(path)}\r${runtime.pendingInput}`
+  void flushInput(tab)
+}
+
+// A "connect this server" request means the user wants a session, not just the
+// page: focus a live session, resume a tab that is still open, and only create a
+// tab when the profile has none.
+async function connectProfile(profileID: string) {
+  if (!profileID || !remoteProfiles.value.some(profile => profile.id === profileID)) return
+  const live = tabs.value.find(tab => tab.profileID === profileID && tab.status === 'connected')
+  if (live) {
+    await activateTab(live.id)
+    return
+  }
+  const reusable = tabs.value.find(tab => tab.profileID === profileID && tab.status !== 'connecting')
+  if (reusable) {
+    await activateTab(reusable.id)
+    await connect(reusable)
+    return
+  }
+  const tab = await createTab(profileID)
+  await connect(tab)
+}
+
+// The launcher reuses an already-open terminal page, whose mount hook never runs
+// again, so it asks for the session over a message instead.
+function handleHostMessage(event: MessageEvent) {
+  if (window.parent === window || event.source !== window.parent) return
+  const data = event.data || {}
+  if (data.type !== 'chemssh-launcher:terminal-connect') return
+  void connectProfile(String(data.profile || ''))
+}
+
+async function openProfileSession(profile: Profile) {
+  selectProfile(profile)
+  // A double-click always opens a fresh session, even when the same server
+  // already has a connected tab: jumping to that tab looked like the click was
+  // ignored. Only a blank, never-connected tab is filled in so the initial
+  // placeholder does not linger next to a new session.
   const current = activeTab.value
   if (current && current.status === 'idle') {
     current.profileID = profile.id
@@ -501,11 +1131,60 @@ function terminalSize(tab: TerminalTab) {
   return { cols: runtime.term.cols, rows: runtime.term.rows }
 }
 
-function writeNotice(tab: TerminalTab, text: string) {
-  runtimeFor(tab)?.term.write(`\r\n\x1b[90m${text}\x1b[0m\r\n`)
+function writeNotice(tab: TerminalTab, text: string, freshLine = true) {
+  runtimeFor(tab)?.term.write(`${freshLine ? '\r\n' : ''}\x1b[90m${text}\x1b[0m\r\n`)
+}
+
+// Modes a dropped remote program can leave behind: attributes, scroll region,
+// origin mode, autowrap, hidden cursor, application cursor keys, mouse
+// reporting, bracketed paste and insert mode. The new shell turns back on
+// whatever it needs.
+const RESUME_MODE_RESET =
+  '\x1b[0m\x1b[r\x1b[?6l\x1b[?7h\x1b[?25h\x1b[?1l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[4l'
+
+// xterm restores the DECSC cursor on `CSI ? 1049 l` unconditionally, and that
+// saved position is the top row once the scrollback grew or nothing was saved
+// yet. Sending it outside the alternate screen parked the cursor over the old
+// output, so the new prompt overwrote it: only leave the alternate screen when
+// the terminal is actually in it.
+//
+// Whatever the dead session left the cursor on, the resume path then parks it
+// on a fresh line after the last line of history, so nothing can overwrite the
+// log that a reconnect is supposed to preserve. `resume` queues the first
+// notice, which must follow the parking step.
+function prepareResumeTerminal(term: Terminal, resume: () => void) {
+  const park = () => {
+    term.write(RESUME_MODE_RESET)
+    parkResumeCursor(term)
+    resume()
+  }
+  // The buffer API still describes the alternate screen until the queued
+  // sequence is parsed, so the parking step has to wait for it.
+  if (term.buffer.active.type === 'alternate') term.write('\x1b[?1049l', park)
+  else park()
+}
+
+function parkResumeCursor(term: Terminal) {
+  if (term.rows < 1) return
+  const buffer = term.buffer.active
+  // Viewport scroll position has to match the buffer end first: `CSI H` is
+  // relative to the viewport, not to the scrollback.
+  term.scrollToBottom()
+  let row = term.rows - 1
+  while (row > 0) {
+    const line = buffer.getLine(buffer.baseY + row)
+    if (line && line.translateToString(true).trim() !== '') break
+    row -= 1
+  }
+  // Column 1 of the last row that carries text, then a newline: it lands on an
+  // empty row, or scrolls the buffer when that row is already the bottom one.
+  term.write(`\x1b[${row + 1};1H\r\n`)
 }
 
 function resetStreamState(tab: TerminalTab) {
+  // Remember where the shell was: a reconnect (and a failed connect retry)
+  // continues in that directory instead of the remote home.
+  if (tab.cwd) tab.resumePath = tab.cwd
   tab.cwd = ''
   const runtime = runtimeFor(tab)
   if (!runtime) return
@@ -517,7 +1196,15 @@ function resetStreamState(tab: TerminalTab) {
 function setCurrentDir(tab: TerminalTab, value: string) {
   const path = value.replace(/\r/g, '').trim()
   if (!path || /[\r\n\0]/.test(path)) return
+  const changed = tab.cwd !== path
   tab.cwd = path
+  if (!changed) return
+  // Sync only ever runs terminal -> sidebar here; the sidebar sends its own
+  // `cd` through applySftpPathToTerminal, so the two cannot ping-pong: each
+  // side ignores a path it is already showing.
+  if (!tab.sftp.open || !tab.sftp.sync) return
+  if ((tab.sftp.loadedPath || tab.sftp.path) === path) return
+  void loadSftpPanel(tab, path)
 }
 
 function parseOsc7Cwd(body: string) {
@@ -560,6 +1247,52 @@ function filterZmodem(tab: TerminalTab, text: string) {
   void interceptNativeZmodem(tab, signature)
   const index = text.toLowerCase().indexOf(signature)
   return index < 0 ? '' : text.slice(0, index)
+}
+
+// `top`, `clear` and other screen-owning tools erase the display before they
+// draw: `CSI 2 J` wipes the visible rows and `CSI 3 J` wipes the scrollback.
+// xterm would honour both, dropping text this tab is supposed to keep, so the
+// visible rows are moved into the scrollback first and a scrollback wipe is
+// ignored. `CSI J` alone is left alone: readline emits it while editing a line.
+const ERASE_DISPLAY = /\x1b\[(?:2J|3J)/g
+
+function preserveHistory(tab: TerminalTab, text: string) {
+  if (!text.includes('\x1b[')) return text
+  const runtime = runtimeFor(tab)
+  if (!runtime) return text
+  let out = ''
+  let index = 0
+  let touched = false
+  for (const match of text.matchAll(ERASE_DISPLAY)) {
+    touched = true
+    const at = match.index ?? 0
+    out += text.slice(index, at)
+    index = at + match[0].length
+    // No remote program may throw away this tab's scrollback.
+    if (match[0].endsWith('3J')) continue
+    out += screenIntoScrollback(runtime.term)
+    out += match[0]
+  }
+  return touched ? out + text.slice(index) : text
+}
+
+// Scrolls the visible screen into the scrollback and homes the cursor, which is
+// where a program expects to be after erasing the display; the erase that the
+// caller appends then only clears blank rows.
+function screenIntoScrollback(term: Terminal) {
+  const buffer = term.buffer.active
+  if (buffer.type !== 'normal' || term.rows < 1) return ''
+  term.scrollToBottom()
+  let used = 0
+  for (let row = term.rows - 1; row >= 0; row -= 1) {
+    const line = buffer.getLine(buffer.baseY + row)
+    if (line && line.translateToString(true).trim() !== '') {
+      used = row + 1
+      break
+    }
+  }
+  if (used === 0) return ''
+  return `\x1b[${term.rows};1H${'\r\n'.repeat(used)}\x1b[H`
 }
 
 function consumeTerminalOutput(tab: TerminalTab, data: string) {
@@ -606,7 +1339,7 @@ function consumeTerminalOutput(tab: TerminalTab, data: string) {
   }
   if (!visible) return
   const filtered = filterZmodem(tab, visible)
-  if (filtered) runtime.term.write(filtered)
+  if (filtered) runtime.term.write(preserveHistory(tab, filtered))
 }
 
 function fitTerminal(tab: TerminalTab | null) {
@@ -710,6 +1443,14 @@ function runSearch(backwards: boolean) {
 function handleTerminalShortcut(event: KeyboardEvent) {
   if (!props.active) return
   if (document.querySelector('.lumen-command-palette')) return
+  // AltGr arrives as Ctrl+Alt on Windows, so it must not fire the SFTP shortcut.
+  if ((event.ctrlKey || event.metaKey) && event.altKey && !event.shiftKey && !event.getModifierState?.('AltGraph') && event.key.toLowerCase() === 'f') {
+    if (!activeTab.value) return
+    event.preventDefault()
+    event.stopPropagation()
+    openTabInSftp(activeTab.value, true)
+    return
+  }
   if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') {
     if (!activeTab.value) return
     event.preventDefault()
@@ -796,6 +1537,8 @@ async function ensureRuntime(tab: TerminalTab) {
     sftpSessionID: '',
     sftpProfileID: '',
     sftpReleasePending: false,
+    sftpConnectPromise: null,
+    sftpSyncedFiles: new Set<string>(),
     pendingCd: '',
     disposed: false
   }
@@ -831,8 +1574,11 @@ async function createTab(profileID = lastProfileID || remoteProfiles.value[0]?.i
     profileID,
     status: 'idle',
     cwd: '',
+    resumePath: '',
+    wasConnected: false,
     uploading: false,
-    uploadPercent: 0
+    uploadPercent: 0,
+    sftp: emptySftpPanel()
   })
   tabs.value.push(tab)
   activeTabID.value = tab.id
@@ -854,6 +1600,9 @@ async function activateTab(id: string) {
   dropActive.value = false
   await nextTick()
   fitTerminal(activeTab.value)
+  if (tab?.sftp.open && !tab.sftp.entries.length && tab.status === 'connected' && !tab.sftp.loading) {
+    void loadSftpPanel(tab, tab.sftp.path || tab.cwd || '.')
+  }
   runtimeFor(activeTab.value)?.term.focus()
 }
 
@@ -965,7 +1714,7 @@ function finishTabDrag() {
 
 function openTabMenu(tab: TerminalTab, event: MouseEvent) {
   const menuWidth = 190
-  const menuHeight = 130
+  const menuHeight = 168
   closeProfileMenu()
   tabMenu.tabID = tab.id
   tabMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8))
@@ -978,6 +1727,10 @@ function runTabAction(action: TabAction) {
   tabMenu.visible = false
   if (action === 'duplicate') {
     if (tab) void duplicateTab(tab)
+    return
+  }
+  if (action === 'sftp') {
+    if (tab) openTabInSftp(tab)
     return
   }
   if (action === 'close') {
@@ -1026,16 +1779,29 @@ function handleProfileMenuKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') closeProfileMenu()
 }
 
-function openProfileInSftp(profile: Profile) {
+function openProfileInSftp(profile: Profile, path = '', forceNew = false) {
   if (!profile.id || profile.kind === 'local') return
   const name = (profile.name || profile.ssh_host || '').trim()
+  const targetPath = path.trim()
   if (window.parent && window.parent !== window) {
-    window.parent.postMessage({ type: 'chemssh-launcher:open-sftp', profile: profile.id, name }, window.location.origin)
+    window.parent.postMessage({ type: 'chemssh-launcher:open-sftp', profile: profile.id, name, path: targetPath, forceNew }, window.location.origin)
     return
   }
   const params = new URLSearchParams({ profile: profile.id })
   if (name) params.set('name', name)
+  if (targetPath) params.set('path', targetPath)
   window.open(`/sftp?${params.toString()}`, '_blank')
+}
+
+// The server sidebar knows nothing about a terminal, so it opens the remote
+// home directory. A terminal tab hands its tracked working directory over so
+// the SFTP tab lands in exactly the directory the shell is sitting in.
+// `forceNew` keeps the Ctrl+Alt+F shortcut additive: it appends a tab even
+// when one already shows that directory, instead of focusing the existing one.
+function openTabInSftp(tab: TerminalTab, forceNew = false) {
+  const profile = profiles.value.find(item => item.id === tab.profileID)
+  if (!profile) return
+  openProfileInSftp(profile, tab.status === 'connected' ? tab.cwd : '', forceNew)
 }
 
 function openMenuProfileInSftp() {
@@ -1065,21 +1831,37 @@ async function connectSftp(tab: TerminalTab) {
   const runtime = runtimeFor(tab)
   if (!runtime) throw new Error('terminal tab closed')
   if (runtime.sftpSessionID && runtime.sftpProfileID === tab.profileID) return runtime.sftpSessionID
-  await disconnectSftp(tab)
-  const payload = { id: tab.profileID }
-  let session: { id: string }
+  // The sidebar browser and the transfer helpers share one channel; coalescing
+  // concurrent dials keeps a burst of clicks from opening a second session.
+  if (runtime.sftpConnectPromise) return runtime.sftpConnectPromise
+  const pending = (async () => {
+    await disconnectSftp(tab)
+    const payload = { id: tab.profileID }
+    let session: { id: string }
+    try {
+      session = await postJSON<{ id: string }>('/api/sftp/connect', payload)
+    } catch (error) {
+      const hostKey = hostKeyFromError(error)
+      if (!hostKey) throw error
+      const trust = await confirmHostKey(hostKey)
+      session = await postJSON<{ id: string }>('/api/sftp/connect', { ...payload, ...trust })
+    }
+    if (runtime.disposed) {
+      // The tab closed while the channel was dialing; never orphan the session.
+      await postJSON('/api/sftp/disconnect', { session: session.id }).catch(() => undefined)
+      throw new Error('terminal tab closed')
+    }
+    runtime.sftpSessionID = session.id
+    runtime.sftpProfileID = tab.profileID
+    runtime.sftpReleasePending = false
+    return runtime.sftpSessionID
+  })()
+  runtime.sftpConnectPromise = pending
   try {
-    session = await postJSON<{ id: string }>('/api/sftp/connect', payload)
-  } catch (error) {
-    const hostKey = hostKeyFromError(error)
-    if (!hostKey) throw error
-    const trust = await confirmHostKey(hostKey)
-    session = await postJSON<{ id: string }>('/api/sftp/connect', { ...payload, ...trust })
+    return await pending
+  } finally {
+    if (runtime.sftpConnectPromise === pending) runtime.sftpConnectPromise = null
   }
-  runtime.sftpSessionID = session.id
-  runtime.sftpProfileID = tab.profileID
-  runtime.sftpReleasePending = false
-  return runtime.sftpSessionID
 }
 
 async function disconnectSftp(tab: TerminalTab) {
@@ -1088,13 +1870,17 @@ async function disconnectSftp(tab: TerminalTab) {
   const id = runtime.sftpSessionID
   runtime.sftpSessionID = ''
   runtime.sftpProfileID = ''
+  runtime.sftpSyncedFiles.clear()
   if (!id) return
   await postJSON('/api/sftp/disconnect', { session: id }).catch(() => undefined)
 }
 
 function releaseSftpIfIdle(tab: TerminalTab) {
+  const runtime = runtimeFor(tab)
+  // Locally opened files are watched through this channel; dropping it would
+  // silently stop uploading their edits, so it lives until the tab closes.
+  if (runtime && runtime.sftpSyncedFiles.size > 0) return
   if (tab.uploading) {
-    const runtime = runtimeFor(tab)
     if (runtime) runtime.sftpReleasePending = true
     return
   }
@@ -1224,7 +2010,9 @@ async function uploadEntriesToDir(tab: TerminalTab, entries: UploadEntry[], targ
     tab.uploading = false
     tab.uploadPercent = 0
     const live = runtimeFor(tab)
-    if (live?.sftpReleasePending && tab.status !== 'connected') {
+    // A release requested while uploading is honored here: either the shell
+    // disconnected or the sidebar browser was collapsed mid-transfer.
+    if (live?.sftpReleasePending && (tab.status !== 'connected' || !tab.sftp.open)) {
       live.sftpReleasePending = false
       await disconnectSftp(tab)
     }
@@ -1468,7 +2256,7 @@ async function handleFileDrop(event: DragEvent) {
   await uploadDroppedFiles(tab, event)
 }
 
-async function connect(tab: TerminalTab, cdPath = '') {
+async function connect(tab: TerminalTab, cdPath = '', options: { resume?: boolean } = {}) {
   if (tab.status === 'connecting' || tab.status === 'connected') return
   if (!tab.profileID) {
     ElMessage.warning(t('terminal.selectProfile'))
@@ -1477,10 +2265,21 @@ async function connect(tab: TerminalTab, cdPath = '') {
   const runtime = await ensureRuntime(tab)
   if (!runtime) return
   const profile = profiles.value.find(item => item.id === tab.profileID)
+  const label = profile?.name || profile?.ssh_host || ''
+  const resume = options.resume === true
   tab.status = 'connecting'
   resetStreamState(tab)
-  runtime.term.reset()
-  writeNotice(tab, t('terminal.connectingProfile', { name: profile?.name || profile?.ssh_host || '' }))
+  resetSftpPanelData(tab)
+  if (resume) {
+    // Reconnect keeps the scrollback: seeing what the session printed before
+    // it dropped is the whole point.
+    prepareResumeTerminal(runtime.term, () => {
+      writeNotice(tab, t('terminal.reconnectingProfile', { name: label }), false)
+    })
+  } else {
+    runtime.term.reset()
+    writeNotice(tab, t('terminal.connectingProfile', { name: label }))
+  }
   await nextTick()
   fitTerminal(tab)
   try {
@@ -1491,6 +2290,7 @@ async function connect(tab: TerminalTab, cdPath = '') {
     }
     runtime.sessionID = opened.id
     tab.status = 'connected'
+    tab.wasConnected = true
     if (opened.proxyError) writeNotice(tab, t('terminal.proxyDegraded', { error: opened.proxyError }))
     runtime.lastCols = opened.cols
     runtime.lastRows = opened.rows
@@ -1500,6 +2300,7 @@ async function connect(tab: TerminalTab, cdPath = '') {
     }
     void sendResize(tab)
     void streamOutput(tab, opened.id)
+    if (tab.sftp.open) void loadSftpPanel(tab, tab.cwd || tab.sftp.path || '.')
     runtime.term.focus()
   } catch (error) {
     if (!runtimeFor(tab)) return
@@ -1549,6 +2350,7 @@ async function streamOutput(tab: TerminalTab, id: string) {
     if (!runtime.disposed && (error as Error)?.name !== 'AbortError') {
       streamFailed = true
       writeNotice(tab, `${t('terminal.connectionLost')}: ${errorMessage(error)}`)
+      writeNotice(tab, t('terminal.reconnectHint'))
     }
   } finally {
     if (!runtime.disposed && tab.status === 'connected' && runtime.sessionID === id) {
@@ -1556,6 +2358,7 @@ async function streamOutput(tab: TerminalTab, id: string) {
       runtime.sessionID = ''
       runtime.pendingInput = ''
       resetStreamState(tab)
+      resetSftpPanelData(tab)
       if (!streamFailed) writeNotice(tab, t('terminal.sessionEnded'))
       releaseSftpIfIdle(tab)
     }
@@ -1572,6 +2375,7 @@ async function disconnect(tab: TerminalTab, quiet: boolean) {
   runtime.pendingInput = ''
   dropActive.value = false
   resetStreamState(tab)
+  resetSftpPanelData(tab)
   if (runtime.resizeTimer !== null) {
     window.clearTimeout(runtime.resizeTimer)
     runtime.resizeTimer = null
@@ -1589,6 +2393,18 @@ async function disconnect(tab: TerminalTab, quiet: boolean) {
 
 function disconnectActiveTab() {
   if (activeTab.value) void disconnect(activeTab.value, false)
+}
+
+// Reuses the same tab, terminal buffer and scrollback: the dropped session is
+// replaced by a fresh SSH shell that continues in the last known directory.
+async function reconnect(tab: TerminalTab) {
+  if (tab.status === 'connecting' || tab.status === 'connected') return
+  const dir = (tab.resumePath || tab.cwd).trim()
+  await connect(tab, dir.startsWith('/') ? dir : '', { resume: true })
+}
+
+function reconnectActiveTab() {
+  if (activeTab.value) void reconnect(activeTab.value)
 }
 
 function clearActiveTab() {
@@ -1677,7 +2493,8 @@ watch(() => props.active, async active => {
 })
 
 onMounted(async () => {
-  const initialProfile = new URLSearchParams(window.location.search).get('profile')
+  const params = new URLSearchParams(window.location.search)
+  const initialProfile = params.get('profile') || ''
   if (initialProfile) {
     lastProfileID = initialProfile
     persistProfile(initialProfile)
@@ -1696,10 +2513,22 @@ onMounted(async () => {
   window.addEventListener('keydown', handleProfileMenuKeydown)
   window.addEventListener('scroll', handleProfileMenuDismiss, true)
   window.addEventListener('keydown', handleTerminalShortcut, true)
+  window.addEventListener('message', handleHostMessage)
+  openSyncPollTimer = window.setInterval(() => {
+    void pollOpenSyncEvents()
+  }, OPEN_SYNC_POLL_INTERVAL)
   activateCurrentTerminal()
+  // The launcher's terminal button opens this page for one server, so connect
+  // right away instead of landing on a tab the user still has to start.
+  if (initialProfile) await connectProfile(initialProfile)
 })
 
 onBeforeUnmount(() => {
+  viewDisposed = true
+  if (openSyncPollTimer !== undefined) {
+    window.clearInterval(openSyncPollTimer)
+    openSyncPollTimer = undefined
+  }
   resizeObserver?.disconnect()
   resizeObserver = null
   if (settingsSaveTimer !== null) window.clearTimeout(settingsSaveTimer)
@@ -1711,6 +2540,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleProfileMenuKeydown)
   window.removeEventListener('scroll', handleProfileMenuDismiss, true)
   window.removeEventListener('keydown', handleTerminalShortcut, true)
+  window.removeEventListener('message', handleHostMessage)
   for (const tab of [...tabs.value]) {
     void shutdownTab(tab)
   }

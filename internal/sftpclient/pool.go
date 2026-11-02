@@ -54,7 +54,10 @@ type connectionPool struct {
 
 // pooledConn represents a single SFTP connection in the pool
 type pooledConn struct {
-	client    *sftp.Client
+	client *sftp.Client
+	// ssh is the transport the SFTP channel runs on; commands (archive tools)
+	// are executed over it so no extra connection is dialed.
+	ssh       *ssh.Client
 	lastUsed  time.Time
 	lastProbe time.Time // 上一次确认可用的时间，避免每次取用都探测
 	inUse     bool
@@ -188,6 +191,7 @@ func newPooledConn(sshClient *ssh.Client) (*pooledConn, error) {
 	}
 	return &pooledConn{
 		client:    sftpClient,
+		ssh:       sshClient,
 		lastUsed:  time.Now(),
 		lastProbe: time.Now(),
 	}, nil

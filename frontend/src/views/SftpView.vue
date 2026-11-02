@@ -74,8 +74,22 @@
                   <span class="xftp-new-item-meta" :title="home">{{ home }}</span>
                 </span>
               </button>
+              <div class="xftp-new-group">
+                <span>{{ t('sftp.savedServers') }}</span>
+                <el-tooltip :content="t('sftp.refreshServers')" placement="top" popper-class="chemssh-passive-tooltip" :enterable="false" :show-after="500">
+                  <button
+                    type="button"
+                    class="xftp-new-refresh"
+                    :class="{ 'is-refreshing': refreshingSavedProfiles }"
+                    :disabled="refreshingSavedProfiles"
+                    :aria-label="t('sftp.refreshServers')"
+                    @click.stop="refreshSavedProfiles"
+                  >
+                    <el-icon><Refresh /></el-icon>
+                  </button>
+                </el-tooltip>
+              </div>
               <template v-if="remoteProfiles.length">
-                <div class="xftp-new-group">{{ t('sftp.savedServers') }}</div>
                 <button
                   v-for="profile in remoteProfiles"
                   :key="profile.id"
@@ -198,6 +212,7 @@
             class="file-tree"
             :class="{ 'is-column-resizing': isColumnResizing(paneName) }"
             :style="columnStyle(paneName)"
+            @contextmenu.prevent="openBlankContextMenu(paneName, $event)"
           >
           <div class="file-list-header" role="row">
             <span role="columnheader" />
@@ -324,7 +339,7 @@
                 @dragleave="handleFolderDragLeave(paneName, entry, $event)"
                 @drop="handleFolderDrop(paneName, entry, $event)"
                 @dragend="finishFileDrag"
-                @keydown.enter.prevent="openEntry(paneName, entry)"
+                @keydown="handleRowKeydown(paneName, index, entry, $event)"
               >
                 <span class="file-cell file-icon-cell">
                   <span class="file-icon-stack">
@@ -384,7 +399,8 @@
               @pointerdown.stop="startScrollbarThumbDrag(paneName, 'horizontal', $event)"
             />
           </div>
-        </div>
+          <div class="sftp-file-status" role="status">{{ paneStatusText(paneName) }}</div>
+          </div>
 
         <div
           v-if="isCurrentDirectoryDropActive(paneName)"
@@ -518,11 +534,43 @@
     </section>
 
     <Teleport to="body">
-      <div v-if="contextMenu.visible" class="sftp-context-menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" role="menu">
+      <div v-if="contextMenu.visible && contextMenu.blank" class="sftp-context-menu" :class="{ 'opens-left': contextMenu.opensLeft }" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" role="menu">
+        <button type="button" role="menuitem" @click="runBlankAction('selectAll')">{{ t('sftp.selectAll') }}</button>
+        <button type="button" role="menuitem" @click="runBlankAction('refresh')">{{ t('sftp.refresh') }}</button>
+        <button type="button" role="menuitem" :disabled="!fileClipboard?.entries.length" @click="runBlankAction('paste')">{{ t('sftp.paste') }}</button>
+        <span class="sftp-context-separator" />
+        <button type="button" role="menuitem" @click="runBlankAction('copyFolderPath')">{{ t('sftp.copyFolderPath') }}</button>
+        <span class="sftp-context-separator" />
+        <div class="sftp-submenu-parent" role="menuitem" tabindex="0">
+          <span>{{ t('sftp.new') }}</span>
+          <span aria-hidden="true">›</span>
+          <div class="sftp-context-menu sftp-submenu" role="menu">
+            <button type="button" role="menuitem" @click="runBlankAction('newFolder')">{{ t('sftp.newFolder') }}</button>
+            <button type="button" role="menuitem" @click="runBlankAction('newFile')">{{ t('sftp.newFile') }}</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="contextMenu.visible && !contextMenu.blank" class="sftp-context-menu" :class="{ 'opens-left': contextMenu.opensLeft }" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" role="menu">
         <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('open')">{{ openMenuLabel }}</button>
         <button type="button" role="menuitem" :disabled="!contextMenu.entry || contextMenu.entry.is_dir" @click="runContextAction('openText')">{{ t('sftp.editWithNotepad') }}</button>
         <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('copyPath')">{{ t('sftp.copyPath') }}</button>
         <span class="sftp-context-separator" />
+        <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('copy')">{{ t('sftp.copy') }}</button>
+        <div v-if="menuArchiveFormats.length > 0" class="sftp-submenu-parent" role="menuitem" tabindex="0">
+          <span>{{ t('sftp.compress') }}</span>
+          <span aria-hidden="true">›</span>
+          <div class="sftp-context-menu sftp-submenu" role="menu">
+            <button
+              v-for="format in menuArchiveFormats"
+              :key="format"
+              type="button"
+              role="menuitem"
+              @click="runContextAction('compress', format)"
+            >{{ t('sftp.compressAs', { format }) }}</button>
+          </div>
+        </div>
+        <button type="button" role="menuitem" :disabled="!canExtractContextEntry" @click="runContextAction('extract')">{{ t('sftp.extract') }}</button>
         <button type="button" role="menuitem" :disabled="!contextMenu.entry" @click="runContextAction('rename')">{{ t('sftp.rename') }}</button>
         <button type="button" role="menuitem" class="is-danger" :disabled="!contextMenu.entry" @click="runContextAction('delete')">{{ t('sftp.delete') }}</button>
       </div>
@@ -594,6 +642,7 @@ import {
   View
 } from '@element-plus/icons-vue'
 import { APIError, api, baseName, formatBytes, formatDate, joinPath, launcherToken, launcherTokenHeader, parentPath, postJSON, type FileEntry, type Profile } from '../api'
+import { canExtractName, type ArchiveFormat, type ArchiveTools } from '../archive'
 import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import {
@@ -651,6 +700,8 @@ interface PaneState {
   sortKey: SortKey
   sortDirection: SortDirection
   scrollState: ScrollState
+  // Path of the row the keyboard operates on; empty until a row gets focus.
+  focusedPath: string
 }
 
 interface ScrollState {
@@ -686,6 +737,11 @@ interface ContextMenuState {
   y: number
   pane: PaneName | null
   entry: FileEntry | null
+  // `blank` marks the directory-level menu opened on empty space; `entry` is
+  // null in that mode.
+  blank: boolean
+  // Nested menus open to the left when the menu sits near the right edge.
+  opensLeft: boolean
 }
 
 interface TransferContextMenuState {
@@ -744,6 +800,9 @@ interface TransferItem {
   parentID?: string
   isGroup?: boolean
   expanded?: boolean
+  // serverSide marks a copy the remote host performs itself; it has no byte
+  // progress and cannot be paused, resumed or cancelled.
+  serverSide?: boolean
 }
 
 interface TransferProgress {
@@ -757,6 +816,15 @@ interface TransferProgress {
   retrying?: boolean
   attempt?: number
   max_attempts?: number
+}
+
+interface ServerCopySupport {
+  supported: boolean
+  reason?: string
+}
+
+interface ServerCopyResponse extends ServerCopySupport {
+  results?: { source_path: string; target_path: string; ok: boolean; error?: string }[]
 }
 
 interface OpenSyncEvent {
@@ -817,7 +885,24 @@ const transferPanelOptions = computed(() => [
 ])
 const profiles = ref<Profile[]>([])
 const remoteProfiles = computed(() => profiles.value.filter(profile => profile.kind !== 'local'))
+const refreshingSavedProfiles = ref(false)
 const home = ref('.')
+
+// Profiles are loaded once on mount; the launcher page can add or rename one
+// while this tab stays open, so the new-tab menu offers a refresh.
+async function refreshSavedProfiles() {
+  if (refreshingSavedProfiles.value) return
+  refreshingSavedProfiles.value = true
+  try {
+    profiles.value = await api<Profile[]>('/api/profiles')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('sftp.refreshServersFailed'))
+  } finally {
+    window.setTimeout(() => {
+      refreshingSavedProfiles.value = false
+    }, 240)
+  }
+}
 const transferLogs = ref<string[]>([])
 const transferItems = ref<TransferItem[]>([])
 const transferPanelMode = ref<TransferPanelMode>('transfers')
@@ -865,8 +950,24 @@ const contextMenu = ref<ContextMenuState>({
   x: 0,
   y: 0,
   pane: null,
-  entry: null
+  entry: null,
+  blank: false,
+  opensLeft: false
 })
+
+// Files copied from a pane, so they can be pasted after switching directories.
+interface FileClipboard {
+  kind: TabKind
+  session?: string
+  profileName?: string
+  path: string
+  entries: FileEntry[]
+}
+const fileClipboard = ref<FileClipboard | null>(null)
+
+// Archive capabilities per host: "local" for the local pane, the SFTP session id
+// for a remote one. Probed once per host and refreshed by the backend TTL.
+const archiveToolsByKey = ref<Record<string, ArchiveTools>>({})
 const transferContextMenu = ref<TransferContextMenuState>({
   visible: false,
   x: 0,
@@ -991,7 +1092,8 @@ function makePane(): PaneState {
       verticalThumbOffset: 0,
       horizontalThumbSize: FLOATING_SCROLLBAR_MIN_THUMB,
       horizontalThumbOffset: 0
-    }
+    },
+    focusedPath: ''
   }
 }
 
@@ -1126,7 +1228,7 @@ function log(message: string) {
   nextTick(() => transferLogScroller.scrollToBottom())
 }
 
-function createTransferItem(input: Pick<TransferItem, 'name' | 'kind' | 'sourceName' | 'targetName' | 'sourcePath' | 'targetPath' | 'total'> & Partial<Pick<TransferItem, 'parentID' | 'isGroup' | 'expanded' | 'retry'>>) {
+function createTransferItem(input: Pick<TransferItem, 'name' | 'kind' | 'sourceName' | 'targetName' | 'sourcePath' | 'targetPath' | 'total'> & Partial<Pick<TransferItem, 'parentID' | 'isGroup' | 'expanded' | 'retry' | 'serverSide'>>) {
   const item: TransferItem = {
     id: newID(),
     ...input,
@@ -1315,6 +1417,7 @@ function transferStatusLabel(item: TransferItem) {
   if (item.status === 'done') return t('sftp.statusDone')
   if (item.cancelled) return t('sftp.statusCancelled')
   if (item.status === 'error') return t('sftp.statusError')
+  if (item.serverSide) return t('sftp.statusServerCopy')
   if (item.paused) return t('sftp.statusPaused')
   if (item.retrying) return transferRetryLabel(item)
   return t('sftp.statusRunning')
@@ -1602,6 +1705,17 @@ function selectedEntries(paneName: PaneName) {
 
 function isSelected(paneName: PaneName, entry: FileEntry) {
   return selectedEntries(paneName).some(item => item.path === entry.path)
+}
+
+// Footer summary: the selection when there is one, otherwise the whole listing.
+function paneStatusText(paneName: PaneName) {
+  const tab = activeTab(paneName)
+  if (!tab) return ''
+  const selected = tab.selected
+  const items = selected.length > 0 ? selected : visibleEntries(paneName)
+  const bytes = items.reduce((total, entry) => total + (entry.is_dir ? 0 : (entry.size ?? 0)), 0)
+  const key = selected.length > 0 ? 'sftp.statusSelected' : 'sftp.statusDirectory'
+  return t(key, { count: items.length, size: formatBytes(bytes) })
 }
 
 function isDragSource(paneName: PaneName, entry: FileEntry) {
@@ -1925,30 +2039,46 @@ async function openRemoteTab(paneName: PaneName, profile: Profile, path: string)
 
 // A server profile launched from the launcher reuses this page: focus the pane
 // tab that already holds the session, otherwise append one to the right pane.
-async function openProfileTab(profileID: string) {
+// `requestedPath` comes from a terminal tab and lands the tab in the directory
+// that shell is in; an empty value keeps the remote home directory behaviour.
+// `forceNew` comes from the Ctrl+Alt+F shortcut: it always appends a tab, even
+// when one for the same profile and directory is already open.
+async function openProfileTab(profileID: string, requestedPath = '', forceNew = false) {
   if (!profileID) return
   const profile = remoteProfiles.value.find(item => item.id === profileID)
   if (!profile) {
     ElMessage.warning(t('sftp.profileNotFound'))
     return
   }
-  for (const paneName of paneNames) {
-    const existing = panes[paneName].tabs.find(tab => tab.kind === 'remote' && tab.profileID === profileID)
-    if (existing) {
-      activateTab(paneName, existing.id)
-      return
+  const targetPath = requestedPath.trim()
+  // A terminal tab passes the directory its shell sits in and expects an SFTP
+  // tab there (the Xshell behaviour), so a tab for the same profile only
+  // answers the request when it already shows that directory; otherwise the
+  // request appends a tab instead of moving the one the user is browsing.
+  const matchesRequest = (tab: FileTab) => {
+    if (tab.kind !== 'remote' || tab.profileID !== profileID) return false
+    if (!targetPath) return true
+    return (tab.loadedPath || tab.path) === targetPath
+  }
+  if (!forceNew) {
+    for (const paneName of paneNames) {
+      const existing = panes[paneName].tabs.find(matchesRequest)
+      if (existing) {
+        activateTab(paneName, existing.id)
+        return
+      }
     }
   }
-  await openRemoteTab('right', profile, '.')
+  await openRemoteTab('right', profile, targetPath || '.')
   await nextTick()
   updateVirtualMetrics('right')
 }
 
 function handleShellMessage(event: MessageEvent) {
   if (event.origin !== window.location.origin) return
-  const data = event.data as { type?: string; profile?: unknown } | null
+  const data = event.data as { type?: string; profile?: unknown; path?: unknown; forceNew?: unknown } | null
   if (!data || data.type !== 'chemssh-sftp:open-profile') return
-  void openProfileTab(String(data.profile || ''))
+  void openProfileTab(String(data.profile || ''), String(data.path || ''), data.forceNew === true)
 }
 
 async function closeTab(paneName: PaneName, tabID: string) {
@@ -2172,6 +2302,7 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
   tab.loading = true
   tab.selected = []
   tab.anchorPath = ''
+  panes[paneName].focusedPath = ''
   try {
     const resolvedPath = await resolveTabPath(tab, tab.path)
     if (!isLatest()) return
@@ -2199,6 +2330,7 @@ async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: {
     if (options.recordHistory) recordDirectoryHistory(tab, previousPath, nextPath)
     tab.title = tabLabel(tab)
     clearSystemIconFailure('dir')
+    void ensureArchiveTools(tab)
   } catch (error) {
     if (!isLatest()) return
     // 断网后旧 SSH 传输层会失效，服务端已支持重建；这里重连一次再重试，
@@ -2346,6 +2478,8 @@ function beginSelect(paneName: PaneName, index: number, entry: FileEntry, event:
   event.stopPropagation()
   finishFileDrag()
   pendingSelectionCollapse = null
+  focusedPane.value = paneName
+  panes[paneName].focusedPath = entry.path
   const items = visibleEntries(paneName)
   if (event.shiftKey) {
     event.preventDefault()
@@ -2383,6 +2517,115 @@ function selectRange(paneName: PaneName, start: number, end: number) {
   const to = Math.max(start, end)
   tab.selected = items.slice(from, to + 1)
   tab.anchorPath = items[start]?.path || items[end]?.path || ''
+}
+
+function focusRow(paneName: PaneName, index: number) {
+  const entry = visibleEntries(paneName)[index]
+  if (!entry) return
+  panes[paneName].focusedPath = entry.path
+  scrollRowIntoView(paneName, index)
+  void nextTick(() => {
+    const body = panes[paneName].bodyRef
+    const row = body?.querySelector<HTMLElement>(`.file-row[data-file-index="${index}"]`)
+    row?.focus()
+  })
+}
+
+function scrollRowIntoView(paneName: PaneName, index: number) {
+  const pane = panes[paneName]
+  const body = pane.bodyRef
+  if (!body) return
+  const sticky = parentSlotHeight(paneName)
+  const rowTop = sticky + index * pane.rowSlotHeight
+  const rowBottom = rowTop + pane.rowSlotHeight
+  const visibleTop = body.scrollTop + sticky
+  const visibleBottom = body.scrollTop + body.clientHeight
+  if (rowTop < visibleTop) {
+    body.scrollTop = Math.max(0, rowTop - sticky)
+  } else if (rowBottom > visibleBottom) {
+    body.scrollTop = rowBottom - body.clientHeight
+  }
+  updateVirtualMetrics(paneName)
+}
+
+function toggleSelectionAt(paneName: PaneName, index: number) {
+  const tab = activeTab(paneName)
+  const entry = visibleEntries(paneName)[index]
+  if (!tab || !entry) return
+  tab.selected = isSelected(paneName, entry)
+    ? tab.selected.filter(item => item.path !== entry.path)
+    : [...tab.selected, entry]
+  tab.anchorPath = entry.path
+}
+
+function selectAllEntries(paneName: PaneName) {
+  const tab = activeTab(paneName)
+  if (!tab) return
+  const items = visibleEntries(paneName)
+  tab.selected = [...items]
+  tab.anchorPath = items[0]?.path || ''
+}
+
+function clearPaneSelection(paneName: PaneName) {
+  const tab = activeTab(paneName)
+  if (!tab) return
+  tab.selected = []
+  tab.anchorPath = ''
+  panes[paneName].focusedPath = ''
+}
+
+function moveRowFocus(paneName: PaneName, nextIndex: number, event: KeyboardEvent) {
+  event.preventDefault()
+  const items = visibleEntries(paneName)
+  const tab = activeTab(paneName)
+  if (!tab || items.length === 0) return
+  const next = Math.min(Math.max(nextIndex, 0), items.length - 1)
+  focusRow(paneName, next)
+  if (event.shiftKey) {
+    const anchorIndex = Math.max(
+      0,
+      items.findIndex(item => item.path === (tab.anchorPath || tab.selected[0]?.path || items[next].path))
+    )
+    selectRange(paneName, anchorIndex, next)
+    return
+  }
+  if (event.ctrlKey || event.metaKey) return
+  tab.selected = [items[next]]
+  tab.anchorPath = items[next].path
+}
+
+function handleRowKeydown(paneName: PaneName, index: number, entry: FileEntry, event: KeyboardEvent) {
+  focusedPane.value = paneName
+  panes[paneName].focusedPath = entry.path
+  const key = event.key
+
+  if ((event.ctrlKey || event.metaKey) && key.toLowerCase() === 'a') {
+    event.preventDefault()
+    selectAllEntries(paneName)
+    return
+  }
+  if (key === 'ArrowDown') {
+    moveRowFocus(paneName, index + 1, event)
+  } else if (key === 'ArrowUp') {
+    moveRowFocus(paneName, index - 1, event)
+  } else if (key === 'Home') {
+    moveRowFocus(paneName, 0, event)
+  } else if (key === 'End') {
+    moveRowFocus(paneName, visibleEntries(paneName).length - 1, event)
+  } else if (key === 'PageDown') {
+    moveRowFocus(paneName, index + 10, event)
+  } else if (key === 'PageUp') {
+    moveRowFocus(paneName, index - 10, event)
+  } else if (key === ' ') {
+    event.preventDefault()
+    toggleSelectionAt(paneName, index)
+  } else if (key === 'Escape') {
+    event.preventDefault()
+    clearPaneSelection(paneName)
+  } else if (key === 'Enter') {
+    event.preventDefault()
+    void openEntry(paneName, entry)
+  }
 }
 
 function startLongPress(paneName: PaneName, index: number, event: MouseEvent) {
@@ -2536,6 +2779,7 @@ function openFileContextMenu(paneName: PaneName, entry: FileEntry, event: MouseE
     tab.selected = [entry]
     tab.anchorPath = entry.path
   }
+  void ensureArchiveTools(tab)
   resetPressState()
   const menuWidth = 210
   const menuHeight = 220
@@ -2544,19 +2788,48 @@ function openFileContextMenu(paneName: PaneName, entry: FileEntry, event: MouseE
     x: Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8)),
     y: Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8)),
     pane: paneName,
-    entry
+    entry,
+    blank: false,
+    opensLeft: event.clientX > window.innerWidth - 420
+  }
+}
+
+// Right-clicking the empty area of a pane opens the directory-level menu
+// instead of the browser's own menu.
+function openBlankContextMenu(paneName: PaneName, event: MouseEvent) {
+  const target = event.target
+  if (target instanceof Element && target.closest('.file-row')) return
+  event.preventDefault()
+  event.stopPropagation()
+  focusedPane.value = paneName
+  closeTransferContextMenu()
+  closeTabContextMenu()
+  resetPressState()
+  const menuWidth = 210
+  const menuHeight = 240
+  contextMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8)),
+    y: Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8)),
+    pane: paneName,
+    entry: null,
+    blank: true,
+    opensLeft: event.clientX > window.innerWidth - 420
   }
 }
 
 function closeContextMenu() {
   if (contextMenu.value.visible) {
-    contextMenu.value = { visible: false, x: 0, y: 0, pane: null, entry: null }
+    contextMenu.value = { visible: false, x: 0, y: 0, pane: null, entry: null, blank: false, opensLeft: false }
   }
   closeTransferContextMenu()
   closeTabContextMenu()
 }
 
-async function runContextAction(action: 'open' | 'openText' | 'copyPath' | 'rename' | 'delete') {
+async function runContextAction(
+  action: 'open' | 'openText' | 'copyPath' | 'copy' | 'compress' | 'extract' | 'rename' | 'delete',
+  format?: ArchiveFormat
+) {
   const paneName = contextMenu.value.pane
   const entry = contextMenu.value.entry
   closeContextMenu()
@@ -2567,12 +2840,157 @@ async function runContextAction(action: 'open' | 'openText' | 'copyPath' | 'rena
     await openTextFile(paneName, entry)
   } else if (action === 'copyPath') {
     await copyEntryPath(paneName, entry)
+  } else if (action === 'copy') {
+    const tab = activeTab(paneName)
+    if (tab && !isSelected(paneName, entry)) tab.selected = [entry]
+    copyEntriesToClipboard(paneName)
+  } else if (action === 'compress' && format) {
+    const tab = activeTab(paneName)
+    if (tab && !isSelected(paneName, entry)) tab.selected = [entry]
+    await compressSelection(paneName, format)
+  } else if (action === 'extract') {
+    await extractEntry(paneName, entry)
   } else if (action === 'rename') {
     await renameEntry(paneName, entry)
   } else if (action === 'delete') {
     const tab = activeTab(paneName)
     if (tab && !isSelected(paneName, entry)) tab.selected = [entry]
     await deleteSelected(paneName)
+  }
+}
+
+async function runBlankAction(action: 'selectAll' | 'refresh' | 'paste' | 'copyFolderPath' | 'newFolder' | 'newFile') {
+  const paneName = contextMenu.value.pane
+  closeContextMenu()
+  if (!paneName) return
+  const tab = activeTab(paneName)
+  if (!tab) return
+  if (action === 'selectAll') {
+    selectAllEntries(paneName)
+  } else if (action === 'refresh') {
+    await loadTab(paneName)
+  } else if (action === 'paste') {
+    await pasteClipboard(paneName)
+  } else if (action === 'copyFolderPath') {
+    await writeClipboard(tab.path)
+    ElMessage.success(t('sftp.pathCopied'))
+  } else if (action === 'newFolder') {
+    createFolder(paneName)
+  } else if (action === 'newFile') {
+    createFile(paneName)
+  }
+}
+
+function archiveKey(tab: FileTab | null) {
+  if (!tab) return ''
+  return tab.kind === 'local' ? 'local' : `remote:${tab.session || ''}`
+}
+
+async function ensureArchiveTools(tab: FileTab | null) {
+  const key = archiveKey(tab)
+  if (!tab || !key || archiveToolsByKey.value[key]) return
+  try {
+    const tools = tab.kind === 'local'
+      ? await api<ArchiveTools>('/api/local/archive-tools')
+      : await api<ArchiveTools>(`/api/sftp/archive-tools?session=${encodeURIComponent(tab.session || '')}`)
+    archiveToolsByKey.value = { ...archiveToolsByKey.value, [key]: tools }
+  } catch {
+    // Keep the compress submenu hidden when the probe fails.
+  }
+}
+
+const menuArchiveTools = computed(() => {
+  const paneName = contextMenu.value.pane
+  if (!paneName) return null
+  const tab = activeTab(paneName)
+  return tab ? archiveToolsByKey.value[archiveKey(tab)] ?? null : null
+})
+const menuArchiveFormats = computed<ArchiveFormat[]>(() => menuArchiveTools.value?.formats ?? [])
+const canExtractContextEntry = computed(() => {
+  const entry = contextMenu.value.entry
+  return Boolean(entry && !entry.is_dir && canExtractName(entry.name, menuArchiveTools.value))
+})
+
+async function compressSelection(paneName: PaneName, format: ArchiveFormat) {
+  const tab = activeTab(paneName)
+  if (!tab) return
+  const paths = selectedEntries(paneName).map(entry => entry.path)
+  if (paths.length === 0) return
+  try {
+    const response = tab.kind === 'local'
+      ? await postJSON<{ archive: string }>('/api/local/compress', { target_directory: tab.path, paths, format })
+      : await postJSON<{ archive: string }>('/api/sftp/compress', {
+        session: tab.session,
+        target_directory: tab.path,
+        paths,
+        format
+      })
+    await loadTab(paneName, tab)
+    ElMessage.success(t('sftp.compressed', { name: response.archive || format }))
+  } catch (error) {
+    ElMessage.error(`${t('sftp.archiveFailed')}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function extractEntry(paneName: PaneName, entry: FileEntry) {
+  const tab = activeTab(paneName)
+  if (!tab) return
+  try {
+    if (tab.kind === 'local') {
+      await postJSON('/api/local/extract', { path: entry.path, target_directory: tab.path })
+    } else {
+      await postJSON('/api/sftp/extract', { session: tab.session, path: entry.path, target_directory: tab.path })
+    }
+    await loadTab(paneName, tab)
+    ElMessage.success(t('sftp.extracted'))
+  } catch (error) {
+    ElMessage.error(`${t('sftp.archiveFailed')}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function copyEntriesToClipboard(paneName: PaneName) {
+  const tab = activeTab(paneName)
+  const entries = selectedEntries(paneName)
+  if (!tab || entries.length === 0) return
+  fileClipboard.value = {
+    kind: tab.kind,
+    session: tab.session,
+    profileName: tab.profileName,
+    path: tab.path,
+    entries: [...entries]
+  }
+  ElMessage.success(t('sftp.copiedItems', { count: entries.length }))
+}
+
+async function pasteClipboard(paneName: PaneName) {
+  const target = activeTab(paneName)
+  const clip = fileClipboard.value
+  if (!target || !clip || clip.entries.length === 0) return
+  log(t('sftp.logPaste', { count: clip.entries.length, path: target.path }))
+  try {
+    await transferBetweenTabs(clipboardTab(clip), target, clip.entries, paneName, target.path)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : t('sftp.pasteFailed'))
+  }
+}
+
+// A detached tab description: the transfer pipeline only needs the kind,
+// session and profile of the tab the entries were copied from.
+function clipboardTab(clip: FileClipboard): FileTab {
+  return {
+    id: `clipboard:${clip.path}`,
+    kind: clip.kind,
+    title: clip.path,
+    path: clip.path,
+    loadedPath: clip.path,
+    entries: [],
+    selected: [],
+    loading: false,
+    showHidden: false,
+    anchorPath: '',
+    history: [],
+    session: clip.session,
+    profileName: clip.profileName
   }
 }
 
@@ -2585,7 +3003,7 @@ function openTransferContextMenu(item: TransferItem, event: MouseEvent) {
   }
   const menuWidth = 180
   const menuHeight = 150
-  contextMenu.value = { visible: false, x: 0, y: 0, pane: null, entry: null }
+  contextMenu.value = { visible: false, x: 0, y: 0, pane: null, entry: null, blank: false, opensLeft: false }
   closeTabContextMenu()
   transferContextMenu.value = {
     visible: true,
@@ -2619,15 +3037,15 @@ function transferControlTargets(item: TransferItem | null) {
 }
 
 function canPauseTransfer(item: TransferItem | null) {
-  return transferControlTargets(item).some(target => target.status === 'running' && !target.paused)
+  return transferControlTargets(item).some(target => target.status === 'running' && !target.paused && !target.serverSide)
 }
 
 function canResumeTransfer(item: TransferItem | null) {
-  return transferControlTargets(item).some(target => target.status === 'running' && target.paused)
+  return transferControlTargets(item).some(target => target.status === 'running' && target.paused && !target.serverSide)
 }
 
 function canCancelTransfer(item: TransferItem | null) {
-  return transferControlTargets(item).some(target => target.status === 'running')
+  return transferControlTargets(item).some(target => target.status === 'running' && !target.serverSide)
 }
 
 function canRetryTransfer(item: TransferItem | null) {
@@ -2637,6 +3055,7 @@ function canRetryTransfer(item: TransferItem | null) {
 async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel' | 'retry') {
   const item = transferContextMenu.value.item
   const targets = transferControlTargets(item).filter(target => {
+    if (target.serverSide) return false
     if (action === 'pause') return target.status === 'running' && !target.paused
     if (action === 'resume') return target.status === 'running' && target.paused
     if (action === 'retry') return target.status === 'error' && Boolean(target.retry)
@@ -2840,7 +3259,21 @@ async function transferEntries(sourcePane: PaneName, targetPane: PaneName, entri
   const source = activeTab(sourcePane)
   const target = activeTab(targetPane)
   if (!source || !target || entries.length === 0) return
+  await transferBetweenTabs(source, target, entries, targetPane, targetPathOverride)
+}
+
+async function transferBetweenTabs(
+  source: FileTab,
+  target: FileTab,
+  entries: FileEntry[],
+  targetPane: PaneName,
+  targetPathOverride?: string
+) {
   const targetBasePath = targetPathOverride || target.path
+  if (await tryServerSideCopy(source, target, entries, targetBasePath)) {
+    await loadTab(targetPane, target)
+    return
+  }
   const expanded = await expandTransferEntries(source, entries)
   const normalized = normalizeTransferTasks(expanded)
   if (normalized.invalidCount > 0) ElMessage.error(t('sftp.skippedUnsafe', { count: normalized.invalidCount }))
@@ -2901,6 +3334,109 @@ async function transferEntries(sourcePane: PaneName, targetPane: PaneName, entri
   }
   finishEmptyTransferGroups(transferGroups)
   await loadTab(targetPane, target)
+}
+
+// tryServerSideCopy pastes entries with the remote `cp` command when both tabs
+// reach the same server. It returns true when the paste was handled here, and
+// false when the caller should stream the files the usual way.
+async function tryServerSideCopy(source: FileTab, target: FileTab, entries: FileEntry[], targetBasePath: string) {
+  if (source.kind !== 'remote' || target.kind !== 'remote') return false
+  if (!source.session || !target.session || entries.length === 0) return false
+  // A name the streamed path would rewrite cannot be mapped one to one onto cp,
+  // so let that path report it.
+  if (entries.some(entry => !entry.name || normalizeUploadRelativePath(entry.name) !== entry.name || !isSafeUploadRelativePath(entry.name))) return false
+
+  let support: ServerCopySupport = { supported: false }
+  try {
+    support = await api<ServerCopySupport>(
+      `/api/sftp/server-copy-support?source=${encodeURIComponent(source.session)}&target=${encodeURIComponent(target.session)}`
+    )
+  } catch {
+    // An unreachable probe must not block the paste; the streamed copy reports
+    // the real problem.
+    return false
+  }
+  if (!support.supported) return false
+
+  const topLevel = new Map((await listTabDirectory(target, targetBasePath)).entries.map(entry => [entry.name, entry] as const))
+  const prepared: { entry: FileEntry; relativePath: string; targetPath: string }[] = []
+  let applyAllAction: UploadConflictAction | null = null
+  for (const entry of entries) {
+    const existing = topLevel.get(entry.name) ?? null
+    let action: UploadConflictAction = 'overwrite'
+    if (existing) {
+      const resolution: UploadConflictResolution = applyAllAction
+        ? { action: applyAllAction, applyAll: true }
+        : await promptConflict(entry.name)
+      if (resolution.applyAll) applyAllAction = resolution.action
+      action = resolution.action
+    }
+    if (action === 'cancel') return true
+    if (action === 'skip') continue
+    const relativePath = action === 'suffix' ? uniqueSuffixedName(entry.name, topLevel) : entry.name
+    const targetPath = joinPath(targetBasePath, relativePath, target.kind)
+    topLevel.set(relativePath, { name: relativePath, path: targetPath, is_dir: entry.is_dir, size: 0, mode: '', mod_time: '' })
+    // Pasting an entry onto itself would only make cp abort with "same file".
+    if (targetPath === entry.path) continue
+    prepared.push({ entry, relativePath, targetPath })
+  }
+  if (prepared.length === 0) return true
+
+  const transferBySource = new Map<string, TransferItem>()
+  for (const item of prepared) {
+    const transfer = createTransferItem({
+      name: item.relativePath,
+      kind: item.entry.is_dir ? 'folder' : 'file',
+      sourceName: transferEndpointName(source),
+      targetName: transferEndpointName(target),
+      sourcePath: item.entry.path,
+      targetPath: item.targetPath,
+      total: item.entry.is_dir ? 0 : item.entry.size || 0,
+      serverSide: true
+    })
+    transferBySource.set(item.entry.path, transfer)
+    log(t('sftp.logServerCopy', { path: item.entry.path, target: item.targetPath }))
+  }
+
+  const dropTransfers = () => {
+    const ids = new Set([...transferBySource.values()].map(item => item.id))
+    transferItems.value = transferItems.value.filter(item => !ids.has(item.id))
+  }
+
+  let response: ServerCopyResponse
+  try {
+    response = await postJSON<ServerCopyResponse>('/api/sftp/copy-on-server', {
+      source_session: source.session,
+      target_session: target.session,
+      target_path: targetBasePath,
+      items: prepared.map(item => ({ source_path: item.entry.path, relative_path: item.relativePath }))
+    })
+  } catch (error) {
+    for (const transfer of transferBySource.values()) {
+      finishTransferItem(transfer, 'error', (error as Error).message)
+    }
+    throw error
+  }
+  if (!response.supported) {
+    // The server declined after the probe succeeded; fall back silently instead
+    // of leaving failed rows the user cannot act on.
+    dropTransfers()
+    return false
+  }
+
+  const results = new Map((response.results || []).map(result => [result.source_path, result] as const))
+  for (const item of prepared) {
+    const transfer = transferBySource.get(item.entry.path)
+    if (!transfer) continue
+    const result = results.get(item.entry.path)
+    if (result?.ok) {
+      finishTransferItem(transfer, 'done')
+      log(t('sftp.logServerCopyDone', { path: item.entry.path }))
+      continue
+    }
+    finishTransferItem(transfer, 'error', result?.error || t('sftp.serverCopyFailed'))
+  }
+  return true
 }
 
 function createTransferGroups(source: FileTab, target: FileTab, tasks: RelativeTransfer<FileEntry>[], targetBasePath: string) {
@@ -3921,7 +4457,9 @@ function handleDeleteKey(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
-  const requestedProfileID = new URLSearchParams(window.location.search).get('profile') || ''
+  const requestedParams = new URLSearchParams(window.location.search)
+  const requestedProfileID = requestedParams.get('profile') || ''
+  const requestedPath = requestedParams.get('path') || ''
   if (typeof ResizeObserver !== 'undefined') {
     scrollResizeObserver = new ResizeObserver(() => {
       paneNames.forEach(paneName => updateVirtualMetrics(paneName))
@@ -3960,7 +4498,7 @@ onMounted(async () => {
     updateVirtualMetrics(paneName)
   })
   updateTransferScrollbars()
-  if (requestedProfileID) await openProfileTab(requestedProfileID)
+  if (requestedProfileID) await openProfileTab(requestedProfileID, requestedPath)
   if (window.parent !== window) {
     window.parent.postMessage({ type: 'chemssh-sftp:ready' }, window.location.origin)
   }
