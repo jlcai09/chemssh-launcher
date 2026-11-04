@@ -4,6 +4,7 @@ package webview
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -98,6 +99,15 @@ func Open(ctx context.Context, opts Options) error {
 	if err := bindDownloadDialog(w); err != nil {
 		log.Printf("warning: could not bind WebView2 downloads dialog: %v", err)
 	}
+	var nativeJobs *dragJobRegistry
+	if opts.DragOutFiles != nil {
+		if registry, err := bindDragOutFiles(w, opts.DragOutFiles, opts.Report, opts.RetainDragOutSession); err != nil {
+			log.Printf("warning: could not bind native file drag-out: %v", err)
+		} else {
+			nativeJobs = registry
+			defer registry.close()
+		}
+	}
 
 	w.SetTitle(title)
 
@@ -153,8 +163,10 @@ func Open(ctx context.Context, opts Options) error {
 	}()
 
 	w.Navigate(opts.URL)
-	if opts.CloseInterceptor != nil {
-		installCloseInterceptor(w, opts.CloseInterceptor)
+	if opts.CloseInterceptor != nil || nativeJobs != nil {
+		installCloseInterceptor(w, func() bool {
+			return nativeJobs != nil && nativeJobs.hasActive() || opts.CloseInterceptor != nil && opts.CloseInterceptor()
+		})
 	}
 	w.Run()
 	close(done)
@@ -213,6 +225,115 @@ func bindDownloadDialog(w webview2.WebView) error {
 	return w.Bind("chemsshCloseDownloads", func() error {
 		return closeDefaultDownloadDialog(w)
 	})
+}
+
+func bindDragOutFiles(w webview2.WebView, stage func(context.Context, string, []string) ([]string, error), report func(string), retain ...func(string) (func(), error)) (*dragJobRegistry, error) {
+	var jobs *dragJobRegistry
+	dispatch := func(work func()) {
+		if !jobs.isClosed() {
+			w.Dispatch(func() {
+				if !jobs.isClosed() {
+					work()
+				}
+			})
+		}
+	}
+	reportf := func(message string) {
+		log.Printf("%s", message)
+		if report != nil {
+			dispatch(func() { report(message) })
+		}
+	}
+	jobs = newDragJobRegistry(func(job dragJob) {
+		dispatch(func() { w.Eval(dragOutJobScript(job)) })
+	})
+	if err := w.Bind("chemsshNativeDragJobs", func() []dragJob { return jobs.snapshot() }); err != nil {
+		jobs.close()
+		return nil, err
+	}
+	if err := w.Bind("chemsshCancelNativeDragJob", func(id string) bool { return jobs.cancel(id) }); err != nil {
+		jobs.close()
+		return nil, err
+	}
+	// The pointer gesture is UI-owned; accepted transfers outlive this loop.
+	dragActive := false
+	err := w.Bind("chemsshDragOutFiles", func(payload string) error {
+		var request dragOutRequest
+		if err := json.Unmarshal([]byte(payload), &request); err != nil {
+			return err
+		}
+		if request.ID == "" || request.Session == "" || len(request.Paths) == 0 {
+			return errors.New("drag ID, SFTP session and paths are required")
+		}
+		window := w.Window()
+		if window == nil {
+			return errors.New("the WebView2 window is not available")
+		}
+		stageCtx, added := jobs.add(request.ID, request.Session, request.Paths)
+		if !added {
+			return errors.New("duplicate drag ID or closed host")
+		}
+		// Acquire before returning the RPC acknowledgment: a page may close
+		// before the system requests the first byte of its accepted drop.
+		if len(retain) > 0 && retain[0] != nil {
+			release, err := retain[0](request.Session)
+			if err != nil {
+				jobs.update(request.ID, "error", err)
+				return err
+			}
+			if release != nil {
+				context.AfterFunc(stageCtx, release)
+			}
+		}
+		dispatch(func() {
+			if dragActive {
+				jobs.update(request.ID, "error", errors.New("another native drag is active"))
+				w.Eval(dragOutCompletionScript(request.ID, "another native drag is active", false))
+				return
+			}
+			dragActive = true
+			defer func() { dragActive = false }()
+			reportf(fmt.Sprintf("drag-out: starting asynchronous native drag for %d file(s)", len(request.Paths)))
+			outcome := dragFilesOutAsync(uintptr(window), request.Marker, func() ([]string, error) {
+				if err := stageCtx.Err(); err != nil {
+					return nil, err
+				}
+				jobs.update(request.ID, "caching", nil)
+				paths, err := stage(stageCtx, request.Session, request.Paths)
+				if err == nil {
+					err = stageCtx.Err()
+				}
+				if err == nil && !jobs.update(request.ID, "delivering", nil) {
+					err = context.Canceled
+				}
+				return paths, err
+			}, reportf, func(event dragAsyncEvent) {
+				state := event.State
+				if state == "started" {
+					state = "accepted"
+				}
+				if state == "error" && stageCtx.Err() != nil {
+					state = "cancelled"
+				}
+				jobs.update(request.ID, state, event.Err)
+			}, stageCtx)
+			if !outcome.Pending {
+				state := "cancelled"
+				if outcome.Failed() {
+					state = "error"
+				}
+				jobs.update(request.ID, state, outcome.Err)
+			}
+			// This clears only the gesture, never an accepted background transfer.
+			w.Eval(dragOutCompletionScript(request.ID, outcome.String(), !outcome.Failed()))
+		})
+		return nil
+	})
+	if err != nil {
+		jobs.close()
+		return nil, err
+	}
+	return jobs, nil
 }
 
 type rawIUnknownVtbl struct {

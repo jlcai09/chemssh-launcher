@@ -215,6 +215,11 @@ func RunWithOptions(stdout, stderr io.Writer, options Options) error {
 			CloseInterceptor: func() bool {
 				return server.activeTransferCount.Load() > 0
 			},
+			DragOutFiles:         server.stageDragFiles,
+			RetainDragOutSession: server.sftp.Retain,
+			Report: func(message string) {
+				server.logs.add(message)
+			},
 		}); err == nil {
 			server.shells.closeAll()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

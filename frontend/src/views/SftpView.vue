@@ -1,5 +1,14 @@
 <template>
   <section ref="sftpRoot" class="sftp-view">
+    <aside v-if="visibleNativeDragJobs.length" class="sftp-drag-jobs" aria-live="polite">
+      <div v-for="job in visibleNativeDragJobs" :key="job.id" class="sftp-drag-job" :class="`is-${job.state}`">
+        <el-icon v-if="['accepted', 'caching', 'delivering'].includes(job.state)" class="is-loading"><Refresh /></el-icon>
+        <span class="sftp-drag-job-name" :title="job.paths.join('\n')">{{ nativeDragJobName(job) }}</span>
+        <span :title="job.error || ''">{{ t(`sftp.dragJob.${job.state}`) }}</span>
+        <el-button v-if="canCancelNativeDragJob(job)" size="small" @click="cancelDragJob(job)">{{ t('sftp.cancel') }}</el-button>
+        <el-button v-else size="small" text @click="dismissedNativeDragJobs.add(job.id)">{{ t('sftp.dragJob.dismiss') }}</el-button>
+      </div>
+    </aside>
     <div class="sftp-workspace">
       <section
         v-for="paneName in paneNames"
@@ -657,6 +666,7 @@ import {
   type UploadEntry
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
+import { cancelNativeDragJob, dragOutFiles, nativeDragHost, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 
 type PaneName = 'left' | 'right'
 type TabKind = 'local' | 'remote'
@@ -722,6 +732,14 @@ interface DragPayload {
   pane: PaneName
   tabID: string
   paths: string[]
+}
+
+// A native drag carries CF_HDROP for the desktop and CF_UNICODETEXT for our own
+// panes, because text is the only extra format Chromium forwards back into the
+// page. Seeing the marker turns a drop into an internal transfer instead of an
+// upload of the staged copies.
+interface NativeDragMarker extends DragPayload {
+  chemssh: string
 }
 
 interface ConflictDialogState {
@@ -857,6 +875,7 @@ interface TransferScrollbarDragState {
 
 const paneNames = ['left', 'right'] as const
 const appDragType = 'application/x-chemssh-launcher-file-transfer'
+const nativeDragMarker = 'chemssh-launcher-file-transfer'
 const externalDownloadMime = 'application/octet-stream'
 const safeNamePattern = /^[^/\\]+$/
 const LONG_PRESS_MS = 430
@@ -939,6 +958,30 @@ const blankDragPathSet = ref(new Set<string>())
 const exportDragPathSet = ref(new Set<string>())
 const exportDragArmed = ref(false)
 const exportDragActive = ref(false)
+const nativeDragJobs = ref<NativeDragJob[]>([])
+const dismissedNativeDragJobs = reactive(new Set<string>())
+const visibleNativeDragJobs = computed(() => nativeDragJobs.value.filter(job => job.state !== 'queued' && !dismissedNativeDragJobs.has(job.id)))
+let unsubscribeNativeDragJobs: (() => void) | undefined
+function canCancelNativeDragJob(job: NativeDragJob) { return ['accepted', 'caching'].includes(job.state) }
+function nativeDragJobName(job: NativeDragJob) {
+  const name = job.paths[0]?.split(/[\\/]/).pop() || ''
+  return job.paths.length > 1 ? `${name} (+${job.paths.length - 1})` : name
+}
+async function cancelDragJob(job: NativeDragJob) {
+  try { await cancelNativeDragJob(job.id) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : t('sftp.dragOutFailed')) }
+}
+function handleNativeDragEscape(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || event.repeat || event.defaultPrevented || exportDragActive.value) return
+  if (isEditableTarget(event.target) || document.querySelector('.el-overlay, .upload-conflict-backdrop')) return
+  if (!sftpRoot.value?.getClientRects().length) return
+  const job = nativeDragJobs.value.find(canCancelNativeDragJob)
+  if (job) { event.preventDefault(); void cancelDragJob(job) }
+}
+// Set while a native drag-out is in flight, so a drop back inside the launcher
+// can still be recognised if the text marker does not survive the round trip.
+let pendingNativeDrag: { payload: DragPayload } | null = null
+let nativeDragSettled = false
 const conflictDialog = ref<ConflictDialogState>({
   visible: false,
   name: '',
@@ -1027,6 +1070,7 @@ let scrollResizeObserver: ResizeObserver | null = null
 let activeScrollbarDrag: ScrollbarDragState | null = null
 let activeTransferScrollbarDrag: TransferScrollbarDragState | null = null
 const deletingPanes = new Set<PaneName>()
+const inspectingPanes = new Set<PaneName>()
 
 const activeTransferSummary = computed(() => {
   const running = transferItems.value.filter(item => item.status === 'running').length
@@ -2498,7 +2542,8 @@ function beginSelect(paneName: PaneName, index: number, entry: FileEntry, event:
     return
   }
   if (isSelected(paneName, entry) && tab.selected.length > 1) {
-    // Delay collapsing until mouseup: dragging the group must keep the selection intact.
+    // Delay collapsing until mouseup, because a drag that starts here must keep
+    // the whole selection.
     pendingSelectionCollapse = { pane: paneName, path: entry.path }
     tab.anchorPath = entry.path
     startLongPress(paneName, index, event)
@@ -2628,6 +2673,9 @@ function handleRowKeydown(paneName: PaneName, index: number, entry: FileEntry, e
   }
 }
 
+// A press is ambiguous until it is either held or moved: holding still arms a
+// file drag, moving first turns the gesture into a row-range selection. Rows are
+// draggable, so the range selection has to win dragstart before the timer fires.
 function startLongPress(paneName: PaneName, index: number, event: MouseEvent) {
   cancelLongPress()
   pressPane = paneName
@@ -2654,6 +2702,8 @@ function resetPressState() {
 
 function handlePressMove(event: MouseEvent) {
   if (pressPane === null || pressIndex === null || exportDragArmed.value) return
+  // Once the gesture is a range selection, mouseenter owns the moving end.
+  if (rangeDragPane.value === pressPane) return
   if (Math.abs(event.clientX - pressStartX) < SELECT_DRAG_THRESHOLD && Math.abs(event.clientY - pressStartY) < SELECT_DRAG_THRESHOLD) return
   cancelLongPress()
   rangeDragPane.value = pressPane
@@ -2668,6 +2718,13 @@ function armFileDrag(paneName: PaneName, index: number) {
   rangeDragPane.value = null
   rangeDragAnchor.value = null
   rangeDragOver.value = null
+  // Remote multi-entry drags are handed to the host here, while the button is
+  // still down: WebView2 starts a native OLE drag reliably only from a host call
+  // made during a real press. A cancelled HTML5 dragstart cannot start one.
+  const tab = activeTab(paneName)
+  if (tab && items.length > 0 && canDragOutNatively(tab, items)) {
+    startNativeFileDrag(tab, paneName, items.map(item => item.path))
+  }
 }
 
 function dragItemsForIndex(paneName: PaneName, index: number) {
@@ -3165,7 +3222,7 @@ async function promptEntryName(title: string, message: string) {
 }
 
 async function deleteSelected(paneName: PaneName) {
-  if (deletingPanes.has(paneName)) return
+  if (deletingPanes.has(paneName) || inspectingPanes.has(paneName)) return
   const tab = activeTab(paneName)
   const selected = selectedEntries(paneName)
   if (!tab || selected.length === 0) {
@@ -3175,7 +3232,11 @@ async function deleteSelected(paneName: PaneName) {
   if (tab.kind === 'remote') {
     const directories = selected.filter(entry => entry.is_dir)
     if (directories.length > 0) {
-      const summary = await inspectDeleteDirectories(tab, directories)
+      inspectingPanes.add(paneName)
+      const summary = await inspectDeleteDirectories(tab, directories).finally(() => {
+        inspectingPanes.delete(paneName)
+      })
+      const recursive = summary.nonEmpty.length > 0 || summary.unchecked > 0
       const emptyText = summary.empty.length > 0
         ? `<p class="delete-confirm-note">${t('sftp.emptyFolders', { count: summary.empty.length })}</p>`
         : ''
@@ -3185,16 +3246,19 @@ async function deleteSelected(paneName: PaneName) {
       const unknownText = summary.unknown.length > 0
         ? `<p class="delete-confirm-note">${t('sftp.unknownFolders', { count: summary.unknown.length })}</p>`
         : ''
-      const title = summary.nonEmpty.length > 0 ? t('sftp.recursiveDeleteTitle') : t('sftp.deleteTitle')
+      const uncheckedText = summary.unchecked > 0
+        ? `<p class="delete-confirm-note">${t('sftp.uncheckedFolders', { count: summary.unchecked })}</p>`
+        : ''
+      const title = recursive ? t('sftp.recursiveDeleteTitle') : t('sftp.deleteTitle')
       await ElMessageBox.confirm(
-        `<div class="delete-confirm-content">${t('sftp.deleteSummary', { selected: selected.length, directories: directories.length })}${emptyText}${nonEmptyText}${unknownText}<p class="delete-confirm-tail">${t('sftp.deleteIrreversible')}</p></div>`,
+        `<div class="delete-confirm-content">${t('sftp.deleteSummary', { selected: selected.length, directories: directories.length })}${emptyText}${nonEmptyText}${unknownText}${uncheckedText}<p class="delete-confirm-tail">${t('sftp.deleteIrreversible')}</p></div>`,
         title,
         {
           dangerouslyUseHTMLString: true,
-          type: summary.nonEmpty.length > 0 ? 'error' : 'warning',
-          confirmButtonText: summary.nonEmpty.length > 0 ? t('sftp.deleteRecursive') : t('sftp.delete'),
+          type: recursive ? 'error' : 'warning',
+          confirmButtonText: recursive ? t('sftp.deleteRecursive') : t('sftp.delete'),
           cancelButtonText: t('sftp.cancel'),
-          confirmButtonClass: summary.nonEmpty.length > 0 ? 'el-button--danger' : undefined
+          confirmButtonClass: recursive ? 'el-button--danger' : undefined
         }
       )
     } else {
@@ -3224,20 +3288,38 @@ async function deleteSelected(paneName: PaneName) {
   }
 }
 
+// A directory listing is one remote round trip carrying the whole directory, so
+// checking many folders serially made the confirmation dialog take seconds.
+// Match the SFTP connection pool size and only inspect a bounded prefix: the
+// dialog lists four names anyway, and unchecked folders still delete recursively.
+const DELETE_INSPECT_CONCURRENCY = 3
+const DELETE_INSPECT_LIMIT = 16
+
 async function inspectDeleteDirectories(tab: FileTab, directories: FileEntry[]) {
-  const empty: FileEntry[] = []
-  const nonEmpty: FileEntry[] = []
-  const unknown: FileEntry[] = []
-  for (const entry of directories) {
-    try {
-      const listing = await listTabDirectory(tab, entry.path)
-      if (listing.entries.length > 0) nonEmpty.push(entry)
-      else empty.push(entry)
-    } catch {
-      unknown.push(entry)
+  const inspected = directories.slice(0, DELETE_INSPECT_LIMIT)
+  const results = new Array<'empty' | 'nonEmpty' | 'unknown'>(inspected.length)
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < inspected.length) {
+      const index = cursor
+      cursor += 1
+      try {
+        const listing = await listTabDirectory(tab, inspected[index].path)
+        results[index] = listing.entries.length > 0 ? 'nonEmpty' : 'empty'
+      } catch {
+        results[index] = 'unknown'
+      }
     }
   }
-  return { empty, nonEmpty, unknown }
+  await Promise.all(
+    Array.from({ length: Math.min(DELETE_INSPECT_CONCURRENCY, inspected.length) }, () => worker())
+  )
+  return {
+    empty: inspected.filter((_, index) => results[index] === 'empty'),
+    nonEmpty: inspected.filter((_, index) => results[index] === 'nonEmpty'),
+    unknown: inspected.filter((_, index) => results[index] === 'unknown'),
+    unchecked: directories.length - inspected.length
+  }
 }
 
 function deleteConfirmList(entries: FileEntry[]) {
@@ -3848,8 +3930,21 @@ function hasExternalFiles(event: DragEvent) {
   return Array.from(event.dataTransfer?.types || []).includes('Files')
 }
 
+function hasNativeAppDrag() {
+  // Completion from the host clears this state, including cancellation. Large
+  // directory staging can outlast an arbitrary timer without ending the drag.
+  return pendingNativeDrag !== null
+}
+
+// A native drag exposes CF_HDROP to Chromium, so it also advertises "Files".
+// The pending marker is the only way to tell it apart from a real file upload
+// while the cursor is over the page, because getData() is unavailable then.
 function hasAppDrag(event: DragEvent) {
-  return Array.from(event.dataTransfer?.types || []).includes(appDragType)
+  return hasNativeAppDrag() || Array.from(event.dataTransfer?.types || []).includes(appDragType)
+}
+
+function isExternalFileDrag(event: DragEvent) {
+  return hasExternalFiles(event) && !hasNativeAppDrag()
 }
 
 function isFolderDropTarget(paneName: PaneName, entry: FileEntry) {
@@ -3862,8 +3957,16 @@ function isCurrentDirectoryDropActive(paneName: PaneName) {
 
 function startFileDrag(paneName: PaneName, index: number, entry: FileEntry, event: DragEvent) {
   clearPaneGestures(paneName)
+  // The host already owns the pointer: this dragstart is Chromium's own attempt
+  // to start a second drag for the same gesture, and it must not run.
+  if (pendingNativeDrag) {
+    event.preventDefault()
+    return
+  }
   const tab = activeTab(paneName)
   if (!tab || !event.dataTransfer || !exportDragArmed.value || !exportDragPathSet.value.has(entry.path)) {
+    // The press moved before the long-press armed it: this gesture is the row
+    // range selection, not a file drag.
     event.preventDefault()
     finishFileDrag()
     return
@@ -3884,8 +3987,9 @@ function startFileDrag(paneName: PaneName, index: number, entry: FileEntry, even
   event.dataTransfer.setData('text/plain', paths.join('\n'))
   // Chromium turns a drag carrying DownloadURL into a real OS file drag: dropping
   // it on Explorer or the desktop saves the remote file locally, which is what
-  // ChemSSH itself does. Chromium only honours a single DownloadURL, so multi-file
-  // drags keep their in-app behaviour.
+  // ChemSSH itself does. Only one DownloadURL is honoured, so this is the
+  // single-file and browser-only path; multi-file drags were handed to the host
+  // at arm time.
   const external = items.length === 1 && !items[0].is_dir ? externalDownloadURL(tab, items[0]) : ''
   if (external) {
     event.dataTransfer.setData('DownloadURL', `${externalDownloadMime}:${sanitizeDownloadName(items[0].name)}:${external}`)
@@ -3904,6 +4008,94 @@ function externalDownloadURL(tab: FileTab, entry: FileEntry) {
 function sanitizeDownloadName(name: string) {
   const cleaned = name.replace(/[:\\/]/g, '_').replace(/[\u0000-\u001f]/g, '').trim()
   return cleaned || 'download'
+}
+
+// The system target owns the destination; accepted jobs extract in the
+// background after the pointer gesture, including a single large file.
+function canDragOutNatively(tab: FileTab, items: FileEntry[]) {
+  return (
+    tab.kind === 'remote' &&
+    Boolean(tab.session) &&
+    nativeDragHost() !== null &&
+    items.length > 0
+  )
+}
+
+function startNativeFileDrag(tab: FileTab, paneName: PaneName, paths: string[]) {
+  if (!nativeDragHost()) return
+  const marker: NativeDragMarker = { chemssh: nativeDragMarker, pane: paneName, tabID: tab.id, paths }
+  pendingNativeDrag = { payload: marker }
+  nativeDragSettled = false
+  // Keep the pane in its drag state: the host owns the pointer now, but the
+  // rows and the opposite pane still have to show what will be transferred.
+  exportDragActive.value = true
+  dragging.value = { pane: paneName, tabID: tab.id, paths }
+  void dragOutFiles(
+    { session: tab.session || '', paths, marker: JSON.stringify(marker) },
+    window
+  )
+    .then(handleNativeDragFinished)
+    .catch((error: unknown) => {
+      pendingNativeDrag = null
+      nativeDragSettled = false
+      finishFileDrag()
+      ElMessage.error(error instanceof Error ? error.message : t('sftp.dragOutFailed'))
+    })
+}
+
+// The marker travels as plain text, which Chromium normally hands back on drop.
+// If it is dropped anyway, the staged copies arrive as ordinary files; matching
+// them by name keeps a drop inside the launcher an internal transfer instead of
+// uploading the copies back to the server. Files are only inspected when the
+// marker is missing, because reading them makes Chromium wait for the staged
+// copy list, which the host may still be building.
+function takePendingNativeDrag(event: DragEvent): DragPayload | null {
+  const pending = pendingNativeDrag
+  if (!pending) return null
+  const dropped = Array.from(event.dataTransfer?.files || []).map(file => file.name)
+  if (dropped.length === 0 || dropped.length !== pending.payload.paths.length) return null
+  const expected = new Set(pending.payload.paths.map(path => path.split(/[\\/]/).pop() || path))
+  if (!dropped.every(name => expected.has(name))) return null
+  nativeDragSettled = true
+  return pending.payload
+}
+
+function nativeDropPayload(event: DragEvent): DragPayload | null {
+  const marked = nativeDragMarkerPayload(event)
+  if (marked) {
+    nativeDragSettled = true
+    return marked
+  }
+  return takePendingNativeDrag(event)
+}
+
+// The host reports every native drag when its OLE loop ends. The page had
+// already cancelled its own drag, so this is the only signal that can clear the
+// drag state and explain a refused drop.
+function handleNativeDragFinished(result: { status: string; ok: boolean }) {
+  const settled = nativeDragSettled
+  pendingNativeDrag = null
+  nativeDragSettled = false
+  // The OLE loop consumed the mouse-up, so the press state has to be cleared
+  // here or the next hover would look like a still-running selection gesture.
+  resetPressState()
+  finishFileDrag()
+  log(result.status)
+  if (!result.ok && !settled) ElMessage.warning(t('sftp.dragOutRejected'))
+}
+
+function nativeDragMarkerPayload(event: DragEvent): DragPayload | null {
+  const text = event.dataTransfer?.getData('text/plain') || ''
+  if (!text.includes(nativeDragMarker)) return null
+  try {
+    const parsed = JSON.parse(text) as NativeDragMarker
+    if (parsed.chemssh !== nativeDragMarker) return null
+    if (parsed.pane !== 'left' && parsed.pane !== 'right') return null
+    if (!parsed.tabID || !Array.isArray(parsed.paths) || parsed.paths.length === 0) return null
+    return { pane: parsed.pane, tabID: parsed.tabID, paths: parsed.paths }
+  } catch {
+    return null
+  }
 }
 
 function finishFileDrag() {
@@ -3942,9 +4134,11 @@ function folderDragPayload(event: DragEvent) {
 
 function handleFolderDragOver(paneName: PaneName, entry: FileEntry, event: DragEvent) {
   if (!entry.is_dir || (!hasExternalFiles(event) && !hasAppDrag(event))) return
-  const valid = hasExternalFiles(event)
+  const external = isExternalFileDrag(event)
+  const payload = external ? null : folderDragPayload(event)
+  const valid = external
     ? Boolean(activeTab(paneName)?.kind === 'remote')
-    : isValidFolderTransferTarget(entry, folderDragPayload(event))
+    : isValidFolderTransferTarget(entry, payload)
   if (!valid) {
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'
     if (isFolderDropTarget(paneName, entry)) folderDropTarget.value = null
@@ -3954,7 +4148,7 @@ function handleFolderDragOver(paneName: PaneName, entry: FileEntry, event: DragE
   event.preventDefault()
   event.stopPropagation()
   folderDropTarget.value = { pane: paneName, path: entry.path }
-  if (event.dataTransfer) event.dataTransfer.dropEffect = hasExternalFiles(event) ? 'copy' : 'move'
+  if (event.dataTransfer) event.dataTransfer.dropEffect = external || payload?.pane !== paneName ? 'copy' : 'move'
 }
 
 function handleFolderDragLeave(paneName: PaneName, entry: FileEntry, event: DragEvent) {
@@ -3966,9 +4160,24 @@ function handleFolderDragLeave(paneName: PaneName, entry: FileEntry, event: Drag
 }
 
 async function handleFolderDrop(paneName: PaneName, entry: FileEntry, event: DragEvent) {
-  if (!entry.is_dir || (!hasExternalFiles(event) && !hasAppDrag(event))) return
+  if (!entry.is_dir) return
+  const marker = nativeDropPayload(event)
+  if (marker) {
+    event.preventDefault()
+    event.stopPropagation()
+    panes[paneName].dropActive = false
+    folderDropTarget.value = null
+    try {
+      if (marker.pane === paneName) await moveEntriesToFolderPath(paneName, marker, entry.path)
+      else await dropInternalFiles(paneName, JSON.stringify(marker), entry.path)
+    } finally {
+      finishFileDrag()
+    }
+    return
+  }
+  if (!hasExternalFiles(event) && !hasAppDrag(event)) return
   const payload = folderDragPayload(event)
-  const external = hasExternalFiles(event)
+  const external = isExternalFileDrag(event)
   if (!external && !isValidFolderTransferTarget(entry, payload)) return
   if (external && activeTab(paneName)?.kind !== 'remote') return
 
@@ -3999,7 +4208,7 @@ function isParentDropTarget(paneName: PaneName) {
 }
 
 function parentMovePayload(paneName: PaneName, event: DragEvent) {
-  if (hasExternalFiles(event) || !hasAppDrag(event)) return null
+  if (isExternalFileDrag(event) || !hasAppDrag(event)) return null
   const payload = folderDragPayload(event)
   if (!payload || payload.pane !== paneName || payload.paths.length === 0) return null
   const tab = activeTab(paneName)
@@ -4149,6 +4358,15 @@ async function handleDrop(paneName: PaneName, event: DragEvent) {
   if (payloadText) {
     try {
       await dropInternalFiles(paneName, payloadText)
+    } finally {
+      finishFileDrag()
+    }
+    return
+  }
+  const marker = nativeDropPayload(event)
+  if (marker) {
+    try {
+      await dropInternalFiles(paneName, JSON.stringify(marker))
     } finally {
       finishFileDrag()
     }
@@ -4457,6 +4675,8 @@ function handleDeleteKey(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  unsubscribeNativeDragJobs = subscribeNativeDragJobs(jobs => { nativeDragJobs.value = jobs })
+  window.addEventListener('keydown', handleNativeDragEscape)
   const requestedParams = new URLSearchParams(window.location.search)
   const requestedProfileID = requestedParams.get('profile') || ''
   const requestedPath = requestedParams.get('path') || ''
@@ -4505,6 +4725,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unsubscribeNativeDragJobs?.()
+  window.removeEventListener('keydown', handleNativeDragEscape)
   if (conflictDialog.value.resolve) chooseConflict('cancel')
   stopColumnResize()
   stopScrollbarThumbDrag()

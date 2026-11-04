@@ -1871,11 +1871,25 @@ body {
 
 .el-message {
   border-radius: 8px;
-  border: 0.5px solid rgba(0, 0, 0, 0.12);
-  background: #ffffff;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  border: 0.5px solid rgba(60, 60, 67, 0.16);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(16px) saturate(150%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
   font-family: var(--lumen-sans);
   font-size: calc(12px * var(--lumen-ui-scale));
+  /* Toasts float over the working area; only the close button may catch input. */
+  pointer-events: none;
+}
+
+.el-message .el-message__closeBtn {
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: background-color 0.12s ease;
+}
+
+.el-message .el-message__closeBtn:hover {
+  background: rgba(60, 60, 67, 0.12);
 }
 
 .el-overlay {
@@ -2987,6 +3001,8 @@ body {
   border-bottom: 0.5px solid rgba(0, 0, 0, 0.05);
   color: #3a3a3c;
   font-size: calc(11.5px * var(--lumen-ui-scale));
+  /* Selected rows must drag as files instead of dragging their label text. */
+  user-select: none;
 }
 
 .lumen-window .file-column-resizer {

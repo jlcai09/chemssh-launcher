@@ -147,6 +147,24 @@ func (m *Manager) discard(session *activeSession) {
 	_ = session.close()
 }
 
+// Retain keeps an existing session alive for a background operation without
+// reconnecting it. The returned release function is safe to call more than once.
+func (m *Manager) Retain(id string) (func(), error) {
+	m.mu.Lock()
+	session := m.sessions[id]
+	if session == nil {
+		m.mu.Unlock()
+		return nil, ErrSessionNotFound
+	}
+	session.refs++
+	m.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() { _ = m.Disconnect(id) })
+	}, nil
+}
+
 func (m *Manager) Disconnect(id string) error {
 	session, closeNow, err := m.release(id)
 	if err != nil || !closeNow {
@@ -212,7 +230,7 @@ func (m *Manager) Stat(id, remotePath string) (FileInfo, error) {
 		if err != nil {
 			return FileInfo{}, err
 		}
-		return FileInfo{Name: info.Name(), Size: info.Size(), ModTime: info.ModTime()}, nil
+		return FileInfo{Name: info.Name(), Size: info.Size(), IsDir: info.IsDir(), ModTime: info.ModTime()}, nil
 	})
 }
 

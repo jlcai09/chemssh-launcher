@@ -1,5 +1,5 @@
 <template>
-  <el-config-provider :locale="elementLocale">
+  <el-config-provider :locale="elementLocale" :message="messageConfig">
     <ShellView v-if="route === 'shell'" />
     <div v-else class="lumen-desktop" :class="{ 'is-embedded': embedded }">
       <div class="lumen-window">
@@ -125,6 +125,7 @@ function initialRoute(): RouteName {
 const route = initialRoute()
 const embedded = window.parent !== window
 const elementLocale = computed(() => (locale.value === 'zh' ? zhCn : en))
+const messageConfig = { showClose: true }
 const serviceOnline = ref(false)
 const routeTitle = computed(() => {
   if (route === 'terminal') return t('app.terminal')

@@ -34,6 +34,7 @@ type ListResult struct {
 type FileInfo struct {
 	Name    string
 	Size    int64
+	IsDir   bool
 	ModTime time.Time
 }
 
