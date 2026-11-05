@@ -547,36 +547,6 @@ p,
   gap: 10px;
 }
 
-.sftp-drag-jobs {
-  position: absolute;
-  z-index: 2200;
-  top: 10px;
-  right: 12px;
-  display: grid;
-  gap: 6px;
-  width: min(640px, calc(100% - 24px));
-  max-height: 35%;
-  overflow: auto;
-  pointer-events: none;
-}
-.sftp-drag-job {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  background: var(--sftp-surface, var(--panel-solid));
-  color: inherit;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
-  font-size: 12px;
-}
-.sftp-drag-job .el-button { pointer-events: auto; }
-.sftp-drag-job-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sftp-drag-job.is-error { border-color: var(--el-color-danger); }
-.sftp-drag-job.is-error span[title] { pointer-events: auto; }
-.sftp-drag-job.is-done { border-color: var(--el-color-success); }
-
 .sftp-workspace {
   min-height: 0;
   display: grid;

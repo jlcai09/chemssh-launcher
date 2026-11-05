@@ -17,8 +17,11 @@ declare global {
     chemsshDragOutFiles?: (payload: string) => Promise<void>
     chemsshNativeDragJobs?: () => Promise<NativeDragJob[]>
     chemsshCancelNativeDragJob?: (id: string) => Promise<boolean>
+    chemsshControlNativeDragJob?: (id: string, action: NativeDragAction) => Promise<boolean>
   }
 }
+
+export type NativeDragAction = 'pause' | 'resume' | 'cancel'
 
 export interface NativeDragJob {
   id: string
@@ -28,6 +31,10 @@ export interface NativeDragJob {
   error?: string
   revision: number
   createdAt: number
+  loaded?: number
+  total?: number
+  paused?: boolean
+  endedAt?: number
 }
 
 const jobEvent = 'chemssh-native-drag-job'
@@ -61,9 +68,52 @@ export function subscribeNativeDragJobs(changed: (jobs: NativeDragJob[]) => void
   return stop
 }
 
-export function cancelNativeDragJob(id: string, page: Window = window): Promise<boolean> {
+export function controlNativeDragJob(id: string, action: NativeDragAction, page: Window = window): Promise<boolean> {
   const host = nativeDragHost(page)
-  return host?.chemsshCancelNativeDragJob?.(id) ?? Promise.resolve(false)
+  if (host?.chemsshControlNativeDragJob) return host.chemsshControlNativeDragJob(id, action)
+  if (action === 'cancel') return host?.chemsshCancelNativeDragJob?.(id) ?? Promise.resolve(false)
+  return Promise.resolve(false)
+}
+
+export function cancelNativeDragJob(id: string, page: Window = window): Promise<boolean> {
+  return controlNativeDragJob(id, 'cancel', page)
+}
+
+export function nativeDragCanControl(state: NativeDragJob['state']): boolean {
+  return state === 'accepted' || state === 'caching'
+}
+
+// Project into the existing transfer row shape without exposing the cache path
+// as the destination: the system drop target owns that location.
+export function nativeDragTransferUpdates(jobs: NativeDragJob[], revisions: Map<string, number>, cleared: Set<string>): NativeDragJob[] {
+  return [...jobs].reverse().filter(job => {
+    const previous = revisions.get(job.id)
+    if (job.state === 'queued' || (previous === undefined && job.state === 'cancelled')) return false
+    if ((previous ?? -1) >= job.revision) return false
+    revisions.set(job.id, job.revision)
+    return !cleared.has(job.id)
+  })
+}
+
+export function retainTransferHistory<T extends { status: string }>(items: T[], limit = 300): T[] {
+  let completed = 0
+  return items.filter(item => item.status === 'running' || ++completed <= limit)
+}
+
+export function nativeDragTransfer(job: NativeDragJob) {
+  const terminal = ['done', 'error', 'cancelled'].includes(job.state)
+  return {
+    nativeDragID: job.id,
+    nativeDragState: job.state,
+    loaded: Math.max(0, job.loaded || 0),
+    total: Math.max(0, job.total || 0, job.loaded || 0),
+    startedAt: job.createdAt,
+    endedAt: terminal ? (job.endedAt || job.createdAt) : null,
+    status: (job.state === 'done' ? 'done' : terminal ? 'error' : 'running') as 'running' | 'done' | 'error',
+    paused: !terminal && Boolean(job.paused),
+    cancelled: job.state === 'cancelled',
+    error: job.error || ''
+  }
 }
 
 const finishedEvent = 'chemssh-native-drag-finished'

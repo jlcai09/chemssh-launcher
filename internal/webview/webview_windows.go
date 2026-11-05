@@ -255,6 +255,10 @@ func bindDragOutFiles(w webview2.WebView, stage func(context.Context, string, []
 		jobs.close()
 		return nil, err
 	}
+	if err := w.Bind("chemsshControlNativeDragJob", func(id, action string) bool { return jobs.control(id, action) }); err != nil {
+		jobs.close()
+		return nil, err
+	}
 	// The pointer gesture is UI-owned; accepted transfers outlive this loop.
 	dragActive := false
 	err := w.Bind("chemsshDragOutFiles", func(payload string) error {
@@ -303,7 +307,7 @@ func bindDragOutFiles(w webview2.WebView, stage func(context.Context, string, []
 				if err == nil {
 					err = stageCtx.Err()
 				}
-				if err == nil && !jobs.update(request.ID, "delivering", nil) {
+				if err == nil && !jobs.finishCaching(stageCtx, request.ID) {
 					err = context.Canceled
 				}
 				return paths, err

@@ -1,6 +1,77 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { cancelNativeDragJob, dragOutFiles, nativeDragHost, subscribeNativeDragJobs } from '../src/nativeDrag.ts'
+import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs } from '../src/nativeDrag.ts'
+
+test('large ordinary transfer batches retain active native jobs and only trim finished history', () => {
+  const native = { id: 'native', status: 'running', paused: true }
+  const ordinary = Array.from({ length: 350 }, (_, i) => ({ id: `ordinary-${i}`, status: 'running' }))
+  const finished = Array.from({ length: 350 }, (_, i) => ({ id: `done-${i}`, status: 'done' }))
+  const kept = retainTransferHistory([...ordinary, ...finished, native])
+  assert.equal(kept.filter(item => item.status === 'running').length, 351)
+  assert.equal(kept.filter(item => item.status === 'done').length, 300)
+  assert.equal(kept.at(-1), native)
+})
+
+test('native row updates suppress explicit clears but recover missing active rows', () => {
+  const revisions = new Map()
+  const cleared = new Set()
+  const job = { id: 'job', session: 'session', paths: ['/home/user/file'], state: 'caching', revision: 2, createdAt: 10 }
+  assert.equal(nativeDragTransferUpdates([{ ...job, state: 'queued', revision: 1 }], revisions, cleared).length, 0)
+  assert.equal(nativeDragTransferUpdates([job], revisions, cleared).length, 1)
+  assert.equal(nativeDragTransferUpdates([job], revisions, cleared).length, 0)
+  // No explicit clear: the next update can restore a missing active row.
+  assert.equal(nativeDragTransferUpdates([{ ...job, revision: 3 }], revisions, cleared).length, 1)
+  assert.equal(nativeDragTransferUpdates([{ ...job, state: 'done', revision: 4 }], revisions, cleared).length, 1)
+  cleared.add(job.id)
+  assert.equal(nativeDragTransferUpdates([{ ...job, state: 'done', revision: 5 }], revisions, cleared).length, 0)
+  assert.equal(nativeDragTransferUpdates([{ ...job, revision: 3 }], revisions, cleared).length, 0)
+  assert.equal(nativeDragTransferUpdates([{ ...job, id: 'internal', state: 'cancelled' }], revisions, cleared).length, 0)
+})
+
+test('native task controls use the owning top host and only cancel has a legacy fallback', async () => {
+  const host = new FakeWindow()
+  const frame = new FakeWindow()
+  frame.top = host
+  host.chemsshDragOutFiles = () => Promise.resolve()
+  const calls = []
+  host.chemsshControlNativeDragJob = function(id, action) {
+    assert.equal(this, host)
+    calls.push([id, action])
+    return Promise.resolve(action !== 'resume')
+  }
+  assert.equal(await controlNativeDragJob('job', 'pause', frame), true)
+  assert.equal(await controlNativeDragJob('job', 'resume', frame), false)
+  assert.equal(await cancelNativeDragJob('job', frame), true)
+  assert.deepEqual(calls, [['job', 'pause'], ['job', 'resume'], ['job', 'cancel']])
+  delete host.chemsshControlNativeDragJob
+  host.chemsshCancelNativeDragJob = id => Promise.resolve(id === 'job')
+  assert.equal(await controlNativeDragJob('job', 'pause', frame), false)
+  assert.equal(await cancelNativeDragJob('job', frame), true)
+})
+
+test('native job projection preserves byte progress, paused state and terminal time in transfer rows', () => {
+  const job = { id: 'job', session: 'session', paths: ['/home/user/file'], state: 'caching', revision: 1, createdAt: 10, loaded: 25, total: 100, paused: true }
+  const paused = nativeDragTransfer(job)
+  assert.equal(paused.nativeDragID, 'job')
+  assert.equal(paused.status, 'running')
+  assert.equal(paused.paused, true)
+  assert.equal(paused.loaded, 25)
+  assert.equal(paused.total, 100)
+  assert.equal(paused.endedAt, null)
+  const delivery = nativeDragTransfer({ ...job, state: 'delivering', loaded: 100, paused: false })
+  assert.equal(delivery.status, 'running')
+  assert.equal(nativeDragCanControl(delivery.nativeDragState), false)
+  assert.equal(nativeDragCanControl('accepted'), true)
+  assert.equal(nativeDragCanControl('caching'), true)
+  const done = nativeDragTransfer({ ...job, state: 'done', endedAt: 50 })
+  assert.equal(done.status, 'done')
+  assert.equal(done.paused, false)
+  assert.equal(done.endedAt, 50)
+  assert.equal(nativeDragTransfer({ ...job, state: 'error', error: 'failed' }).error, 'failed')
+  const cancelled = nativeDragTransfer({ ...job, state: 'cancelled' })
+  assert.equal(cancelled.status, 'error')
+  assert.equal(cancelled.cancelled, true)
+})
 
 test('background jobs survive gesture completion and merge late snapshots by revision', async () => {
   const host = new FakeWindow()

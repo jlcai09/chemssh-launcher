@@ -1,14 +1,5 @@
 <template>
   <section ref="sftpRoot" class="sftp-view">
-    <aside v-if="visibleNativeDragJobs.length" class="sftp-drag-jobs" aria-live="polite">
-      <div v-for="job in visibleNativeDragJobs" :key="job.id" class="sftp-drag-job" :class="`is-${job.state}`">
-        <el-icon v-if="['accepted', 'caching', 'delivering'].includes(job.state)" class="is-loading"><Refresh /></el-icon>
-        <span class="sftp-drag-job-name" :title="job.paths.join('\n')">{{ nativeDragJobName(job) }}</span>
-        <span :title="job.error || ''">{{ t(`sftp.dragJob.${job.state}`) }}</span>
-        <el-button v-if="canCancelNativeDragJob(job)" size="small" @click="cancelDragJob(job)">{{ t('sftp.cancel') }}</el-button>
-        <el-button v-else size="small" text @click="dismissedNativeDragJobs.add(job.id)">{{ t('sftp.dragJob.dismiss') }}</el-button>
-      </div>
-    </aside>
     <div class="sftp-workspace">
       <section
         v-for="paneName in paneNames"
@@ -666,7 +657,7 @@ import {
   type UploadEntry
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
-import { cancelNativeDragJob, dragOutFiles, nativeDragHost, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
+import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 
 type PaneName = 'left' | 'right'
 type TabKind = 'local' | 'remote'
@@ -821,6 +812,8 @@ interface TransferItem {
   // serverSide marks a copy the remote host performs itself; it has no byte
   // progress and cannot be paused, resumed or cancelled.
   serverSide?: boolean
+  nativeDragID?: string
+  nativeDragState?: NativeDragJob['state']
 }
 
 interface TransferProgress {
@@ -959,13 +952,39 @@ const exportDragPathSet = ref(new Set<string>())
 const exportDragArmed = ref(false)
 const exportDragActive = ref(false)
 const nativeDragJobs = ref<NativeDragJob[]>([])
-const dismissedNativeDragJobs = reactive(new Set<string>())
-const visibleNativeDragJobs = computed(() => nativeDragJobs.value.filter(job => job.state !== 'queued' && !dismissedNativeDragJobs.has(job.id)))
+// Revision ordering and explicit clears are separate: a missing active row must
+// remain recoverable, while a cleared terminal task must not reappear.
+const nativeTransferRevisions = new Map<string, number>()
+const clearedNativeTransfers = new Set<string>()
 let unsubscribeNativeDragJobs: (() => void) | undefined
-function canCancelNativeDragJob(job: NativeDragJob) { return ['accepted', 'caching'].includes(job.state) }
-function nativeDragJobName(job: NativeDragJob) {
-  const name = job.paths[0]?.split(/[\\/]/).pop() || ''
-  return job.paths.length > 1 ? `${name} (+${job.paths.length - 1})` : name
+function canCancelNativeDragJob(job: NativeDragJob) { return nativeDragCanControl(job.state) }
+function syncNativeDragTransfers(jobs: NativeDragJob[]) {
+  nativeDragJobs.value = jobs
+  let inserted = false
+  for (const job of nativeDragTransferUpdates(jobs, nativeTransferRevisions, clearedNativeTransfers)) {
+    let item = transferItems.value.find(item => item.nativeDragID === job.id)
+    if (!item) {
+      const tab = paneNames.flatMap(pane => panes[pane].tabs).find(tab => tab.session === job.session)
+      const name = baseName(job.paths[0] || '')
+      item = {
+        id: `native-drag:${job.id}`,
+        name: job.paths.length > 1 ? `${name} (+${job.paths.length - 1})` : name,
+        kind: 'file',
+        sourceName: transferEndpointName(tab),
+        targetName: t('sftp.local'),
+        sourcePath: job.paths.join('; '),
+        targetPath: t('sftp.dragDropTarget'),
+        ...nativeDragTransfer(job)
+      }
+      transferItems.value.unshift(item)
+      inserted = true
+    } else {
+      Object.assign(item, nativeDragTransfer(job))
+    }
+  }
+  transferItems.value = retainTransferHistory(transferItems.value)
+  if (inserted) transferPanelMode.value = 'transfers'
+  nextTick(updateTransferScrollbars)
 }
 async function cancelDragJob(job: NativeDragJob) {
   try { await cancelNativeDragJob(job.id) }
@@ -1288,7 +1307,7 @@ function createTransferItem(input: Pick<TransferItem, 'name' | 'kind' | 'sourceN
     maxAttempts: 0
   }
   transferItems.value.unshift(item)
-  if (transferItems.value.length > 300) transferItems.value = transferItems.value.slice(0, 300)
+  transferItems.value = retainTransferHistory(transferItems.value)
   transferPanelMode.value = 'transfers'
   nextTick(updateTransferScrollbars)
   return transferItems.value.find(current => current.id === item.id) || item
@@ -1412,12 +1431,17 @@ function clearTransferPanel() {
     nextTick(() => transferLogScroller.scrollToBottom(true))
     return
   }
+  for (const item of transferItems.value) {
+    if (item.status !== 'running' && item.nativeDragID) clearedNativeTransfers.add(item.nativeDragID)
+  }
   transferItems.value = transferItems.value.filter(item => item.status === 'running')
   selectedTransferIDs.value = new Set([...selectedTransferIDs.value].filter(id => transferItems.value.some(item => item.id === id)))
 }
 
 function runningTransferCount() {
-  return transferItems.value.filter(item => item.status === 'running' && !item.isGroup).length
+  // Native jobs are counted directly by the host close interceptor. Do not
+  // duplicate them in the HTTP counter, which can outlive this page.
+  return transferItems.value.filter(item => item.status === 'running' && !item.isGroup && !item.nativeDragID).length
 }
 
 const runningCount = computed(() => runningTransferCount())
@@ -1432,7 +1456,7 @@ watch(transferPanelMode, mode => {
 })
 
 function handleBeforeUnload(event: BeforeUnloadEvent) {
-  const running = runningTransferCount()
+  const running = transferItems.value.filter(item => item.status === 'running' && !item.isGroup).length
   if (running <= 0) return
   const message = t('sftp.closeDuringTransfer', { count: running })
   event.preventDefault()
@@ -1463,6 +1487,7 @@ function transferStatusLabel(item: TransferItem) {
   if (item.status === 'error') return t('sftp.statusError')
   if (item.serverSide) return t('sftp.statusServerCopy')
   if (item.paused) return t('sftp.statusPaused')
+  if (item.nativeDragState) return t(`sftp.dragJob.${item.nativeDragState}`)
   if (item.retrying) return transferRetryLabel(item)
   return t('sftp.statusRunning')
 }
@@ -1472,6 +1497,7 @@ function transferRetryLabel(item: TransferItem) {
 }
 
 function transferSpeed(item: TransferItem) {
+  if (item.nativeDragState === 'delivering') return '—'
   if (item.paused) return t('sftp.statusPaused')
   if (item.retrying) return t('sftp.waitingData')
   const elapsed = Math.max(0.001, ((item.endedAt || Date.now()) - item.startedAt) / 1000)
@@ -1484,6 +1510,7 @@ function transferElapsed(item: TransferItem) {
 }
 
 function transferEta(item: TransferItem) {
+  if (item.nativeDragState === 'delivering') return t('sftp.waitingEstimate')
   if (item.paused) return t('sftp.statusPaused')
   if (item.retrying) return t('sftp.waitingEstimate')
   if (item.status !== 'running') return t('sftp.seconds', { seconds: 0 })
@@ -3093,16 +3120,20 @@ function transferControlTargets(item: TransferItem | null) {
   })
 }
 
+function transferCanControl(item: TransferItem) {
+  return !item.serverSide && (!item.nativeDragState || nativeDragCanControl(item.nativeDragState))
+}
+
 function canPauseTransfer(item: TransferItem | null) {
-  return transferControlTargets(item).some(target => target.status === 'running' && !target.paused && !target.serverSide)
+  return transferControlTargets(item).some(target => target.status === 'running' && !target.paused && transferCanControl(target))
 }
 
 function canResumeTransfer(item: TransferItem | null) {
-  return transferControlTargets(item).some(target => target.status === 'running' && target.paused && !target.serverSide)
+  return transferControlTargets(item).some(target => target.status === 'running' && target.paused && transferCanControl(target))
 }
 
 function canCancelTransfer(item: TransferItem | null) {
-  return transferControlTargets(item).some(target => target.status === 'running' && !target.serverSide)
+  return transferControlTargets(item).some(target => target.status === 'running' && transferCanControl(target))
 }
 
 function canRetryTransfer(item: TransferItem | null) {
@@ -3112,7 +3143,7 @@ function canRetryTransfer(item: TransferItem | null) {
 async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel' | 'retry') {
   const item = transferContextMenu.value.item
   const targets = transferControlTargets(item).filter(target => {
-    if (target.serverSide) return false
+    if (!transferCanControl(target)) return false
     if (action === 'pause') return target.status === 'running' && !target.paused
     if (action === 'resume') return target.status === 'running' && target.paused
     if (action === 'retry') return target.status === 'error' && Boolean(target.retry)
@@ -3127,6 +3158,12 @@ async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel' | 
     return
   }
   await Promise.all(targets.map(async target => {
+    if (target.nativeDragID) {
+      // Host events are authoritative, including pause-vs-delivery races.
+      try { await controlNativeDragJob(target.nativeDragID, action) }
+      catch (error) { ElMessage.error(error instanceof Error ? error.message : t('sftp.dragOutFailed')) }
+      return
+    }
     await postJSON('/api/transfer-control', { id: target.id, action })
     if (action === 'pause') {
       target.paused = true
@@ -4675,7 +4712,7 @@ function handleDeleteKey(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
-  unsubscribeNativeDragJobs = subscribeNativeDragJobs(jobs => { nativeDragJobs.value = jobs })
+  unsubscribeNativeDragJobs = subscribeNativeDragJobs(syncNativeDragTransfers)
   window.addEventListener('keydown', handleNativeDragEscape)
   const requestedParams = new URLSearchParams(window.location.search)
   const requestedProfileID = requestedParams.get('profile') || ''

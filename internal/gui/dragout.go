@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"chemssh-launcher/internal/dragtransfer"
 	"chemssh-launcher/internal/sftpclient"
 )
 
@@ -41,7 +42,7 @@ type dragStageSource interface {
 // only for drop targets outside the launcher. The native loop starts staging
 // when it reaches an external window and waits before handing out the file list.
 func (s *Server) stageDragFiles(ctx context.Context, session string, remotePaths []string) ([]string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := dragtransfer.Wait(ctx); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(session) == "" {
@@ -94,7 +95,7 @@ func stageDragPathsContext(ctx context.Context, source dragStageSource, session 
 	}()
 	used := make(map[string]bool, len(remotePaths))
 	for _, remotePath := range remotePaths {
-		if err = ctx.Err(); err != nil {
+		if err = dragtransfer.Wait(ctx); err != nil {
 			return nil, err
 		}
 		var localPath string
@@ -111,7 +112,7 @@ func stageDragPathsContext(ctx context.Context, source dragStageSource, session 
 }
 
 func stageDragPathContext(ctx context.Context, source dragStageSource, session, remotePath, dir string, used map[string]bool) (string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := dragtransfer.Wait(ctx); err != nil {
 		return "", err
 	}
 	var info sftpclient.FileInfo
@@ -144,7 +145,7 @@ func stageDragPathContext(ctx context.Context, source dragStageSource, session, 
 }
 
 func stageDragDirectoryContext(ctx context.Context, source dragStageSource, session, remotePath, localDir string) error {
-	if err := ctx.Err(); err != nil {
+	if err := dragtransfer.Wait(ctx); err != nil {
 		return err
 	}
 	var listing sftpclient.ListResult
@@ -162,7 +163,7 @@ func stageDragDirectoryContext(ctx context.Context, source dragStageSource, sess
 	}
 	used := make(map[string]bool, len(listing.Entries))
 	for _, entry := range listing.Entries {
-		if err := ctx.Err(); err != nil {
+		if err := dragtransfer.Wait(ctx); err != nil {
 			return err
 		}
 		// A symlinked directory can point back at an ancestor, so the staged tree
@@ -192,7 +193,7 @@ func copyDragFile(source dragStageSource, session, remotePath, target string) er
 }
 
 func copyDragFileContext(ctx context.Context, source dragStageSource, session, remotePath, target string) error {
-	if err := ctx.Err(); err != nil {
+	if err := dragtransfer.Wait(ctx); err != nil {
 		return err
 	}
 	var reader io.ReadCloser
@@ -210,16 +211,19 @@ func copyDragFileContext(ctx context.Context, source dragStageSource, session, r
 		return err
 	}
 	defer reader.Close()
-	if err := ctx.Err(); err != nil {
+	if err := dragtransfer.Wait(ctx); err != nil {
 		return err
 	}
 
+	// Download metadata is authoritative for the stream. Count each file here
+	// once, rather than also counting its top-level stat or directory entry.
+	dragtransfer.AddTotal(ctx, info.Size)
 	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	buf := make([]byte, copyBufferSize)
-	copied, copyErr := io.CopyBuffer(file, &dragContextReader{ctx: ctx, reader: reader}, buf)
+	copied, copyErr := io.CopyBuffer(&dragProgressWriter{ctx: ctx, writer: file}, &dragContextReader{ctx: ctx, reader: reader}, buf)
 	if ctx.Err() != nil {
 		copyErr = ctx.Err()
 	}
@@ -238,13 +242,26 @@ func copyDragFileContext(ctx context.Context, source dragStageSource, session, r
 	return nil
 }
 
+// Wrapping both sides keeps io.CopyBuffer on the checked Read/Write path.
+// In particular, os.File.ReadFrom must not bypass byte reporting.
+type dragProgressWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (w *dragProgressWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	dragtransfer.AddLoaded(w.ctx, int64(n))
+	return n, err
+}
+
 type dragContextReader struct {
 	ctx    context.Context
 	reader io.Reader
 }
 
 func (r *dragContextReader) Read(p []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
+	if err := dragtransfer.Wait(r.ctx); err != nil {
 		return 0, err
 	}
 	n, err := r.reader.Read(p)

@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"chemssh-launcher/internal/dragtransfer"
 )
 
 // A job survives the pointer gesture. Delivery needs an explicit system result:
@@ -17,11 +19,17 @@ type dragJob struct {
 	Error     string   `json:"error,omitempty"`
 	Revision  uint64   `json:"revision"`
 	CreatedAt int64    `json:"createdAt"`
+	Loaded    int64    `json:"loaded"`
+	Total     int64    `json:"total"`
+	Paused    bool     `json:"paused"`
+	EndedAt   int64    `json:"endedAt,omitempty"`
 }
 
 type dragJobEntry struct {
-	job    dragJob
-	cancel context.CancelFunc
+	job          dragJob
+	cancel       context.CancelFunc
+	wake         chan struct{}
+	lastProgress time.Time
 }
 type dragJobRegistry struct {
 	mu       sync.Mutex
@@ -47,8 +55,13 @@ func (r *dragJobRegistry) add(id, session string, paths []string) (context.Conte
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.revision++
-	r.jobs[id] = &dragJobEntry{job: dragJob{ID: id, Session: session, Paths: append([]string(nil), paths...), State: "queued", Revision: r.revision, CreatedAt: time.Now().UnixMilli()}, cancel: cancel}
+	r.jobs[id] = &dragJobEntry{job: dragJob{ID: id, Session: session, Paths: append([]string(nil), paths...), State: "queued", Revision: r.revision, CreatedAt: time.Now().UnixMilli()}, cancel: cancel, wake: make(chan struct{})}
 	r.trimHistoryLocked()
+	ctx = dragtransfer.WithHooks(ctx, dragtransfer.Hooks{
+		Wait:      func(ctx context.Context) error { return r.wait(ctx, id) },
+		AddTotal:  func(n int64) { r.progress(id, n, 0) },
+		AddLoaded: func(n int64) { r.progress(id, 0, n) },
+	})
 	return ctx, true
 }
 
@@ -75,6 +88,10 @@ func (r *dragJobRegistry) update(id, state string, err error) bool {
 		r.mu.Unlock()
 		return false
 	}
+	if state == "delivering" && entry.job.Paused {
+		r.mu.Unlock()
+		return false
+	}
 	// A late StartOperation notification cannot regress a running copy.
 	if state == "accepted" && entry.job.State != "queued" {
 		r.mu.Unlock()
@@ -91,6 +108,11 @@ func (r *dragJobRegistry) update(id, state string, err error) bool {
 	}
 	job := entry.job
 	terminal := dragJobTerminal(state)
+	if terminal {
+		entry.job.Paused = false
+		entry.job.EndedAt = time.Now().UnixMilli()
+		job = entry.job
+	}
 	cancel := entry.cancel
 	changed := r.changed
 	r.trimHistoryLocked()
@@ -115,6 +137,8 @@ func (r *dragJobRegistry) cancel(id string) bool {
 	}
 	r.revision++
 	entry.job.State, entry.job.Revision = "cancelled", r.revision
+	entry.job.Paused = false
+	entry.job.EndedAt = time.Now().UnixMilli()
 	job, cancel, changed := entry.job, entry.cancel, r.changed
 	r.trimHistoryLocked()
 	r.mu.Unlock()
@@ -162,4 +186,101 @@ func (r *dragJobRegistry) close() {
 		entry.cancel()
 	}
 	r.mu.Unlock()
+}
+
+// Pause preserves the partially cached files and the accepted system drop.
+func (r *dragJobRegistry) control(id, action string) bool {
+	if action == "cancel" {
+		return r.cancel(id)
+	}
+	if action != "pause" && action != "resume" {
+		return false
+	}
+	r.mu.Lock()
+	entry := r.jobs[id]
+	if r.closed || entry == nil || (entry.job.State != "accepted" && entry.job.State != "caching") {
+		r.mu.Unlock()
+		return false
+	}
+	paused := action == "pause"
+	if entry.job.Paused == paused {
+		r.mu.Unlock()
+		return true
+	}
+	entry.job.Paused = paused
+	close(entry.wake)
+	entry.wake = make(chan struct{})
+	r.revision++
+	entry.job.Revision = r.revision
+	job, changed := entry.job, r.changed
+	r.mu.Unlock()
+	if changed != nil {
+		changed(job)
+	}
+	return true
+}
+
+func (r *dragJobRegistry) wait(ctx context.Context, id string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		entry := r.jobs[id]
+		if r.closed || entry == nil || dragJobTerminal(entry.job.State) {
+			r.mu.Unlock()
+			return context.Canceled
+		}
+		paused, wake := entry.job.Paused, entry.wake
+		r.mu.Unlock()
+		if !paused {
+			return ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wake:
+		}
+	}
+}
+
+func (r *dragJobRegistry) finishCaching(ctx context.Context, id string) bool {
+	for {
+		if r.wait(ctx, id) != nil {
+			return false
+		}
+		if r.update(id, "delivering", nil) {
+			return true
+		}
+		if ctx.Err() != nil || r.isClosed() {
+			return false
+		}
+	}
+}
+
+// Counters stay current for snapshots; coalesce UI events during fast local IO.
+func (r *dragJobRegistry) progress(id string, total, loaded int64) {
+	r.mu.Lock()
+	entry := r.jobs[id]
+	if r.closed || entry == nil || dragJobTerminal(entry.job.State) || entry.job.State == "delivering" {
+		r.mu.Unlock()
+		return
+	}
+	if total > 0 {
+		entry.job.Total += total
+	}
+	if loaded > 0 {
+		entry.job.Loaded += loaded
+	}
+	r.revision++
+	entry.job.Revision = r.revision
+	send := time.Since(entry.lastProgress) >= 100*time.Millisecond
+	if send {
+		entry.lastProgress = time.Now()
+	}
+	job, changed := entry.job, r.changed
+	r.mu.Unlock()
+	if send && changed != nil {
+		changed(job)
+	}
 }
