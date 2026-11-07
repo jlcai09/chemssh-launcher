@@ -210,6 +210,9 @@
           <el-button class="terminal-add-tab" :icon="Plus" circle @click="createTab()" />
         </el-tooltip>
       </div>
+      <div v-if="connected" class="terminal-x11-status" role="status" :style="{ padding: '6px 12px', color: activeTab?.x11Error ? 'var(--el-color-warning)' : 'var(--el-text-color-secondary)', fontSize: '12px' }">
+        {{ activeTab?.x11Error ? t('terminal.x11Degraded', { error: activeTab.x11Error }) : activeTab?.x11Enabled ? t('terminal.x11Ready') : t('terminal.x11Disabled') }}
+      </div>
       <div
         ref="stageRef"
         class="terminal-stage"
@@ -413,7 +416,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import '@xterm/xterm/css/xterm.css'
-import { api, APIError, formatBytes, joinPath, parentPath, postJSON, withLauncherToken, type FileEntry, type Profile } from '../api'
+import { api, APIError, formatBytes, joinPath, parentPath, postJSON, withLauncherToken, type FileEntry, type Profile, type ShellOpenResponse } from '../api'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import {
   collectDropUploadEntries,
@@ -480,6 +483,8 @@ interface TerminalTab {
   // Only a tab that already reached the server offers reconnect; a brand new
   // tab still starts from the server list.
   wasConnected: boolean
+  x11Enabled: boolean
+  x11Error: string
   uploading: boolean
   uploadPercent: number
   sftp: TerminalSftpPanel
@@ -1576,6 +1581,8 @@ async function createTab(profileID = lastProfileID || remoteProfiles.value[0]?.i
     cwd: '',
     resumePath: '',
     wasConnected: false,
+    x11Enabled: false,
+    x11Error: '',
     uploading: false,
     uploadPercent: 0,
     sftp: emptySftpPanel()
@@ -1810,8 +1817,6 @@ function openMenuProfileInSftp() {
   if (profile) openProfileInSftp(profile)
 }
 
-type ShellOpenResponse = { id: string; proxy_url?: string; proxy_error?: string }
-
 async function openShell(tab: TerminalTab) {
   const size = terminalSize(tab)
   const payload = { profile_id: tab.profileID, cols: size.cols, rows: size.rows }
@@ -1824,7 +1829,7 @@ async function openShell(tab: TerminalTab) {
     const trust = await confirmHostKey(hostKey)
     opened = await postJSON<ShellOpenResponse>('/api/session/shell/open', { ...payload, ...trust })
   }
-  return { id: opened.id, proxyError: opened.proxy_error || '', ...size }
+  return { id: opened.id, proxyError: opened.proxy_error || '', x11Enabled: opened.x11_enabled === true, x11Error: opened.x11_error || '', ...size }
 }
 
 async function connectSftp(tab: TerminalTab) {
@@ -2268,6 +2273,8 @@ async function connect(tab: TerminalTab, cdPath = '', options: { resume?: boolea
   const label = profile?.name || profile?.ssh_host || ''
   const resume = options.resume === true
   tab.status = 'connecting'
+  tab.x11Enabled = false
+  tab.x11Error = ''
   resetStreamState(tab)
   resetSftpPanelData(tab)
   if (resume) {
@@ -2291,6 +2298,10 @@ async function connect(tab: TerminalTab, cdPath = '', options: { resume?: boolea
     runtime.sessionID = opened.id
     tab.status = 'connected'
     tab.wasConnected = true
+    tab.x11Enabled = opened.x11Enabled
+    tab.x11Error = opened.x11Error
+    if (opened.x11Error) writeNotice(tab, t('terminal.x11Degraded', { error: opened.x11Error }))
+    else if (opened.x11Enabled) writeNotice(tab, t('terminal.x11Ready'))
     if (opened.proxyError) writeNotice(tab, t('terminal.proxyDegraded', { error: opened.proxyError }))
     runtime.lastCols = opened.cols
     runtime.lastRows = opened.rows

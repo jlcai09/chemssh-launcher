@@ -123,16 +123,14 @@ func stageDragPathContext(ctx context.Context, source dragStageSource, session, 
 		info, err = source.Stat(session, remotePath)
 	}
 	if ctx.Err() != nil {
-		return "", ctx.Err()
+		err = ctx.Err()
 	}
 	if err != nil {
+		dragtransfer.ReportFile(ctx, dragtransfer.FileProgress{Path: remotePath, Kind: "file", State: "error", Error: err.Error()})
 		return "", err
 	}
 	target := filepath.Join(dir, uniqueDragStageName(dragStageName(info.Name, remotePath), used))
 	if info.IsDir {
-		if err := os.Mkdir(target, 0o700); err != nil {
-			return "", err
-		}
 		if err := stageDragDirectoryContext(ctx, source, session, remotePath, target); err != nil {
 			return "", err
 		}
@@ -144,12 +142,23 @@ func stageDragPathContext(ctx context.Context, source dragStageSource, session, 
 	return target, nil
 }
 
-func stageDragDirectoryContext(ctx context.Context, source dragStageSource, session, remotePath, localDir string) error {
+func stageDragDirectoryContext(ctx context.Context, source dragStageSource, session, remotePath, localDir string) (err error) {
+	progress := dragtransfer.FileProgress{Path: remotePath, Kind: "folder", State: "caching"}
+	dragtransfer.ReportFile(ctx, progress)
+	defer func() {
+		progress.State = "done"
+		if err != nil {
+			progress.State, progress.Error = "error", err.Error()
+		}
+		dragtransfer.ReportFile(ctx, progress)
+	}()
 	if err := dragtransfer.Wait(ctx); err != nil {
 		return err
 	}
+	if err := os.Mkdir(localDir, 0o700); err != nil {
+		return err
+	}
 	var listing sftpclient.ListResult
-	var err error
 	if contextual, ok := source.(dragStageContextSource); ok {
 		listing, err = contextual.ListContext(ctx, session, remotePath)
 	} else {
@@ -173,9 +182,6 @@ func stageDragDirectoryContext(ctx context.Context, source dragStageSource, sess
 		}
 		target := filepath.Join(localDir, uniqueDragStageName(dragStageName(entry.Name, entry.Path), used))
 		if entry.IsDir {
-			if err := os.Mkdir(target, 0o700); err != nil {
-				return err
-			}
 			if err := stageDragDirectoryContext(ctx, source, session, entry.Path, target); err != nil {
 				return err
 			}
@@ -192,13 +198,21 @@ func copyDragFile(source dragStageSource, session, remotePath, target string) er
 	return copyDragFileContext(context.Background(), source, session, remotePath, target)
 }
 
-func copyDragFileContext(ctx context.Context, source dragStageSource, session, remotePath, target string) error {
+func copyDragFileContext(ctx context.Context, source dragStageSource, session, remotePath, target string) (err error) {
+	progress := dragtransfer.FileProgress{Path: remotePath, Kind: "file", State: "caching"}
+	dragtransfer.ReportFile(ctx, progress)
+	defer func() {
+		progress.State = "done"
+		if err != nil {
+			progress.State, progress.Error = "error", err.Error()
+		}
+		dragtransfer.ReportFile(ctx, progress)
+	}()
 	if err := dragtransfer.Wait(ctx); err != nil {
 		return err
 	}
 	var reader io.ReadCloser
 	var info sftpclient.FileInfo
-	var err error
 	if contextual, ok := source.(dragStageContextSource); ok {
 		reader, info, err = contextual.DownloadContext(ctx, session, remotePath)
 	} else {
@@ -211,6 +225,8 @@ func copyDragFileContext(ctx context.Context, source dragStageSource, session, r
 		return err
 	}
 	defer reader.Close()
+	progress.Total = info.Size
+	ctx = dragtransfer.WithFile(ctx, remotePath, info.Size)
 	if err := dragtransfer.Wait(ctx); err != nil {
 		return err
 	}
@@ -224,6 +240,7 @@ func copyDragFileContext(ctx context.Context, source dragStageSource, session, r
 	}
 	buf := make([]byte, copyBufferSize)
 	copied, copyErr := io.CopyBuffer(&dragProgressWriter{ctx: ctx, writer: file}, &dragContextReader{ctx: ctx, reader: reader}, buf)
+	progress.Loaded = copied
 	if ctx.Err() != nil {
 		copyErr = ctx.Err()
 	}

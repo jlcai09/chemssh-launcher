@@ -101,6 +101,7 @@ func normalizeImportedProfile(profile config.Profile) config.Profile {
 		profile.StartCommand = defaults.StartCommand
 	}
 	profile.LocalProxy = profile.LocalProxy.Normalized()
+	profile.X11 = profile.X11.Normalized()
 	if profile.IsLocal() {
 		profile.SSHHost = ""
 		profile.SSHPort = 0
@@ -112,6 +113,7 @@ func normalizeImportedProfile(profile config.Profile) config.Profile {
 		// A local profile has no SSH transport for the reverse channel, so an
 		// imported flag would only survive as misleading stored data.
 		profile.LocalProxy.Enabled = false
+		profile.X11.Enabled = false
 		if strings.TrimSpace(profile.StartCommand) == defaults.StartCommand {
 			profile.StartCommand = ""
 		}

@@ -169,6 +169,18 @@ Launcher 会检查启动命令的**最后一行**：如果该行还没有 `--hos
 
 Launcher 还会在远程 shell 的 `PATH` 中安装临时的 `sz`/`rz` shim，与 ChemSSH 本体的终端集成逻辑一致：执行 `rz` 会打开本地文件选择器并上传到当前目录，执行 `sz <文件>` 会通过 SFTP 下载这些文件。shim 发出传输标记后立即退出，因此不会让终端停在等待状态。如果无法安装 shell 集成，则会拦截原生 ZMODEM 特征并发送 Ctrl-C，保证终端仍可使用。临时的 `vi`/`vim` wrapper 会绕开 shim 目录找到真实的编辑器，并关闭 Vim 的终端能力查询，与 ChemSSH 本体一致，避免编辑器在浏览器终端中卡住。拖拽和 SFTP 页面仍是推荐的传输方式。
 
+### 转发 X11 到本机 X Server
+
+远程 profile 可为新开的 Launcher SSH 终端启用 **X11 转发**。Go SSH 后端在启动 shell 前申请转发，校验传入的 X11 认证，并把图形通信送到本机 X Server。远端 SSH 服务负责设置 `DISPLAY`，无需在预启动命令中硬编码。图形窗口由 VcXsrv 或其他本机 X Server 显示，不会嵌在终端画布内。
+
+请先自行启动 VcXsrv 或其他本机 X Server，再打开 Launcher SSH 终端。Launcher 只向已运行的 X Server 转发，不启动或管理 X Server。勾选 **X11 转发**，并将本机 TCP Display 设为服务器实际使用的显示地址（默认 `127.0.0.1:0`）。X Server 需在该地址接受来自 Launcher 的 TCP 连接。
+
+**Xauthority 文件**为可选项。留空时尝试 `XAUTHORITY` 或默认主目录认证文件；若服务器使用 `MIT-MAGIC-COOKIE-1`，也可指定匹配的认证文件。如果 X Server 的现有访问策略允许本机无 cookie 连接，同样可以转发。无需输入 cookie，profile 只保存认证文件路径。请按本机访问需要维持现有服务器访问控制和防火墙限制。这是受信任的 X11 转发，仅对信任的远程机器和图形程序启用。
+
+远端需要安装 `xauth`，SSH 服务需允许 `X11Forwarding`。保存 profile 后断开并新开 Launcher 终端，已存在的 shell 不会自动获得转发。终端会显示 X11 是否就绪或启动失败原因。可以执行 `echo "$DISPLAY"`，然后运行 `ase gui example.traj` 或 `xclock`。如果 SSH 服务接受请求但登录脚本清除了 `DISPLAY`，应修改脚本，不要手工猜显示号。若程序运行在另一台计算节点或容器内，还需为该环境配置显示与认证的路由。
+
+X11 启动失败时文本终端仍可使用；关闭终端会关闭其 X11 通道。本设置作用于 Launcher 自身的 SSH 终端，ChemSSH 另外创建的终端进程不会自动继承此转发。
+
 ## SFTP 与本地文件
 
 SFTP 页面与 ChemSSH 启动流程解耦，可以从 Launcher 打开，也可以访问：

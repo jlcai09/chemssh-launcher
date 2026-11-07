@@ -59,6 +59,7 @@ func (s *FileStore) Get(idOrName string) (Profile, error) {
 }
 
 func (s *FileStore) Save(profile Profile) error {
+	profile.X11 = profile.X11.Normalized()
 	if profile.ID == "" {
 		id, err := NewID()
 		if err != nil {
@@ -152,6 +153,7 @@ func (s *FileStore) load() (fileData, error) {
 	}
 	for i := range data.Profiles {
 		data.Profiles[i].LocalProxy = data.Profiles[i].LocalProxy.Normalized()
+		data.Profiles[i].X11 = data.Profiles[i].X11.Normalized()
 	}
 	return data, nil
 }

@@ -228,6 +228,11 @@ func (s *Server) handleShellOpen(w http.ResponseWriter, r *http.Request) {
 	} else if shell.ProxyURL != "" {
 		s.profileLog(profile.ID, "SSH terminal local network channel ready: "+shell.ProxyURL)
 	}
+	if shell.X11Error != "" {
+		s.profileLog(profile.ID, "warning: X11 forwarding unavailable: "+shell.X11Error)
+	} else if shell.X11Enabled {
+		s.profileLog(profile.ID, "SSH terminal X11 forwarding ready (launcher terminal only)")
+	}
 	session, err := s.shells.add(profile, shell)
 	if err != nil {
 		_ = shell.Close()
@@ -241,6 +246,8 @@ func (s *Server) handleShellOpen(w http.ResponseWriter, r *http.Request) {
 		"name":        profile.Name,
 		"proxy_url":   shell.ProxyURL,
 		"proxy_error": shell.ProxyError,
+		"x11_enabled": shell.X11Enabled,
+		"x11_error":   shell.X11Error,
 	}, nil)
 }
 

@@ -2,9 +2,11 @@ package sshclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"chemssh-launcher/internal/config"
 	"chemssh-launcher/internal/secret"
@@ -23,9 +25,12 @@ type InteractiveShell struct {
 	IntegrationError error
 	ProxyURL         string
 	ProxyError       string
+	X11Enabled       bool
+	X11Error         string
 
 	integration  *shellIntegration
 	proxyChannel *LocalProxyChannel
+	x11          *x11Forwarder
 	outputWriter *io.PipeWriter
 	writeMu      sync.Mutex
 	closeOnce    sync.Once
@@ -33,6 +38,18 @@ type InteractiveShell struct {
 }
 
 func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy HostKeyPolicy, cols, rows int) (*InteractiveShell, error) {
+	shell, err := startInteractiveShellOnce(profile, secrets, policy, cols, rows)
+	if errors.Is(err, errX11RequestTimeout) {
+		profile.X11.Enabled = false
+		shell, err = startInteractiveShellOnce(profile, secrets, policy, cols, rows)
+		if shell != nil {
+			shell.X11Error = "X11 forwarding timed out; reconnected this terminal without X11"
+		}
+	}
+	return shell, err
+}
+
+func startInteractiveShellOnce(profile config.Profile, secrets secret.Store, policy HostKeyPolicy, cols, rows int) (*InteractiveShell, error) {
 	client, err := DialWithHostKeyPolicy(profile, secrets, policy)
 	if err != nil {
 		return nil, err
@@ -57,7 +74,26 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 			proxyEnv = channel.Env
 		}
 	}
+	var x11 *x11Forwarder
+	var x11Enabled bool
+	var x11Error string
+	if profile.X11Active() {
+		local, localErr := prepareLocalXServer(profile.X11)
+		if localErr != nil {
+			x11Error = "X11 forwarding unavailable; terminal started without it: " + localErr.Error()
+		} else {
+			x11, localErr = newX11Forwarder(client, local)
+			if localErr != nil {
+				local.Close()
+				x11Error = "X11 forwarding unavailable; terminal started without it: " + localErr.Error()
+			}
+		}
+	}
 	fail := func(err error) (*InteractiveShell, error) {
+		_ = client.Close()
+		if x11 != nil {
+			x11.Close()
+		}
 		if proxyChannel != nil {
 			proxyChannel.Close()
 		}
@@ -84,6 +120,18 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 		if ptyErr := session.RequestPty("xterm-256color", rows, cols, modes); ptyErr != nil {
 			_ = session.Close()
 			return nil, nil, fmt.Errorf("request remote pty: %w", ptyErr)
+		}
+		if x11 != nil {
+			x11Err := x11.request(session)
+			x11Enabled = x11Err == nil
+			if x11Err != nil {
+				x11Error = "X11 forwarding unavailable; terminal started without it: " + x11Err.Error()
+				if errors.Is(x11Err, errX11RequestTimeout) {
+					return nil, nil, x11Err
+				}
+			} else {
+				x11Error = ""
+			}
 		}
 		stdin, stdinErr := session.StdinPipe()
 		if stdinErr != nil {
@@ -155,6 +203,8 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 		}
 	}
 
+	// Keep a rejected request's handler draining and denying late opens until
+	// this terminal transport closes; it must not close the working plain PTY.
 	shell := &InteractiveShell{
 		Client:           client,
 		Session:          session,
@@ -163,6 +213,9 @@ func StartInteractiveShell(profile config.Profile, secrets secret.Store, policy 
 		IntegrationError: integrationErr,
 		ProxyURL:         proxyURL,
 		ProxyError:       proxyErrText,
+		X11Enabled:       x11Enabled,
+		X11Error:         x11Error,
+		x11:              x11,
 		integration:      integration,
 		proxyChannel:     proxyChannel,
 		outputWriter:     outputWriter,
@@ -199,6 +252,20 @@ func (s *InteractiveShell) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		if s.outputWriter != nil {
+			_ = s.outputWriter.Close()
+		}
+		if s.Client != nil {
+			// Cleanup is best-effort, and must not hold terminal shutdown if
+			// the SSH peer ignores session/channel close packets.
+			timer := time.AfterFunc(3*time.Second, func() { _ = s.Client.Close() })
+			cleanupShellIntegration(s.Client, s.integration)
+			timer.Stop()
+			s.closeErr = s.Client.Close()
+		}
+		if s.x11 != nil {
+			s.x11.Close()
+		}
 		if s.proxyChannel != nil {
 			s.proxyChannel.Close()
 		}
@@ -208,13 +275,7 @@ func (s *InteractiveShell) Close() error {
 		if s.Session != nil {
 			_ = s.Session.Close()
 		}
-		if s.Client != nil {
-			cleanupShellIntegration(s.Client, s.integration)
-			s.closeErr = s.Client.Close()
-		}
-		if s.outputWriter != nil {
-			_ = s.outputWriter.Close()
-		}
+
 	})
 	return s.closeErr
 }

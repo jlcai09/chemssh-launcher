@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs } from '../src/nativeDrag.ts'
+import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs } from '../src/nativeDrag.ts'
 
 test('large ordinary transfer batches retain active native jobs and only trim finished history', () => {
   const native = { id: 'native', status: 'running', paused: true }
@@ -118,6 +118,51 @@ test('new file page restores background jobs and cancellation calls the top host
   assert.equal(cancelled, job.id)
   frame.dispatchEvent(new Event('pagehide'))
   assert.equal(host.listeners.get('chemssh-native-drag-job').size, 0)
+})
+
+test('native drag folders project into collapsible path groups with per-file byte progress', () => {
+  const job = {
+    id: 'grouped', session: 'session', paths: ['/data/compare', '/data/readme.txt'],
+    state: 'caching', revision: 8, createdAt: 10, loaded: 9, total: 20,
+    files: [
+      { path: '/data/compare', kind: 'folder', loaded: 0, total: 0, state: 'caching' },
+      { path: '/data/compare/S/is.xsd', kind: 'file', loaded: 7, total: 10, state: 'caching' },
+      { path: '/data/compare/P/is.xsd', kind: 'file', loaded: 10, total: 10, state: 'done' },
+      { path: '/data/readme.txt', kind: 'file', loaded: 9, total: 20, state: 'caching' }
+    ]
+  }
+  const roots = nativeDragTransferRoots(job)
+  assert.equal(roots.length, 2)
+  assert.equal(roots[0].group, true)
+  assert.equal(roots[0].name, 'compare')
+  assert.equal(roots[0].loaded, 17)
+  assert.equal(roots[0].total, 20)
+  assert.deepEqual(roots[0].children.map(file => file.name), ['S/is.xsd', 'P/is.xsd'])
+  assert.deepEqual(roots[0].children.map(file => [file.loaded, file.total]), [[7, 10], [10, 10]])
+  assert.equal(roots[1].group, false)
+  assert.equal(roots[1].path, '/data/readme.txt')
+})
+
+test('remote root folder children keep their full relative paths', () => {
+  const roots = nativeDragTransferRoots({
+    id: 'root', session: 'session', paths: ['/'], state: 'caching', revision: 1, createdAt: 1,
+    files: [{ path: '/', kind: 'folder', loaded: 0, total: 0, state: 'caching' }, { path: '/tmp/file.dat', kind: 'file', loaded: 1, total: 2, state: 'caching' }]
+  })
+  assert.equal(roots[0].group, true)
+  assert.equal(roots[0].children[0].name, 'tmp/file.dat')
+})
+
+test('transfer history retains a complete collapsible parent and child family', () => {
+  const rows = [
+    { id: 'new-parent', status: 'done' },
+    { id: 'new-child', parentID: 'new-parent', status: 'done' },
+    { id: 'active-parent', status: 'running' },
+    { id: 'active-child', parentID: 'active-parent', status: 'running' },
+    { id: 'old-parent', status: 'done' },
+    { id: 'old-child', parentID: 'old-parent', status: 'done' }
+  ]
+  const kept = retainTransferHistory(rows, 1)
+  assert.deepEqual(kept.map(row => row.id), ['new-parent', 'new-child', 'active-parent', 'active-child'])
 })
 
 class FakeWindow extends EventTarget {

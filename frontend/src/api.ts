@@ -20,6 +20,7 @@ export interface Profile {
   open_browser: boolean
   has_security_token: boolean
   local_proxy: LocalProxy
+  x11: X11Config
 }
 
 export interface LocalProxy {
@@ -27,6 +28,24 @@ export interface LocalProxy {
   host: string
   port: number
   no_proxy: string
+}
+
+export interface X11Config {
+  enabled: boolean
+  display: string
+  xauthority: string
+}
+
+export const defaultX11Config = (): X11Config => ({
+  enabled: false, display: '127.0.0.1:0', xauthority: ''
+})
+
+export interface ShellOpenResponse {
+  id: string
+  proxy_url?: string
+  proxy_error?: string
+  x11_enabled: boolean
+  x11_error: string
 }
 
 export interface FileEntry {

@@ -169,6 +169,18 @@ Drag files or folders from the OS file manager onto the terminal to upload them 
 
 The launcher also installs temporary `sz`/`rz` shims into the remote shell's `PATH`, mirroring ChemSSH's own terminal integration: `rz` opens the local file picker and uploads into the current directory, while `sz <files>` downloads those files through SFTP. The shims exit immediately after emitting a transfer marker, so they cannot leave the terminal waiting. If shell integration cannot be installed, native ZMODEM signatures are intercepted with Ctrl-C to keep the terminal usable. Temporary `vi`/`vim` wrappers resolve the real executable outside the shim directory and disable Vim's terminal capability queries, matching ChemSSH's workaround for editors that hang in browser terminals. Drag-and-drop and the SFTP page remain the recommended transfer paths.
 
+### X11 forwarding to a local X server
+
+Remote profiles can enable **X11 forwarding** for newly opened launcher SSH terminals. The Go SSH backend requests forwarding before starting the shell, validates incoming X11 authentication, and carries graphical traffic to the local X server. The remote SSH server sets `DISPLAY`; do not hardcode it in pre-start commands. Graphical windows open in VcXsrv or another local X server rather than inside the terminal canvas.
+
+Start VcXsrv or another local X server yourself before opening the launcher SSH terminal. The launcher only forwards to an already running X server; it does not start or manage one. Enable **X11 forwarding** and set the local TCP display to match your server (default `127.0.0.1:0`). The server must accept TCP connections from the launcher on that display.
+
+The **Xauthority file** is optional. Leave it empty to try `XAUTHORITY` / the default home authority file, or select the matching file if your server uses `MIT-MAGIC-COOKIE-1`. If your X server's existing access policy allows local connections without a cookie, forwarding can use that policy too. No cookie needs to be entered; the profile stores only the authority file path. Keep your existing server access controls and firewall restrictions appropriate for local access. This is trusted X11 forwarding: enable it only for remote machines and graphical programs you trust.
+
+The remote machine needs `xauth`, and its SSH server must permit `X11Forwarding`. After saving the profile, disconnect and open a new launcher terminal; old shells do not acquire forwarding retroactively. The terminal shows whether X11 is active or why it could not start. Check `echo "$DISPLAY"` and run `ase gui example.traj` or `xclock`. If the SSH server accepts the request but a login script clears `DISPLAY`, fix that script rather than assigning a display number manually. Programs launched on another compute node or inside a container need their own display and authentication routing.
+
+X11 startup failures leave the text terminal usable. Closing the terminal closes its X11 channels. These settings apply to the launcher's SSH terminals; ChemSSH's own separately created terminal processes do not inherit this forwarding automatically.
+
 ## SFTP And Local Files
 
 The SFTP page is independent from ChemSSH startup. It can be opened from the launcher and served at:

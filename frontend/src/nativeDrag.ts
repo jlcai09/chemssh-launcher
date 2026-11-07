@@ -23,6 +23,15 @@ declare global {
 
 export type NativeDragAction = 'pause' | 'resume' | 'cancel'
 
+export interface NativeDragFile {
+  path: string
+  kind: 'file' | 'folder'
+  loaded: number
+  total: number
+  state: 'caching' | 'done' | 'error'
+  error?: string
+}
+
 export interface NativeDragJob {
   id: string
   session: string
@@ -35,6 +44,7 @@ export interface NativeDragJob {
   total?: number
   paused?: boolean
   endedAt?: number
+  files?: NativeDragFile[]
 }
 
 const jobEvent = 'chemssh-native-drag-job'
@@ -95,9 +105,88 @@ export function nativeDragTransferUpdates(jobs: NativeDragJob[], revisions: Map<
   })
 }
 
-export function retainTransferHistory<T extends { status: string }>(items: T[], limit = 300): T[] {
-  let completed = 0
-  return items.filter(item => item.status === 'running' || ++completed <= limit)
+export interface NativeDragTransferDetail {
+  key: string
+  name: string
+  path: string
+  kind: 'file' | 'folder'
+  loaded: number
+  total: number
+  status: 'running' | 'done' | 'error'
+  error: string
+}
+
+export interface NativeDragTransferRoot extends NativeDragTransferDetail {
+  group: boolean
+  children: NativeDragTransferDetail[]
+}
+
+function normalizedRemotePath(path: string): string {
+  const normalized = path.replace(/\/+$/, '')
+  return normalized || '/'
+}
+
+function remotePrefix(path: string): string {
+  return path === '/' ? '/' : `${path}/`
+}
+
+function remoteBaseName(path: string): string {
+  const normalized = normalizedRemotePath(path)
+  return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized
+}
+
+export function nativeDragTransferRoots(job: NativeDragJob): NativeDragTransferRoot[] {
+  const files = job.files || []
+  const normalizedFiles = files.map(file => ({ ...file, normalizedPath: normalizedRemotePath(file.path) }))
+  const selected = job.paths.map(normalizedRemotePath)
+  const folderRoots = selected.filter(path => {
+    const exact = normalizedFiles.find(file => file.normalizedPath === path)
+    return exact?.kind === 'folder' || normalizedFiles.some(file => file.kind === 'file' && file.normalizedPath.startsWith(remotePrefix(path)))
+  })
+  const fileOwner = new Map<string, string>()
+  for (const file of normalizedFiles.filter(item => item.kind === 'file')) {
+    const owner = folderRoots.filter(root => file.normalizedPath.startsWith(remotePrefix(root))).sort((a, b) => b.length - a.length)[0]
+    if (owner) fileOwner.set(file.normalizedPath, owner)
+  }
+
+  return selected.map((path, index) => {
+    const rootFile = normalizedFiles.find(file => file.normalizedPath === path)
+    const group = folderRoots.includes(path)
+    const children = group
+      ? normalizedFiles.filter(file => file.kind === 'file' && fileOwner.get(file.normalizedPath) === path).map(file => ({
+          key: file.normalizedPath,
+          name: file.normalizedPath.slice(remotePrefix(path).length),
+          path: file.path,
+          kind: 'file' as const,
+          loaded: Math.max(0, file.loaded || 0),
+          total: Math.max(0, file.total || 0, file.loaded || 0),
+          status: file.state === 'done' ? 'done' as const : file.state === 'error' ? 'error' as const : 'running' as const,
+          error: file.error || ''
+        }))
+      : []
+    const aggregate = group
+      ? { loaded: children.reduce((sum, file) => sum + file.loaded, 0), total: children.reduce((sum, file) => sum + file.total, 0) }
+      : { loaded: rootFile?.loaded ?? (selected.length === 1 ? job.loaded || 0 : 0), total: rootFile?.total ?? (selected.length === 1 ? job.total || 0 : 0) }
+    const projected = nativeDragTransfer(job)
+    return {
+      key: `${index}:${path}`,
+      name: remoteBaseName(path),
+      path: job.paths[index],
+      kind: group ? 'folder' as const : 'file' as const,
+      loaded: aggregate.loaded,
+      total: Math.max(aggregate.total, aggregate.loaded),
+      status: rootFile?.state === 'error' && children.length === 0 ? 'error' as const : projected.status,
+      error: rootFile?.error || projected.error,
+      group,
+      children
+    }
+  })
+}
+
+export function retainTransferHistory<T extends { id: string; status: string; parentID?: string }>(items: T[], limit = 300): T[] {
+  const terminalRoots = items.filter(item => !item.parentID && item.status !== 'running').slice(0, limit)
+  const retained = new Set(terminalRoots.map(item => item.id))
+  return items.filter(item => item.status === 'running' || (item.parentID ? retained.has(item.parentID) : retained.has(item.id)))
 }
 
 export function nativeDragTransfer(job: NativeDragJob) {

@@ -195,6 +195,19 @@
             <p class="field-hint">{{ t('launcher.localProxyHint') }}</p>
           </section>
 
+          <section v-if="!isLocalProfile" class="form-section">
+            <div class="form-section-head">
+              <h3>{{ t('launcher.x11') }}</h3>
+              <el-checkbox v-model="current.x11.enabled">{{ t('launcher.x11Enable') }}</el-checkbox>
+            </div>
+            <div v-if="current.x11.enabled" class="form-grid">
+              <el-form-item :label="t('launcher.x11Display')"><el-input v-model="current.x11.display" placeholder="127.0.0.1:0" /></el-form-item>
+              <el-form-item :label="t('launcher.x11XAuthority')"><el-input v-model="current.x11.xauthority" :placeholder="t('launcher.x11XAuthorityHint')" /></el-form-item>
+            </div>
+            <p class="field-hint">{{ t('launcher.x11Hint') }}</p>
+            <p v-if="current.x11.enabled" class="field-hint">{{ t('launcher.x11ManualHint') }}</p>
+          </section>
+
           <section class="form-section">
             <h3>{{ isLocalProfile ? t('launcher.localCommands') : t('launcher.remoteCommands') }}</h3>
             <el-form-item :label="t('launcher.preStartCommands')">
@@ -412,7 +425,7 @@
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowRight, CaretRight, Check, Clock, Close, CloseBold, Connection, Cpu, Delete, DocumentCopy, Download, FolderOpened, Lock, Monitor, MoreFilled, Plus, Refresh, Search, Setting, SwitchButton, WarningFilled } from '@element-plus/icons-vue'
-import { api, postJSON, putJSON, type LocalProxy, type Profile } from '../api'
+import { api, defaultX11Config, postJSON, putJSON, type LocalProxy, type Profile } from '../api'
 import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import { t } from '../i18n'
@@ -438,7 +451,7 @@ interface SessionStatus {
 const defaults = ref<Profile | null>(null)
 const profiles = ref<Profile[]>([])
 const searchQuery = ref('')
-const current = reactive<Profile>({} as Profile)
+const current = reactive<Profile>({ x11: defaultX11Config() } as Profile)
 const draftOpen = ref(false)
 const draftSnapshot = ref<Partial<Profile>>({})
 const draftSecrets = ref({ password: '', passphrase: '', securityToken: '' })
@@ -617,6 +630,9 @@ const isDirty = computed(() => {
     if (left !== right) return true
   }
   if (localProxyChanged(source.local_proxy, target.local_proxy)) return true
+  const leftX11 = { ...defaultX11Config(), ...source.x11 }
+  const rightX11 = { ...defaultX11Config(), ...target.x11 }
+  if ((Object.keys(leftX11) as (keyof typeof leftX11)[]).some(key => leftX11[key] !== rightX11[key])) return true
   if (passwordInput.value) return true
   if (passphraseInput.value) return true
   if (securityTokenInput.value) return true
@@ -630,6 +646,7 @@ function applyProfile(profile: Partial<Profile>) {
     ...(defaults.value?.local_proxy || { enabled: false, host: '127.0.0.1', port: 7890, no_proxy: 'localhost,127.0.0.1,::1' }),
     ...(profile.local_proxy || {})
   }
+  current.x11 = { ...defaultX11Config(), ...defaults.value?.x11, ...profile.x11 }
   passwordInput.value = ''
   passphraseInput.value = ''
   securityTokenInput.value = ''
@@ -653,6 +670,7 @@ function setProfileKind(kind: string | number | boolean) {
     current.remote_host = ''
     current.remote_port = 0
     current.local_proxy.enabled = false
+    current.x11.enabled = false
     current.pre_start_commands = ''
     current.start_command = ''
     if (!current.name) current.name = t('launcher.kindLocal')
@@ -672,7 +690,7 @@ function profileSummary(profile: Partial<Profile>) {
 
 function snapshotDraft() {
   if (!draftOpen.value || current.id) return
-  draftSnapshot.value = { ...current, local_proxy: { ...current.local_proxy } }
+  draftSnapshot.value = { ...current, local_proxy: { ...current.local_proxy }, x11: { ...current.x11 } }
   draftSecrets.value = {
     password: passwordInput.value,
     passphrase: passphraseInput.value,

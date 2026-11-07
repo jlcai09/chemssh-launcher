@@ -46,6 +46,7 @@ type Profile struct {
 	OpenBrowser             bool       `json:"open_browser"`
 	HasSecurityToken        bool       `json:"has_security_token"`
 	LocalProxy              LocalProxy `json:"local_proxy"`
+	X11                     X11Config  `json:"x11"`
 }
 
 func NewProfileDefaults() Profile {
@@ -61,6 +62,7 @@ func NewProfileDefaults() Profile {
 		StartCommand: DefaultStartCommand,
 		OpenBrowser:  true,
 		LocalProxy:   DefaultLocalProxy(),
+		X11:          DefaultX11Config(),
 	}
 }
 
@@ -132,6 +134,11 @@ func (p Profile) Validate() error {
 	if p.LocalPort < 1 || p.LocalPort > 65535 {
 		return invalidProfile("local bind port must be between 1 and 65535")
 	}
+	if p.X11Active() {
+		if err := p.X11.Validate(); err != nil {
+			return err
+		}
+	}
 	if p.LocalProxy.Enabled {
 		if strings.TrimSpace(p.LocalProxy.Host) == "" {
 			return invalidProfile("local proxy host is required when the local network channel is enabled")
@@ -187,6 +194,11 @@ func (p Profile) IsLocal() bool {
 // the local proxy. Local profiles have no SSH transport to carry it.
 func (p Profile) ProxyActive() bool {
 	return p.LocalProxy.Enabled && !p.IsLocal()
+}
+
+// X11Active excludes local profiles, which have no SSH transport.
+func (p Profile) X11Active() bool {
+	return p.X11.Enabled && !p.IsLocal()
 }
 
 func (p Profile) BrowserURL() string {

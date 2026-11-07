@@ -657,7 +657,7 @@ import {
   type UploadEntry
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
-import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
+import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 
 type PaneName = 'left' | 'right'
 type TabKind = 'local' | 'remote'
@@ -813,6 +813,7 @@ interface TransferItem {
   // progress and cannot be paused, resumed or cancelled.
   serverSide?: boolean
   nativeDragID?: string
+  nativeDragOwnerID?: string
   nativeDragState?: NativeDragJob['state']
 }
 
@@ -962,25 +963,62 @@ function syncNativeDragTransfers(jobs: NativeDragJob[]) {
   nativeDragJobs.value = jobs
   let inserted = false
   for (const job of nativeDragTransferUpdates(jobs, nativeTransferRevisions, clearedNativeTransfers)) {
-    let item = transferItems.value.find(item => item.nativeDragID === job.id)
-    if (!item) {
-      const tab = paneNames.flatMap(pane => panes[pane].tabs).find(tab => tab.session === job.session)
-      const name = baseName(job.paths[0] || '')
-      item = {
-        id: `native-drag:${job.id}`,
-        name: job.paths.length > 1 ? `${name} (+${job.paths.length - 1})` : name,
-        kind: 'file',
+    const owned = transferItems.value.filter(item => item.nativeDragOwnerID === job.id || item.nativeDragID === job.id)
+    if (owned.length === 0) inserted = true
+    const expandedByID = new Map(owned.filter(item => item.isGroup).map(item => [item.id, Boolean(item.expanded)]))
+    const tab = paneNames.flatMap(pane => panes[pane].tabs).find(tab => tab.session === job.session)
+    const roots = nativeDragTransferRoots(job)
+    const rows: TransferItem[] = []
+    const projection = nativeDragTransfer(job)
+    for (const root of roots) {
+      const rootID = `native-drag:${job.id}:${encodeURIComponent(root.key)}`
+      const common = {
+        name: root.name,
+        kind: root.kind,
         sourceName: transferEndpointName(tab),
         targetName: t('sftp.local'),
-        sourcePath: job.paths.join('; '),
+        sourcePath: root.path,
         targetPath: t('sftp.dragDropTarget'),
-        ...nativeDragTransfer(job)
+        loaded: root.loaded,
+        total: root.total,
+        startedAt: job.createdAt,
+        endedAt: projection.endedAt,
+        status: root.status,
+        error: root.error || job.error || '',
+        paused: Boolean(job.paused),
+        cancelled: projection.cancelled,
+        nativeDragOwnerID: job.id
       }
-      transferItems.value.unshift(item)
-      inserted = true
-    } else {
-      Object.assign(item, nativeDragTransfer(job))
+      rows.push({
+        id: rootID,
+        ...common,
+        nativeDragID: job.id,
+        nativeDragState: job.state,
+        ...(root.group ? { isGroup: true, expanded: expandedByID.get(rootID) ?? false } : {})
+      })
+      for (const child of root.children) {
+        rows.push({
+          id: `${rootID}:file:${encodeURIComponent(child.key)}`,
+          name: child.name,
+          kind: child.kind,
+          sourceName: common.sourceName,
+          targetName: common.targetName,
+          sourcePath: child.path,
+          targetPath: common.targetPath,
+          loaded: child.loaded,
+          total: child.total,
+          startedAt: job.createdAt,
+          endedAt: child.status === 'running' ? null : (job.endedAt || Date.now()),
+          status: child.status,
+          error: child.error,
+          paused: Boolean(job.paused) && child.status === 'running',
+          cancelled: projection.cancelled,
+          parentID: rootID,
+          nativeDragOwnerID: job.id
+        })
+      }
     }
+    transferItems.value = [...rows, ...transferItems.value.filter(item => item.nativeDragOwnerID !== job.id && item.nativeDragID !== job.id)]
   }
   transferItems.value = retainTransferHistory(transferItems.value)
   if (inserted) transferPanelMode.value = 'transfers'
@@ -1361,7 +1399,7 @@ function touchTransferItems() {
 
 function syncTransferGroup(groupID: string) {
   const group = transferItems.value.find(item => item.id === groupID)
-  if (!group) return
+  if (!group || group.nativeDragID) return
   const children = transferItems.value.filter(item => item.parentID === groupID)
   if (children.length === 0) return
   group.total = children.reduce((sum, item) => sum + item.total, 0)
@@ -1441,7 +1479,7 @@ function clearTransferPanel() {
 function runningTransferCount() {
   // Native jobs are counted directly by the host close interceptor. Do not
   // duplicate them in the HTTP counter, which can outlive this page.
-  return transferItems.value.filter(item => item.status === 'running' && !item.isGroup && !item.nativeDragID).length
+  return transferItems.value.filter(item => item.status === 'running' && !item.isGroup && !item.nativeDragOwnerID && !item.nativeDragID).length
 }
 
 const runningCount = computed(() => runningTransferCount())
@@ -1456,7 +1494,7 @@ watch(transferPanelMode, mode => {
 })
 
 function handleBeforeUnload(event: BeforeUnloadEvent) {
-  const running = transferItems.value.filter(item => item.status === 'running' && !item.isGroup).length
+  const running = transferItems.value.filter(item => item.status === 'running' && !item.isGroup && !item.nativeDragOwnerID).length
   if (running <= 0) return
   const message = t('sftp.closeDuringTransfer', { count: running })
   event.preventDefault()
@@ -3106,14 +3144,21 @@ function transferControlTargets(item: TransferItem | null) {
   const roots = selectedTransferTargets(item)
   const targets: TransferItem[] = []
   for (const root of roots) {
-    if (!root.isGroup) {
+    if (root.nativeDragOwnerID && !root.nativeDragID) continue
+    if (!root.isGroup || root.nativeDragID) {
       targets.push(root)
       continue
     }
     targets.push(...transferItems.value.filter(child => child.parentID === root.id))
   }
   const seen = new Set<string>()
+  const seenNativeJobs = new Set<string>()
   return targets.filter(target => {
+    if (target.nativeDragOwnerID && !target.nativeDragID) return false
+    if (target.nativeDragID) {
+      if (seenNativeJobs.has(target.nativeDragID)) return false
+      seenNativeJobs.add(target.nativeDragID)
+    }
     if (seen.has(target.id)) return false
     seen.add(target.id)
     return true
@@ -3121,6 +3166,7 @@ function transferControlTargets(item: TransferItem | null) {
 }
 
 function transferCanControl(item: TransferItem) {
+  if (item.nativeDragOwnerID && !item.nativeDragID) return false
   return !item.serverSide && (!item.nativeDragState || nativeDragCanControl(item.nativeDragState))
 }
 
