@@ -165,6 +165,31 @@ test('transfer history retains a complete collapsible parent and child family', 
   assert.deepEqual(kept.map(row => row.id), ['new-parent', 'new-child', 'active-parent', 'active-child'])
 })
 
+test('finished children of a running group survive history trimming', () => {
+  const rows = [
+    { id: 'group', status: 'running' },
+    { id: 'done-child', parentID: 'group', status: 'done' },
+    { id: 'running-child', parentID: 'group', status: 'running' },
+    ...Array.from({ length: 350 }, (_, i) => ({ id: `history-${i}`, status: 'done' }))
+  ]
+  const kept = retainTransferHistory(rows, 300)
+  assert.ok(kept.some(row => row.id === 'done-child'))
+  assert.ok(kept.some(row => row.id === 'running-child'))
+  assert.ok(kept.some(row => row.id === 'group'))
+})
+
+test('finished children survive while a running group awaits further discovery', () => {
+  const rows = [
+    { id: 'group', status: 'running' },
+    { id: 'done-child', parentID: 'group', status: 'done' },
+    ...Array.from({ length: 350 }, (_, i) => ({ id: `history-${i}`, status: 'done' }))
+  ]
+  const kept = retainTransferHistory(rows, 300)
+  assert.ok(kept.some(row => row.id === 'done-child'))
+  assert.ok(kept.some(row => row.id === 'group'))
+  assert.equal(kept.filter(row => !row.parentID && row.status === 'done').length, 300)
+})
+
 class FakeWindow extends EventTarget {
   location = { origin: 'http://127.0.0.1:8888' }
   top = this

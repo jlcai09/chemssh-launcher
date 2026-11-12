@@ -16,7 +16,7 @@ const (
 	FormatTar    = "tar"
 )
 
-// ArchivePrefix is the base name of generated archives.
+// ArchivePrefix is the base name used when several entries are bundled.
 const ArchivePrefix = "archive"
 
 // archiveNewStem is appended while the candidate name exists.
@@ -89,8 +89,8 @@ func TemporaryTarName(token string) string {
 	return ".chemssh-archive-" + token + ".tar"
 }
 
-// CompressPlan creates `archive` from `names`, which are relative to the working
-// directory. zstd is driven directly instead of through `tar -I`, because that
+// CompressPlan creates the named archive from `names`, which are relative to the
+// working directory. zstd is driven directly instead of through `tar -I`, because that
 // flag behaves differently between GNU tar and bsdtar; the two-step form works
 // with both.
 func CompressPlan(t Tools, format, archiveName string, names []string, token string) (Plan, error) {
@@ -194,16 +194,26 @@ func ExtractPlan(name string, t Tools, archiveArg, token string) (Plan, bool) {
 	return Plan{Steps: []Step{{Argv: argv}}}, true
 }
 
-// NextArchiveName returns `archive<suffix>`, appending `_new` while the name is
+// ArchiveStem is the base name of a generated archive. Compressing a single
+// entry keeps its original name so the result is recognizable; bundling several
+// entries falls back to the shared `archive` placeholder.
+func ArchiveStem(names []string) string {
+	if len(names) == 1 && names[0] != "" {
+		return names[0]
+	}
+	return ArchivePrefix
+}
+
+// NextArchiveName returns `<stem><suffix>`, appending `_new` while the name is
 // taken, so an existing archive is never overwritten.
-func NextArchiveName(format string, taken func(string) bool) (string, error) {
+func NextArchiveName(format string, names []string, taken func(string) bool) (string, error) {
 	suffix := "." + format
 	switch format {
 	case FormatTarZst, FormatTarGz, FormatTarXz, FormatTar:
 	default:
 		return "", fmt.Errorf("unknown archive format %q", format)
 	}
-	stem := ArchivePrefix
+	stem := ArchiveStem(names)
 	for taken(stem + suffix) {
 		stem += archiveNewStem
 	}

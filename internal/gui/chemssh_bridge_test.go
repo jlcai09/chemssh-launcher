@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -319,5 +320,28 @@ func TestProfileProxyPathTargetsMatchingSession(t *testing.T) {
 	}
 	if target := chemsshProxyTargetPath(req.URL.Path, session); target != "/assets/app.js" {
 		t.Fatalf("proxy target path = %q, want /assets/app.js", target)
+	}
+}
+
+func TestProfileProxyPathHandlesEscapedProfileSlug(t *testing.T) {
+	profile := config.NewProfileDefaults()
+	profile.ID = "local"
+	profile.Name = "Local ChemSSH"
+	session := &activeSession{id: profile.ID, name: profile.Name, profile: profile, forwarding: true}
+
+	req := httptest.NewRequest(http.MethodGet, "/Local%20ChemSSH/chemssh/assets/app.js", nil)
+	if req.URL.Path != "/Local ChemSSH/chemssh/assets/app.js" {
+		t.Fatalf("request path = %q, want decoded space", req.URL.Path)
+	}
+	if target := chemsshProxyTargetPath(req.URL.Path, session); target != "/assets/app.js" {
+		t.Fatalf("proxy target path = %q, want /assets/app.js", target)
+	}
+
+	target, err := url.Parse("http://127.0.0.1:8879")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rewriteChemSSHLocationHeader("/assets/app.js", target, session); got != "/Local%20ChemSSH/chemssh/assets/app.js" {
+		t.Fatalf("rewritten location = %q, want profile-scoped URL", got)
 	}
 }

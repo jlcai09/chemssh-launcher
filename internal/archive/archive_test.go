@@ -26,27 +26,64 @@ func TestFormatsFollowInstalledTools(t *testing.T) {
 	}
 }
 
+func TestArchiveStemUsesOriginalNameForSingleSelection(t *testing.T) {
+	cases := []struct {
+		names []string
+		want  string
+	}{
+		{[]string{"notes.txt"}, "notes.txt"},
+		{[]string{"data"}, "data"},
+		{[]string{"a.txt", "b.txt"}, ArchivePrefix},
+		{nil, ArchivePrefix},
+	}
+	for _, tc := range cases {
+		if got := ArchiveStem(tc.names); got != tc.want {
+			t.Fatalf("ArchiveStem(%v) = %q, want %q", tc.names, got, tc.want)
+		}
+	}
+}
+
 func TestNextArchiveNameAppendsNewWhileTaken(t *testing.T) {
 	taken := map[string]bool{}
-	name, err := NextArchiveName(FormatTarGz, func(candidate string) bool { return taken[candidate] })
+	selection := []string{"a.txt", "sub"}
+	name, err := NextArchiveName(FormatTarGz, selection, func(candidate string) bool { return taken[candidate] })
 	if err != nil || name != "archive.tar.gz" {
 		t.Fatalf("first name = %q, %v", name, err)
 	}
 
 	taken["archive.tar.gz"] = true
-	name, _ = NextArchiveName(FormatTarGz, func(candidate string) bool { return taken[candidate] })
+	name, _ = NextArchiveName(FormatTarGz, selection, func(candidate string) bool { return taken[candidate] })
 	if name != "archive_new.tar.gz" {
 		t.Fatalf("second name = %q", name)
 	}
 
 	taken["archive_new.tar.gz"] = true
-	name, _ = NextArchiveName(FormatTarGz, func(candidate string) bool { return taken[candidate] })
+	name, _ = NextArchiveName(FormatTarGz, selection, func(candidate string) bool { return taken[candidate] })
 	if name != "archive_new_new.tar.gz" {
 		t.Fatalf("third name = %q", name)
 	}
 
-	if _, err := NextArchiveName("zip", func(string) bool { return false }); err == nil {
+	if _, err := NextArchiveName("zip", selection, func(string) bool { return false }); err == nil {
 		t.Fatal("unknown format must fail")
+	}
+}
+
+func TestNextArchiveNameUsesOriginalNameForSingleSelection(t *testing.T) {
+	taken := map[string]bool{}
+	name, err := NextArchiveName(FormatTarZst, []string{"notes.txt"}, func(candidate string) bool { return taken[candidate] })
+	if err != nil || name != "notes.txt.tar.zst" {
+		t.Fatalf("first name = %q, %v", name, err)
+	}
+
+	taken["notes.txt.tar.zst"] = true
+	name, _ = NextArchiveName(FormatTarZst, []string{"notes.txt"}, func(candidate string) bool { return taken[candidate] })
+	if name != "notes.txt_new.tar.zst" {
+		t.Fatalf("collision name = %q", name)
+	}
+
+	name, _ = NextArchiveName(FormatTar, []string{"data"}, func(string) bool { return false })
+	if name != "data.tar" {
+		t.Fatalf("folder name = %q", name)
 	}
 }
 

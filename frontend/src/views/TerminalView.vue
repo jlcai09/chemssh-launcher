@@ -426,6 +426,8 @@ import {
   type UploadEntry
 } from '../uploadEntries'
 import { t } from '../i18n'
+import { onProfilesChanged } from '../profileEvents'
+import { isTerminalDirectory, terminalUploadDirectory } from '../terminalDirectory'
 
 const props = defineProps<{ active: boolean }>()
 
@@ -519,6 +521,8 @@ interface TerminalRuntime {
 
 const profiles = ref<Profile[]>([])
 const refreshingProfiles = ref(false)
+let profileSyncSeq = 0
+let unsubscribeProfileEvents: (() => void) | null = null
 const tabs = ref<TerminalTab[]>([])
 const activeTabID = ref('')
 const selectedProfileID = ref('')
@@ -585,10 +589,9 @@ const canReconnect = computed(() => {
   if (tab.status === 'connected' || tab.status === 'connecting') return false
   return tab.wasConnected || tab.status === 'error'
 })
-const currentDir = computed(() => activeTab.value?.cwd || '')
 const uploading = computed(() => activeTab.value?.uploading || false)
 const uploadPercent = computed(() => activeTab.value?.uploadPercent || 0)
-const uploadTargetLabel = computed(() => currentDir.value.trim() || t('terminal.remoteHome'))
+const uploadTargetLabel = computed(() => t('terminal.currentDirectory'))
 const sftpPanelOpen = computed(() => Boolean(activeTab.value?.sftp.open))
 const sftpPanelAvailable = computed(() => activeTab.value?.status === 'connected')
 const sftpSyncOn = computed(() => Boolean(activeTab.value?.sftp.open && activeTab.value?.sftp.sync))
@@ -1199,8 +1202,8 @@ function resetStreamState(tab: TerminalTab) {
 }
 
 function setCurrentDir(tab: TerminalTab, value: string) {
-  const path = value.replace(/\r/g, '').trim()
-  if (!path || /[\r\n\0]/.test(path)) return
+  const path = value
+  if (!isTerminalDirectory(path)) return
   const changed = tab.cwd !== path
   tab.cwd = path
   if (!changed) return
@@ -1475,6 +1478,23 @@ async function loadProfiles() {
     profiles.value = await api<Profile[]>('/api/profiles')
   } catch {
     profiles.value = []
+  }
+}
+
+// A save on the launcher page broadcasts to every open page, so the sidebar
+// picks up renamed, added or removed servers without the refresh button. A
+// failed background refresh keeps the current list instead of blanking it.
+async function syncProfilesFromLauncher() {
+  const seq = ++profileSyncSeq
+  try {
+    const next = await api<Profile[]>('/api/profiles')
+    if (seq !== profileSyncSeq || viewDisposed) return
+    profiles.value = next
+    if (selectedProfileID.value && !next.some(profile => profile.id === selectedProfileID.value)) {
+      selectedProfileID.value = ''
+    }
+  } catch {
+    // Leave the last known list in place; the manual refresh reports errors.
   }
 }
 
@@ -1917,13 +1937,23 @@ function uploadForm(form: FormData, onProgress?: (loaded: number) => void) {
   })
 }
 
-async function resolveUploadDir(tab: TerminalTab, sessionID: string, target?: string | null) {
-  const raw = (target ?? tab.cwd).trim().replace(/[\r\n\0]/g, '')
-  if (raw && raw !== '.') return raw.replace(/\/+$/, '') || '/'
-  const resolved = await api<{ path?: string }>(
-    `/api/sftp/realpath?session=${encodeURIComponent(sessionID)}&path=.`
-  ).catch(() => null)
-  return resolved?.path?.trim() || '.'
+async function resolveUploadDir(tab: TerminalTab, target?: string | null) {
+  if (target != null) {
+    if (isTerminalDirectory(target)) return target
+    throw new Error(t('terminal.uploadDirectoryUnknown'))
+  }
+  const runtime = runtimeFor(tab)
+  const shellID = runtime?.sessionID
+  if (!shellID) throw new Error(t('terminal.connectFirst'))
+  const path = await terminalUploadDirectory(tab.cwd, () => api<{ path?: string }>(
+    `/api/session/shell/cwd?id=${encodeURIComponent(shellID)}`
+  ), t('terminal.uploadDirectoryUnknown'))
+  // A reconnect must not upload a stale drop through the replacement session.
+  if (runtimeFor(tab) !== runtime || runtime.sessionID !== shellID || tab.status !== 'connected') {
+    throw new Error(t('terminal.connectFirst'))
+  }
+  setCurrentDir(tab, path)
+  return path
 }
 
 async function resolveUploadConflicts(sessionID: string, targetDir: string, entries: UploadEntry[]) {
@@ -1968,6 +1998,7 @@ async function uploadEntriesToDir(tab: TerminalTab, entries: UploadEntry[], targ
   }
   const runtime = runtimeFor(tab)
   if (!runtime) return
+  const shellID = runtime.sessionID
   tab.uploading = true
   tab.uploadPercent = 0
   runtime.sftpReleasePending = false
@@ -1983,10 +2014,13 @@ async function uploadEntriesToDir(tab: TerminalTab, entries: UploadEntry[], targ
       ElMessage.warning(t('terminal.noDroppedFiles'))
       return
     }
+    const targetDir = await resolveUploadDir(tab, target)
     const sessionID = await connectSftp(tab)
-    const targetDir = await resolveUploadDir(tab, sessionID, target)
     const accepted = await resolveUploadConflicts(sessionID, targetDir, normalized.entries)
     if (!accepted.length) return
+    if (runtimeFor(tab) !== runtime || runtime.sessionID !== shellID || tab.status !== 'connected') {
+      throw new Error(t('terminal.connectFirst'))
+    }
     ElMessage.info(t('terminal.uploadStarted', { count: accepted.length, dir: targetDir }))
     const totalBytes = accepted.reduce((sum, entry) => sum + entry.file.size, 0) || 1
     let sentBytes = 0
@@ -2026,8 +2060,17 @@ async function uploadEntriesToDir(tab: TerminalTab, entries: UploadEntry[], targ
 
 async function uploadDroppedFiles(tab: TerminalTab, event: DragEvent) {
   try {
-    const entries = await collectDropUploadEntries(event)
-    await uploadEntriesToDir(tab, entries, null)
+    // Capture both the owning shell and its directory before directory traversal
+    // or SFTP connection setup yields to another tab or a later `cd`.
+    const shellID = runtimeFor(tab)?.sessionID
+    const [entries, targetDir] = await Promise.all([
+      collectDropUploadEntries(event),
+      resolveUploadDir(tab)
+    ])
+    if (tab.status !== 'connected' || runtimeFor(tab)?.sessionID !== shellID) {
+      throw new Error(t('terminal.connectFirst'))
+    }
+    await uploadEntriesToDir(tab, entries, targetDir)
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     if (!runtimeFor(tab)) return
@@ -2525,6 +2568,9 @@ onMounted(async () => {
   window.addEventListener('scroll', handleProfileMenuDismiss, true)
   window.addEventListener('keydown', handleTerminalShortcut, true)
   window.addEventListener('message', handleHostMessage)
+  unsubscribeProfileEvents = onProfilesChanged(() => {
+    void syncProfilesFromLauncher()
+  })
   openSyncPollTimer = window.setInterval(() => {
     void pollOpenSyncEvents()
   }, OPEN_SYNC_POLL_INTERVAL)
@@ -2552,6 +2598,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', handleProfileMenuDismiss, true)
   window.removeEventListener('keydown', handleTerminalShortcut, true)
   window.removeEventListener('message', handleHostMessage)
+  unsubscribeProfileEvents?.()
+  unsubscribeProfileEvents = null
   for (const tab of [...tabs.value]) {
     void shutdownTab(tab)
   }

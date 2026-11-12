@@ -314,7 +314,7 @@ func (s *Server) handleSFTPCompress(w http.ResponseWriter, r *http.Request) {
 	for _, entry := range listing.Entries {
 		taken[entry.Name] = true
 	}
-	archiveName, err := archive.NextArchiveName(req.Format, func(name string) bool { return taken[name] })
+	archiveName, err := archive.NextArchiveName(req.Format, names, func(name string) bool { return taken[name] })
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -402,7 +402,7 @@ func (s *Server) handleLocalCompress(w http.ResponseWriter, r *http.Request) {
 			taken[entry.Name()] = true
 		}
 	}
-	archiveName, err := archive.NextArchiveName(req.Format, func(name string) bool { return taken[name] })
+	archiveName, err := archive.NextArchiveName(req.Format, names, func(name string) bool { return taken[name] })
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

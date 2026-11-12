@@ -35,13 +35,18 @@ func newTestConnectionPool() *connectionPool {
 // code that closes a connection has a real *sftp.Client to work with.
 func newTestSFTPClient(t *testing.T) *sftp.Client {
 	t.Helper()
+	return newTestSFTPClientWithOptions(t)
+}
+
+func newTestSFTPClientWithOptions(t *testing.T, options ...sftp.ClientOption) *sftp.Client {
+	t.Helper()
 	local, remote := net.Pipe()
 	server, err := sftp.NewServer(remote)
 	if err != nil {
 		t.Fatalf("new test SFTP server: %v", err)
 	}
 	go func() { _ = server.Serve() }()
-	client, err := sftp.NewClientPipe(local, local)
+	client, err := sftp.NewClientPipe(local, local, options...)
 	if err != nil {
 		t.Fatalf("new test SFTP client: %v", err)
 	}

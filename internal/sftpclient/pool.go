@@ -26,6 +26,11 @@ const (
 	connProbeInterval   = 5 * time.Second  // 同一连接两次探测的最小间隔
 	channelSetupTimeout = 5 * time.Second  // 打开 SFTP channel 的超时
 	reconnectCooldown   = 2 * time.Second  // 两次重连尝试的最小间隔，避免断网时反复拨号
+
+	// writeWindow is how many 32 KB writes one file may keep in flight. Without
+	// pipelining a single stream is limited to one packet per round trip, which
+	// caps throughput at ~32KB/RTT no matter how fast the link is.
+	writeWindow = 32
 )
 
 var (
@@ -208,7 +213,10 @@ func openSFTPClient(sshClient *ssh.Client) (*sftp.Client, error) {
 	}
 	done := make(chan openResult, 1)
 	go func() {
-		client, err := sftp.NewClient(sshClient)
+		client, err := sftp.NewClient(sshClient,
+			sftp.UseConcurrentWrites(true),
+			sftp.MaxConcurrentRequestsPerFile(writeWindow),
+		)
 		done <- openResult{client: client, err: err}
 	}()
 

@@ -317,6 +317,7 @@ type progressReader struct {
 	id    string
 	store *transferProgressStore
 	src   io.Reader
+	size  int64
 }
 
 func (r progressReader) Read(p []byte) (int, error) {
@@ -326,6 +327,13 @@ func (r progressReader) Read(p []byte) (int, error) {
 	n, err := r.src.Read(p)
 	r.store.add(r.id, n)
 	return n, err
+}
+
+// Size reports the declared length so the SFTP client can pipeline concurrent
+// writes; a plain io.Reader without it is written one 32 KB packet per round
+// trip.
+func (r progressReader) Size() int64 {
+	return r.size
 }
 
 func (s *Server) handleTransferProgress(w http.ResponseWriter, r *http.Request) {
@@ -370,7 +378,7 @@ func (s *Server) progressReader(id string, total int64, src io.Reader) io.Reader
 		return src
 	}
 	s.transfers.start(id, total)
-	return progressReader{id: id, store: s.transfers, src: src}
+	return progressReader{id: id, store: s.transfers, src: src, size: total}
 }
 
 func (s *Server) finishProgress(id string, err error) {

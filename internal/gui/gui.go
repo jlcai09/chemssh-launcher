@@ -316,6 +316,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/shell/open", s.apiHandler(gzipHandler(s.handleShellOpen)))
 	s.mux.HandleFunc("/api/session/shell/output", s.handleShellOutput)
 	s.mux.HandleFunc("/api/session/shell/input", s.apiHandler(s.handleShellInput))
+	s.mux.HandleFunc("/api/session/shell/cwd", s.apiHandler(gzipHandler(s.handleShellCwd)))
 	s.mux.HandleFunc("/api/session/shell/resize", s.apiHandler(gzipHandler(s.handleShellResize)))
 	s.mux.HandleFunc("/api/session/shell/close", s.apiHandler(gzipHandler(s.handleShellClose)))
 	s.mux.HandleFunc("/api/logs", s.apiHandler(s.handleLogs))              // No gzip: small payload, high frequency
@@ -328,6 +329,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sftp/list", s.apiHandler(gzipHandler(s.handleSFTPList)))
 	s.mux.HandleFunc("/api/sftp/realpath", s.apiHandler(gzipHandler(s.handleSFTPRealPath)))
 	s.mux.HandleFunc("/api/sftp/mkdir", s.apiHandler(gzipHandler(s.handleSFTPMkdir)))
+	s.mux.HandleFunc("/api/sftp/mkdirs", s.apiHandler(gzipHandler(s.handleSFTPMkdirs)))
 	s.mux.HandleFunc("/api/sftp/create-file", s.apiHandler(gzipHandler(s.handleSFTPCreateFile)))
 	s.mux.HandleFunc("/api/sftp/rename", s.apiHandler(gzipHandler(s.handleSFTPRename)))
 	s.mux.HandleFunc("/api/sftp/delete", s.apiHandler(gzipHandler(s.handleSFTPDelete)))
@@ -1742,7 +1744,10 @@ func isTerminalWebSocketPath(path string) bool {
 
 func chemsshProxyTargetPath(path string, session *activeSession) string {
 	if session != nil {
-		profilePrefix := "/" + url.PathEscape(profileProxySlug(session.profile))
+		// path is r.URL.Path, which net/http has already decoded, so compare it
+		// against the unescaped slug. Escaping the slug again would break
+		// profile names containing spaces or non-ASCII characters.
+		profilePrefix := "/" + profileProxySlug(session.profile)
 		chemSSHPrefix := profilePrefix + "/chemssh"
 		if path == chemSSHPrefix {
 			return "/"
@@ -1792,6 +1797,10 @@ func (s *Server) newChemSSHReverseProxy(target *url.URL, session *activeSession)
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusBadGateway, fmt.Errorf("proxy ChemSSH request failed: %w", err))
 	}
+	assetPrefix := ""
+	if session != nil {
+		assetPrefix = s.profileProxyPrefix(session.profile)
+	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		location := resp.Header.Get("Location")
 		if location != "" {
@@ -1806,7 +1815,9 @@ func (s *Server) newChemSSHReverseProxy(target *url.URL, session *activeSession)
 		//    bridge endpoints whose writes require the per-launch token.
 		// Also refresh the launcher API token cookie so the shim reads the
 		// current value even before any launcher API request was made.
-		injectChemSSHClientScripts(resp, s.apiToken)
+		// Root-absolute /assets/ URLs are scoped to this profile as well; see
+		// rewriteChemSSHAssetURLs for why.
+		injectChemSSHClientScripts(resp, s.apiToken, assetPrefix)
 		return nil
 	}
 	return proxy
@@ -1854,7 +1865,7 @@ return originalFetch.call(this,input,init);
 // refreshes the launcher API token cookie on the document so the shim can read
 // the current per-launch token even before the first launcher API response
 // arrives (apiHandler sets the same cookie on every API request).
-func injectChemSSHClientScripts(resp *http.Response, apiToken string) {
+func injectChemSSHClientScripts(resp *http.Response, apiToken string, assetPrefix string) {
 	if !isChemSSHHTMLResponse(resp) {
 		return
 	}
@@ -1866,7 +1877,7 @@ func injectChemSSHClientScripts(resp *http.Response, apiToken string) {
 			SameSite: http.SameSiteStrictMode,
 		}).String())
 	}
-	injectChemSSHHTML(resp, chemsshImportReloaderScript+chemsshLauncherTokenScript)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript+chemsshLauncherTokenScript, assetPrefix)
 }
 
 // isChemSSHHTMLResponse reports whether the proxied response is an HTML
@@ -1878,13 +1889,13 @@ func isChemSSHHTMLResponse(resp *http.Response) bool {
 	return strings.Contains(resp.Header.Get("Content-Type"), "text/html")
 }
 
-// injectChemSSHHTML inserts snippet right after the opening <head> tag of an
-// HTML response. Non-HTML responses, compressed encodings we cannot safely
-// decompress, and responses without a readable body are passed through
-// untouched. It recomputes Content-Length and strips Content-Encoding so the
-// browser does not see a truncated body (which would itself look like a failed
-// module load).
-func injectChemSSHHTML(resp *http.Response, snippet string) {
+// injectChemSSHHTML scopes root-absolute asset URLs and inserts snippet right
+// after the opening <head> tag of an HTML response. Non-HTML responses,
+// compressed encodings we cannot safely decompress, and responses without a
+// readable body are passed through untouched. It recomputes Content-Length and
+// strips Content-Encoding so the browser does not see a truncated body (which
+// would itself look like a failed module load).
+func injectChemSSHHTML(resp *http.Response, snippet string, assetPrefix string) {
 	if !isChemSSHHTMLResponse(resp) {
 		return
 	}
@@ -1902,12 +1913,29 @@ func injectChemSSHHTML(resp *http.Response, snippet string) {
 		return
 	}
 
-	injected := injectAfterHeadOpen(body, snippet)
+	injected := injectAfterHeadOpen(rewriteChemSSHAssetURLs(body, assetPrefix), snippet)
 	resp.Body = io.NopCloser(bytes.NewReader(injected))
 	resp.ContentLength = int64(len(injected))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(injected)))
 	resp.Header.Del("Content-Encoding")
 	resp.Header.Del("Transfer-Encoding")
+}
+
+// rewriteChemSSHAssetURLs prefixes root-absolute /assets/ references with the
+// profile-scoped proxy path. Vite emits /assets/... URLs, and once the entry
+// module is fetched from there every relative import — lazy route chunks
+// included — resolves under /assets/ as well. Such requests carry no profile
+// identity: the launcher excludes "assets" as a first path segment, module
+// fetches use the importing chunk as Referer, and there is no profile_id query.
+// They would fall back to whichever profile is current and can load chunks from
+// the wrong backend (404 after a build change). Keeping the module graph under
+// /<profile>/chemssh/assets/ makes routing deterministic by path.
+func rewriteChemSSHAssetURLs(body []byte, assetPrefix string) []byte {
+	if assetPrefix == "" {
+		return body
+	}
+	body = bytes.ReplaceAll(body, []byte(`"/assets/`), []byte(`"`+assetPrefix+`/assets/`))
+	return bytes.ReplaceAll(body, []byte(`'/assets/`), []byte(`'`+assetPrefix+`/assets/`))
 }
 
 // decodeBody reverses common HTTP content encodings so the HTML can be
@@ -1966,7 +1994,8 @@ func rewriteChemSSHLocationHeader(location string, target *url.URL, session *act
 	}
 	prefix := "/chemssh"
 	if session != nil {
-		prefix = "/" + url.PathEscape(profileProxySlug(session.profile)) + "/chemssh"
+		// parsed.Path is decoded; URL.String() escapes it exactly once on output.
+		prefix = "/" + profileProxySlug(session.profile) + "/chemssh"
 	}
 	if parsed.Path == "/" {
 		parsed.Path = prefix

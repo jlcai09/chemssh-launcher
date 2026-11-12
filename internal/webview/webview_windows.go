@@ -41,6 +41,19 @@ func Open(ctx context.Context, opts Options) error {
 	if opts.URL == "" {
 		return errors.New("webview url is required")
 	}
+	if opts.DataPath != "" {
+		killed, err := cleanupStaleWebViewProcesses(opts.DataPath)
+		if err != nil {
+			log.Printf("warning: could not clean up stale WebView2 processes: %v", err)
+		}
+		if len(killed) > 0 {
+			message := fmt.Sprintf("removed %d stale WebView2 process(es) holding the launcher profile: %v", len(killed), killed)
+			log.Print(message)
+			if opts.Report != nil {
+				opts.Report(message)
+			}
+		}
+	}
 	// Apply Chromium flags to reduce memory overhead from unnecessary
 	// features while keeping GPU acceleration intact. Must run before
 	// NewWithOptions because the WebView2 loader reads the env var at
@@ -49,6 +62,17 @@ func Open(ctx context.Context, opts Options) error {
 	dpiOnce.Do(enableDPIAwareness)
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+
+	readyChannel := make(chan struct{})
+	var readyOnce sync.Once
+	markReady := func() {
+		readyOnce.Do(func() {
+			close(readyChannel)
+		})
+	}
+	startupStop := make(chan struct{})
+	defer close(startupStop)
+	go watchWebViewStartup(readyChannel, startupStop)
 
 	title := opts.Title
 	if title == "" {
@@ -135,6 +159,10 @@ func Open(ctx context.Context, opts Options) error {
 		reveal()
 	}); err != nil {
 		log.Printf("warning: could not bind WebView2 reveal hook: %v", err)
+	}
+	if err := w.Bind("__chemsshAppReady", markReady); err != nil {
+		log.Printf("warning: could not bind WebView2 startup-ready hook: %v", err)
+		markReady()
 	}
 
 	if opts.CopyOnCtrlShiftC || opts.DisableDevTools {

@@ -186,7 +186,9 @@ export function nativeDragTransferRoots(job: NativeDragJob): NativeDragTransferR
 export function retainTransferHistory<T extends { id: string; status: string; parentID?: string }>(items: T[], limit = 300): T[] {
   const terminalRoots = items.filter(item => !item.parentID && item.status !== 'running').slice(0, limit)
   const retained = new Set(terminalRoots.map(item => item.id))
-  return items.filter(item => item.status === 'running' || (item.parentID ? retained.has(item.parentID) : retained.has(item.id)))
+  // Scanning groups can have no running children between directory listings.
+  const activeParents = new Set(items.filter(item => item.status === 'running').map(item => item.parentID || item.id))
+  return items.filter(item => item.status === 'running' || (item.parentID ? retained.has(item.parentID) || activeParents.has(item.parentID) : retained.has(item.id)))
 }
 
 export function nativeDragTransfer(job: NativeDragJob) {

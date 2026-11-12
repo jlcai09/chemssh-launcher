@@ -17,20 +17,7 @@ Windows 常见可执行文件：
 
 WebView2 版本要求运行机器安装 Microsoft Edge WebView2 Runtime。Windows 10/11 通常已经预装。
 
-<details>
-<summary>源码构建（开发者）</summary>
-
-源码构建需要：
-
-- Go 1.23 或更新版本。
-- Node.js 和 npm，用于 Vue 前端构建。
-- 可选：`go-winres`，用于稳定的离线 Windows 图标和版本资源生成。
-
-```bash
-go install github.com/tc-hib/go-winres@v0.3.3
-```
-
-</details>
+[源码构建（开发者）](#development-guide)：环境准备、依赖安装、编译命令及常见错误请直接查看后面的开发指南。
 
 ## 启动
 
@@ -425,61 +412,118 @@ idea/                     本地开发笔记（已在 .gitignore 中，不随仓
 
 </details>
 
-<details>
-<summary>开发指南（开发者）</summary>
+<a id="development-guide"></a>
 
-首次安装前端依赖：
+## 开发指南（开发者）
 
-```bash
-cd frontend
-npm install
+### 构建前准备
+
+- 安装 Go 1.23 或更新版本，以及 Node.js（建议 22 或更新版本）和随附的 npm，并将它们加入 `PATH`。安装后重新打开终端。
+- 获取完整仓库，在包含 `go.mod`、`frontend/` 和 `tools/` 的仓库根目录执行下列命令。
+- 首次安装依赖需要能访问 Go 模块代理和 npm registry。构建需要 Node.js/npm，但生成的可执行文件运行时不需要它们。
+- WebView2 是 Windows 专用版本，运行它需要 Microsoft Edge WebView2 Runtime；普通浏览器版不需要该 Runtime。
+
+### Windows / PowerShell：首次完整构建
+
+以下命令均从**仓库根目录**执行。使用 `npm.cmd` 可以避免 PowerShell 因执行策略拦截 `npm.ps1`。
+
+```powershell
+# 1. 确认工具可用
+go version
+node --version
+npm.cmd --version
+
+# 2. 安装锁定版本的前端依赖（必须包含开发依赖）
+npm.cmd --prefix frontend ci --include=dev
+
+# 3. 下载 Go 依赖
+go mod download
+
+# 4. 可选：预装 Windows 图标和版本资源生成工具
+go install github.com/tc-hib/go-winres@v0.3.3
+
+# 5. 构建 WebView2 无控制台版本
+go run ./tools/build --webview2 --windowsgui
+
+# 6. 启动生成的程序
+.\chemssh-launcher-webview2.exe
 ```
 
-前端类型检查和构建：
+每一步成功后再执行下一步，尤其是前端依赖安装失败时，不要继续构建。`npm ci` 按 `frontend/package-lock.json` 安装依赖，并重建 `frontend/node_modules/`；首次获取源码、锁文件更新或依赖缺失时都应执行。`vue-tsc`、TypeScript 和 Vite 都是构建所需的开发依赖，不能使用 `--omit=dev`。`--include=dev` 也可避免 `NODE_ENV=production` 等配置导致这些依赖被省略。无需全局安装 `vue-tsc`。
 
-```bash
-npm run build
-```
+构建工具**不会自动安装前端依赖**。它会读取 `internal/version/VERSION`、同步 `winres/winres.json`、执行前端类型检查和构建、在 Windows 上按需生成资源，最后编译 Go 程序。前端产物位于 `internal/gui/static/vue/`，会嵌入可执行文件。
 
-运行 Go 测试：
+`go-winres` 是可选预装工具，不能代替 npm 依赖安装。如果它不在 `PATH` 中，构建工具会自动回退到 `go run github.com/tc-hib/go-winres@v0.3.3`，需要时会联网下载。需要预先准备资源工具时，可检查 `go env GOBIN`；未设置时检查 `go env GOPATH` 下的 `bin` 目录，并将实际安装目录加入 `PATH`。这不代表首次构建可以完全离线，其他 Go/npm 依赖也必须事先准备好。
 
-```bash
-go test ./...
-```
+### 选择构建版本与输出位置
 
-在仓库根目录构建 Launcher：
+安装依赖后，在仓库根目录选择一条构建命令即可：
 
-```bash
+```powershell
+# 浏览器版，带控制台（便于调试）
 go run ./tools/build
+
+# 浏览器版，无控制台
+go run ./tools/build --windowsgui
+
+# WebView2 版，带控制台（便于调试启动问题）
+go run ./tools/build --webview2
+
+# WebView2 版，无控制台（推荐日常使用）
+go run ./tools/build --webview2 --windowsgui
 ```
 
-构建工具会读取 `internal/version/VERSION`，同步 `winres/winres.json`，构建 Vue 前端，在需要时重新生成 Windows 资源，然后执行 `go build ./cmd/chemssh-launcher`。
+Windows 下默认产物在仓库根目录：普通版为 `chemssh-launcher.exe`，WebView2 版为 `chemssh-launcher-webview2.exe`。构建不会自动启动程序。可以用 `-o` 指定输出路径：
 
-构建可选 Windows WebView2 版本：
+```powershell
+go run ./tools/build --webview2 --windowsgui -o chemssh-launcher-custom.exe
+```
+
+构建工具默认启用优化（`-trimpath -ldflags="-s -w"`）；调试时可加 `--no-optimize`，并省略 `--windowsgui` 以保留控制台日志。修改前端源码后，重新执行构建命令即可；只在依赖变化或缺失时重新安装依赖。
+
+### macOS / Linux：浏览器版
+
+在仓库根目录执行；不要使用 Windows 专用的 `--webview2` 和 `--windowsgui`：
 
 ```bash
-go run ./tools/build --webview2                   # WebView2 带控制台（调试用）
-go run ./tools/build --webview2 --windowsgui      # WebView2 无控制台（推荐发布版）
+npm --prefix frontend ci --include=dev
+go mod download
+go run ./tools/build
+./chemssh-launcher
 ```
 
-构建工具默认启用体积和启动速度优化（使用 `-trimpath -ldflags="-s -w"`）。调试时可使用 `--no-optimize` 禁用优化。
+### 常见构建错误
 
-**构建版本说明**：
-- **标准版（浏览器模式）**：在系统浏览器中打开，显示控制台便于调试
-- **标准版 + `--windowsgui`**：在系统浏览器中打开，无控制台窗口（用户友好）
-- **WebView2 版**：内嵌浏览器窗口，带控制台（用于调试启动问题）
-- **WebView2 + `--windowsgui`**：内嵌浏览器窗口，无控制台（最佳用户体验）
+- **`'vue-tsc' 不是内部或外部命令` / `vue-tsc: not found`**：通常是前端依赖尚未安装，或安装时跳过了开发依赖。`go-winres` 只负责 Windows 资源，无法解决此错误。在仓库根目录执行以下命令，并确认第一条成功后再构建：
 
-本地前端迭代可以运行 Vite：
+  ```powershell
+  npm.cmd --prefix frontend ci --include=dev
+  go run ./tools/build --webview2 --windowsgui
+  ```
 
-```bash
-cd frontend
-npm run dev
+- **找不到 `go`、`node` 或 `npm.cmd`**：检查安装和 `PATH`，重新打开终端，再运行版本检查命令。若 PowerShell 提示 `npm.ps1` 无法加载，使用本文的 `npm.cmd`，无需修改系统执行策略。
+- **`npm ci` 提示锁文件与 `package.json` 不一致**：先确认使用同一份源码中的两个文件。如果是主动修改了依赖，运行 `npm.cmd --prefix frontend install --include=dev` 更新锁文件并一并提交；正常源码构建应保留锁文件并使用 `npm ci`。
+- **依赖下载超时或失败**：先解决 Go 模块代理、npm registry 或本机网络访问问题，重新完成安装后再构建；不要删除锁文件或全局安装 `vue-tsc` 来绕过失败。
+
+### 开发与检查
+
+以下命令也从仓库根目录执行：
+
+```powershell
+# 仅检查类型并构建前端（macOS/Linux 将 npm.cmd 换成 npm）
+npm.cmd --prefix frontend run build
+
+# Go 测试
+go test ./...
+
+# Windows WebView2 相关测试
+go test -tags webview2 ./internal/webview
+
+# 启动 Vite 开发服务
+npm.cmd --prefix frontend run dev
 ```
 
-生产可执行文件使用嵌入资源，因此测试打包后的 Go server 前，需要先运行 `npm run build` 或 `go run ./tools/build`。
-
-</details>
+Vite 开发服务不会自动更新 Go 程序内嵌的资源。测试打包后的程序前，请重新执行 `go run ./tools/build`（或对应的 WebView2 构建命令）。
 
 <details>
 <summary>CLI 辅助命令（开发者）</summary>

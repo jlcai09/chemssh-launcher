@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,9 @@ type activeSession struct {
 	profile config.Profile
 	pool    *connectionPool // 使用连接池替代单个连接
 	refs    int
+	// dirs remembers confirmed remote directories so a batch upload skips the
+	// per-file parent lookup.
+	dirs *dirCache
 	// remoteCopyProbe caches whether the account provides `cp -aT`; the probe
 	// costs one round trip and the answer never changes for a session.
 	remoteCopyMu   sync.Mutex
@@ -120,6 +124,7 @@ func (m *Manager) connect(profile config.Profile, secrets secret.Store, policy s
 		profile: profile,
 		pool:    pool,
 		refs:    1,
+		dirs:    newDirCache(),
 	}
 	m.sessions[id] = session
 	if reuseByProfile {
@@ -197,15 +202,23 @@ func (m *Manager) RealPath(id, remotePath string) (string, error) {
 }
 
 func (m *Manager) Upload(id, remoteDir, fileName string, src io.Reader) error {
-	_, err := withConn(m, id, func(client *sftp.Client) (struct{}, error) {
-		return struct{}{}, uploadFile(client, remoteDir, fileName, src)
+	session, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	_, err = withConn(m, id, func(client *sftp.Client) (struct{}, error) {
+		return struct{}{}, uploadFile(client, session.dirs, remoteDir, fileName, src)
 	})
 	return err
 }
 
 func (m *Manager) UploadFile(id, remotePath string, src io.Reader) error {
-	_, err := withConn(m, id, func(client *sftp.Client) (struct{}, error) {
-		return struct{}{}, uploadFilePath(client, remotePath, src)
+	session, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	_, err = withConn(m, id, func(client *sftp.Client) (struct{}, error) {
+		return struct{}{}, uploadFilePath(client, session.dirs, remotePath, src)
 	})
 	return err
 }
@@ -257,7 +270,7 @@ func (m *Manager) OpenWriteAt(id, remotePath string, offset int64) (io.WriteClos
 			return nil, err
 		}
 
-		writer, opErr := uploadFileAt(conn.client, remotePath, offset)
+		writer, opErr := uploadFileAt(conn.client, session.dirs, remotePath, offset)
 		if opErr == nil {
 			return &pooledWriteCloser{WriteCloser: writer, pool: session.pool, conn: conn}, nil
 		}
@@ -273,8 +286,65 @@ func (m *Manager) OpenWriteAt(id, remotePath string, offset int64) (io.WriteClos
 }
 
 func (m *Manager) Mkdir(id, remotePath string) error {
-	_, err := withConn(m, id, func(client *sftp.Client) (struct{}, error) {
+	session, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	_, err = withConn(m, id, func(client *sftp.Client) (struct{}, error) {
 		return struct{}{}, makeDirectory(client, remotePath)
+	})
+	if err == nil {
+		session.dirs.add(CleanPath(remotePath))
+	}
+	return err
+}
+
+// Mkdirs creates every directory in paths on the remote host. Paths are
+// deduplicated and created shallowest first, and each one is remembered so the
+// uploads that follow skip their per-file parent check. The batch also avoids
+// concurrent MkdirAll calls racing each other on a fresh directory.
+func (m *Manager) Mkdirs(id string, paths []string) error {
+	session, err := m.get(id)
+	if err != nil {
+		return err
+	}
+
+	cleaned := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, raw := range paths {
+		dir := CleanPath(raw)
+		if dir == "." || dir == "/" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		cleaned = append(cleaned, dir)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	sort.Slice(cleaned, func(i, j int) bool {
+		left := strings.Count(cleaned[i], "/")
+		right := strings.Count(cleaned[j], "/")
+		if left != right {
+			return left < right
+		}
+		return cleaned[i] < cleaned[j]
+	})
+
+	_, err = withConn(m, id, func(client *sftp.Client) (struct{}, error) {
+		for _, dir := range cleaned {
+			if session.dirs.has(dir) {
+				continue
+			}
+			if err := ensureDirectory(client, dir); err != nil {
+				return struct{}{}, err
+			}
+			session.dirs.add(dir)
+		}
+		return struct{}{}, nil
 	})
 	return err
 }
@@ -287,9 +357,16 @@ func (m *Manager) CreateFile(id, remotePath string) error {
 }
 
 func (m *Manager) Rename(id, oldPath, newPath string) error {
-	_, err := withConn(m, id, func(client *sftp.Client) (struct{}, error) {
+	session, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	_, err = withConn(m, id, func(client *sftp.Client) (struct{}, error) {
 		return struct{}{}, renamePath(client, oldPath, newPath)
 	})
+	if err == nil {
+		session.dirs.clear()
+	}
 	return err
 }
 
@@ -353,9 +430,16 @@ func sshPortOrDefault(port int) int {
 }
 
 func (m *Manager) Delete(id, remotePath string) error {
-	_, err := withConn(m, id, func(client *sftp.Client) (struct{}, error) {
+	session, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	_, err = withConn(m, id, func(client *sftp.Client) (struct{}, error) {
 		return struct{}{}, deletePath(client, remotePath)
 	})
+	if err == nil {
+		session.dirs.clear()
+	}
 	return err
 }
 

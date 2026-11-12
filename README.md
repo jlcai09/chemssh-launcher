@@ -17,20 +17,7 @@ Typical Windows executables are:
 
 The WebView2 build requires the Microsoft Edge WebView2 Runtime on the machine that runs it. Windows 10/11 usually already includes it.
 
-<details>
-<summary>Building from Source (Developers)</summary>
-
-To build from source, install:
-
-- Go 1.23 or newer.
-- Node.js and npm for the Vue frontend build.
-- Optional: `go-winres` for offline Windows icon/version resource generation.
-
-```bash
-go install github.com/tc-hib/go-winres@v0.3.3
-```
-
-</details>
+[Building from Source (Developers)](#development-guide): see the development guide below for prerequisites, dependency installation, build commands, and troubleshooting.
 
 ## Start
 
@@ -425,61 +412,118 @@ idea/                     Local development notes (gitignored, not shipped with 
 
 </details>
 
-<details>
-<summary>Development Guide (Developers)</summary>
+<a id="development-guide"></a>
 
-Install frontend dependencies once:
+## Development Guide (Developers)
 
-```bash
-cd frontend
-npm install
+### Prerequisites
+
+- Install Go 1.23 or newer, plus Node.js (22 or newer recommended) and its bundled npm. Add them to `PATH` and reopen your terminal after installation.
+- Obtain the complete repository and run the commands below from the repository root, which contains `go.mod`, `frontend/`, and `tools/`.
+- Initial dependency installation requires access to a Go module proxy and an npm registry. Node.js/npm are build-time dependencies; the resulting executable does not need them at runtime.
+- WebView2 is a Windows-only variant and requires the Microsoft Edge WebView2 Runtime on the machine running it. Browser mode does not need that runtime.
+
+### Windows / PowerShell: first complete build
+
+Run all commands below from the **repository root**. Using `npm.cmd` avoids PowerShell execution-policy errors involving `npm.ps1`.
+
+```powershell
+# 1. Check the tools
+go version
+node --version
+npm.cmd --version
+
+# 2. Install locked frontend dependencies, including development dependencies
+npm.cmd --prefix frontend ci --include=dev
+
+# 3. Download Go dependencies
+go mod download
+
+# 4. Optional: preinstall the Windows icon/version resource generator
+go install github.com/tc-hib/go-winres@v0.3.3
+
+# 5. Build WebView2 mode without a console
+go run ./tools/build --webview2 --windowsgui
+
+# 6. Start the generated executable
+.\chemssh-launcher-webview2.exe
 ```
 
-Run frontend type-check/build:
+Continue only after each step succeeds, especially dependency installation. `npm ci` installs the versions in `frontend/package-lock.json` and recreates `frontend/node_modules/`. Run it after obtaining the source, when the lockfile changes, or when dependencies are missing. `vue-tsc`, TypeScript, and Vite are development dependencies required for the build: do not use `--omit=dev`. `--include=dev` also prevents settings such as `NODE_ENV=production` from excluding them. No global installation of `vue-tsc` is needed.
 
-```bash
-npm run build
-```
+The build tool **does not install frontend dependencies automatically**. It reads `internal/version/VERSION`, syncs `winres/winres.json`, runs frontend type checking and compilation, generates Windows resources when needed on Windows, and then compiles the Go application. Frontend assets are generated in `internal/gui/static/vue/` and embedded in the executable.
 
-Run Go tests:
+Preinstalling `go-winres` is optional and does not replace npm dependency installation. If it is not on `PATH`, the build tool falls back to `go run github.com/tc-hib/go-winres@v0.3.3`, downloading it when necessary. To prepare the resource generator in advance, check `go env GOBIN`; if unset, check the `bin` directory under `go env GOPATH`, and add the actual installation directory to `PATH`. This does not make a first build fully offline: the other Go/npm dependencies must also be available beforehand.
 
-```bash
-go test ./...
-```
+### Build variants and output paths
 
-Build the launcher from the repository root:
+After installing dependencies, choose one command from the repository root:
 
-```bash
+```powershell
+# Browser mode with a console for debugging
 go run ./tools/build
+
+# Browser mode without a console
+go run ./tools/build --windowsgui
+
+# WebView2 with a console for debugging startup issues
+go run ./tools/build --webview2
+
+# WebView2 without a console, recommended for daily use
+go run ./tools/build --webview2 --windowsgui
 ```
 
-The build tool reads `internal/version/VERSION`, syncs `winres/winres.json`, builds the Vue frontend, regenerates Windows resources when needed, and runs `go build ./cmd/chemssh-launcher`.
+On Windows, output defaults to the repository root: `chemssh-launcher.exe` for browser mode and `chemssh-launcher-webview2.exe` for WebView2. Building does not launch the executable. Use `-o` to choose another output path:
 
-Build optional Windows WebView2 variants:
+```powershell
+go run ./tools/build --webview2 --windowsgui -o chemssh-launcher-custom.exe
+```
+
+The build tool enables optimizations by default (`-trimpath -ldflags="-s -w"`). For debugging, add `--no-optimize` and omit `--windowsgui` to retain console logs. After frontend source edits, rerun the build command; reinstall dependencies only when they change or are missing.
+
+### macOS / Linux: browser mode
+
+Run from the repository root; omit the Windows-only `--webview2` and `--windowsgui` flags:
 
 ```bash
-go run ./tools/build --webview2                   # WebView2 with console (for debugging)
-go run ./tools/build --webview2 --windowsgui      # WebView2 without console (recommended for release)
+npm --prefix frontend ci --include=dev
+go mod download
+go run ./tools/build
+./chemssh-launcher
 ```
 
-The build tool optimizes for size and startup speed by default (using `-trimpath -ldflags="-s -w"`). Use `--no-optimize` to disable optimizations for debugging.
+### Troubleshooting
 
-**Build variants**:
-- **Standard (browser mode)**: Opens in system browser, shows console for debugging
-- **Standard + `--windowsgui`**: Opens in system browser, no console window (clean for end users)
-- **WebView2**: Embedded browser window with console (for debugging startup issues)
-- **WebView2 + `--windowsgui`**: Embedded browser window, no console (best user experience)
+- **`'vue-tsc' is not recognized as an internal or external command` / `vue-tsc: not found`**: frontend dependencies are usually missing, or development dependencies were omitted. `go-winres` only handles Windows resources and cannot fix this error. From the repository root, run the following commands, continuing to the build only after installation succeeds:
 
-For local frontend iteration you can run Vite:
+  ```powershell
+  npm.cmd --prefix frontend ci --include=dev
+  go run ./tools/build --webview2 --windowsgui
+  ```
 
-```bash
-cd frontend
-npm run dev
+- **`go`, `node`, or `npm.cmd` not found**: check installation and `PATH`, reopen the terminal, and rerun the version checks. If PowerShell blocks `npm.ps1`, use `npm.cmd` as shown above; changing the system execution policy is unnecessary.
+- **`npm ci` reports that the lockfile does not match `package.json`**: first ensure both files come from the same source checkout. If you deliberately changed dependencies, run `npm.cmd --prefix frontend install --include=dev` and commit the updated lockfile with the manifest. Normal source builds should retain the lockfile and use `npm ci`.
+- **Dependency downloads time out or fail**: fix access to the Go module proxy, npm registry, or local network, then complete installation before building. Do not delete the lockfile or globally install `vue-tsc` to bypass a failed installation.
+
+### Development and checks
+
+Run these commands from the repository root as well:
+
+```powershell
+# Frontend type check and build only (use npm on macOS/Linux)
+npm.cmd --prefix frontend run build
+
+# Go tests
+go test ./...
+
+# Windows WebView2-specific tests
+go test -tags webview2 ./internal/webview
+
+# Start the Vite development server
+npm.cmd --prefix frontend run dev
 ```
 
-The production executable serves embedded assets, so remember to run `npm run build` or `go run ./tools/build` before testing the packaged Go server.
-
-</details>
+The Vite development server does not update assets embedded in the Go executable. Before testing the packaged application, rerun `go run ./tools/build` or the corresponding WebView2 build command.
 
 <details>
 <summary>CLI Commands (Developers)</summary>

@@ -143,6 +143,29 @@ func (s *Server) handleSFTPMkdir(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
+// handleSFTPMkdirs pre-creates the directory tree of a batch upload in one
+// request. Without it every file would Stat its parent before writing.
+func (s *Server) handleSFTPMkdirs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	var req struct {
+		Session string   `json:"session"`
+		Paths   []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.sftp.Mkdirs(req.Session, req.Paths); err != nil {
+		writeSFTPError(w, err)
+		return
+	}
+	s.logs.add(fmt.Sprintf("SFTP mkdirs: %d paths", len(req.Paths)))
+	writeJSON(w, map[string]bool{"ok": true}, nil)
+}
+
 func (s *Server) handleSFTPCreateFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))

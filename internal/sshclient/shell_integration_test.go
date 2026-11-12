@@ -40,7 +40,7 @@ func TestShellIntegrationInitScriptAppliesProxyEnvAfterProfiles(t *testing.T) {
 func TestInteractiveShellCommandWrapsProxyEnv(t *testing.T) {
 	integration := &shellIntegration{shellPath: "/bin/bash", shimDir: "/tmp/chemssh", bash: true}
 	env := config.ProxyEnvPairs("http://127.0.0.1:41000", "")
-	command := interactiveShellCommand(integration, env)
+	command := interactiveShellExecCommand(integration, env)
 	wantPrefix := "exec env http_proxy=http://127.0.0.1:41000 https_proxy=http://127.0.0.1:41000 all_proxy=http://127.0.0.1:41000"
 	if !strings.HasPrefix(command, wantPrefix) {
 		t.Fatalf("command = %q, want prefix %q", command, wantPrefix)
@@ -55,14 +55,14 @@ func TestInteractiveShellCommandKeepsEnvForLoginShell(t *testing.T) {
 
 	// After exec, a leading PATH=... is read as the command name, so the login
 	// shell path has to keep env even when no proxy env is injected.
-	command := interactiveShellCommand(integration, nil)
+	command := interactiveShellExecCommand(integration, nil)
 	want := `exec env PATH=/tmp/chemssh/bin:"$PATH" /bin/zsh -l`
 	if command != want {
 		t.Fatalf("command = %q, want %q", command, want)
 	}
 
 	env := config.ProxyEnvPairs("http://127.0.0.1:41000", "")
-	command = interactiveShellCommand(integration, env)
+	command = interactiveShellExecCommand(integration, env)
 	if !strings.HasPrefix(command, "exec env http_proxy=http://127.0.0.1:41000") {
 		t.Fatalf("command = %q, want the proxy assignments after env", command)
 	}

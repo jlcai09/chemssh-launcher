@@ -21,6 +21,7 @@ func newTestManager(t *testing.T) (*Manager, *connectionPool) {
 		info: Session{ID: "session-1", ProfileID: "profile-1"},
 		pool: pool,
 		refs: 1,
+		dirs: newDirCache(),
 	}
 	manager.sessions[session.info.ID] = session
 	manager.byProfile[session.info.ProfileID] = session

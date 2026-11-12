@@ -429,6 +429,7 @@ import { api, defaultX11Config, postJSON, putJSON, type LocalProxy, type Profile
 import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import { t } from '../i18n'
+import { notifyProfilesChanged } from '../profileEvents'
 
 type SessionPhase = 'stopped' | 'starting' | 'ready' | 'paused' | 'failed'
 
@@ -822,6 +823,7 @@ async function dropProfile(target: Profile) {
     .filter((profile): profile is Profile => Boolean(profile))
   try {
     await postJSON('/api/profiles/reorder', { ids })
+    notifyProfilesChanged()
   } catch (error) {
     await loadProfiles()
     const message = (error as Error).message
@@ -866,6 +868,7 @@ async function duplicateProfileFromMenu() {
     await loadProfiles()
     applyProfile(created)
     await refreshStatus()
+    notifyProfilesChanged()
     ElMessage.success(t('launcher.profileDuplicated'))
   } catch (error) {
     ElMessage.error((error as Error).message)
@@ -943,6 +946,10 @@ async function saveProfile() {
   applyProfile(saved)
   await loadProfiles()
   await refreshLogs(true)
+  // Open terminal and SFTP pages keep their own profile cache for server
+  // lists, so they refresh as soon as this save lands instead of waiting for
+  // the manual refresh button.
+  notifyProfilesChanged()
   ElMessage.success(t('launcher.profileSaved'))
   return true
 }
@@ -975,6 +982,7 @@ async function deleteProfileByID(profile: Profile) {
   await loadProfiles()
   if (draftOpen.value) restoreDraft()
   await refreshStatus()
+  notifyProfilesChanged()
   ElMessage.success(t('launcher.profileDeleted'))
 }
 

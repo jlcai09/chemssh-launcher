@@ -308,6 +308,29 @@ func (s *Server) handleShellOutput(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleShellCwd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	if err := s.validateLauncherAPIRequest(r); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	session := s.shells.get(r.URL.Query().Get("id"))
+	if session == nil {
+		writeError(w, http.StatusNotFound, errors.New("SSH terminal session not found"))
+		return
+	}
+	dir, err := session.shell.CurrentDirectory(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, map[string]string{"path": dir}, nil)
+}
+
 func (s *Server) handleShellInput(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))

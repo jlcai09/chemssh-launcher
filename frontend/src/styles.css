@@ -3490,7 +3490,10 @@ body,
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* Row 2 is the optional X11 status line. It still needs a track so a
+     connected terminal never pushes the stage into an implicit auto row and
+     strands it at the bottom of an empty card after the window grows. */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-panel);
   background: #f8fbfd;
@@ -3499,7 +3502,23 @@ body,
   overflow: hidden;
 }
 
+/* Explicit rows keep the optional status line from shifting the stage:
+   auto-placement would give the stage an implicit auto track when the line
+   is present, leaving the flexible row to the status line instead. */
+.terminal-tabs {
+  grid-row: 1;
+}
+
+.terminal-x11-status {
+  grid-row: 2;
+}
+
+.terminal-stage {
+  grid-row: 3;
+}
+
 .terminal-footer {
+  grid-row: 4;
   min-width: 0;
   display: flex;
   align-items: center;

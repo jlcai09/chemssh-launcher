@@ -58,6 +58,11 @@ for (const component of components) {
 async function bootstrap() {
   await initLocale()
   app.mount('#app')
+  try {
+    ;(window as Window & { __chemsshAppReady?: () => void }).__chemsshAppReady?.()
+  } catch {
+    // The bridge is absent when the UI runs in an ordinary browser.
+  }
 }
 
 void bootstrap()

@@ -37,8 +37,16 @@ func TestLocalCompressNeverOverwritesAndExtracts(t *testing.T) {
 		t.Fatalf("first archive = %q", first)
 	}
 	second := postLocalCompress(t, server, localArchiveCompressRequest{TargetDirectory: dir, Paths: paths[:1], Format: "tar"})
-	if second != "archive_new.tar" {
-		t.Fatalf("second archive = %q", second)
+	if second != "a.txt.tar" {
+		t.Fatalf("single-file archive = %q", second)
+	}
+	third := postLocalCompress(t, server, localArchiveCompressRequest{TargetDirectory: dir, Paths: paths[:1], Format: "tar"})
+	if third != "a.txt_new.tar" {
+		t.Fatalf("single-file collision archive = %q", third)
+	}
+	singleDir := postLocalCompress(t, server, localArchiveCompressRequest{TargetDirectory: dir, Paths: paths[1:], Format: "tar"})
+	if singleDir != "sub.tar" {
+		t.Fatalf("single-folder archive = %q", singleDir)
 	}
 
 	out := filepath.Join(dir, "out")

@@ -95,19 +95,13 @@ func listDirectory(client *sftp.Client, remotePath string) (ListResult, error) {
 	return ListResult{Path: cleanPath, Entries: entries}, nil
 }
 
-func uploadFile(client *sftp.Client, remoteDir, fileName string, src io.Reader) error {
+func uploadFile(client *sftp.Client, dirs *dirCache, remoteDir, fileName string, src io.Reader) error {
 	name, err := cleanUploadName(fileName)
 	if err != nil {
 		return err
 	}
 	target := joinRemotePath(remoteDir, name)
-	parent := path.Dir(target)
-	if parent != "." && parent != "/" {
-		if err := client.MkdirAll(parent); err != nil {
-			return err
-		}
-	}
-	dst, err := client.Create(target)
+	dst, err := openUploadTarget(client, dirs, target, os.O_CREATE|os.O_RDWR|os.O_TRUNC)
 	if err != nil {
 		return err
 	}
@@ -118,12 +112,12 @@ func uploadFile(client *sftp.Client, remoteDir, fileName string, src io.Reader) 
 	return dst.Close()
 }
 
-func uploadFilePath(client *sftp.Client, remotePath string, src io.Reader) error {
+func uploadFilePath(client *sftp.Client, dirs *dirCache, remotePath string, src io.Reader) error {
 	target := CleanPath(remotePath)
 	if target == "." || target == "/" {
 		return errors.New("invalid upload file path")
 	}
-	dst, err := client.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
+	dst, err := openUploadTarget(client, dirs, target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
 	if err != nil {
 		return err
 	}
@@ -132,6 +126,55 @@ func uploadFilePath(client *sftp.Client, remotePath string, src io.Reader) error
 		return err
 	}
 	return dst.Close()
+}
+
+// ensureDirectory creates dir and accepts a directory a concurrent transfer
+// created in the meantime, which would otherwise surface as an SFTP failure.
+func ensureDirectory(client *sftp.Client, dir string) error {
+	if err := client.MkdirAll(dir); err != nil {
+		if info, statErr := client.Stat(dir); statErr != nil || !info.IsDir() {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureUploadParent creates the target's parent directory unless this session
+// already confirmed it. Concurrent uploads into a fresh directory would race
+// MkdirAll, so callers that start several transfers at once pre-create
+// directories with Manager.Mkdirs, which only warms this cache.
+func ensureUploadParent(client *sftp.Client, dirs *dirCache, target string) error {
+	parent := path.Dir(target)
+	if parent == "." || parent == "/" || dirs.has(parent) {
+		return nil
+	}
+	if err := ensureDirectory(client, parent); err != nil {
+		return err
+	}
+	dirs.add(parent)
+	return nil
+}
+
+// openUploadTarget opens target for writing and recreates a cached parent that
+// disappeared, so an upload never fails just because the cache was stale.
+func openUploadTarget(client *sftp.Client, dirs *dirCache, target string, flag int) (*sftp.File, error) {
+	if err := ensureUploadParent(client, dirs, target); err != nil {
+		return nil, err
+	}
+	dst, err := client.OpenFile(target, flag)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return dst, err
+	}
+	parent := path.Dir(target)
+	if !dirs.has(parent) {
+		return nil, err
+	}
+	dirs.remove(parent)
+	if mkErr := ensureDirectory(client, parent); mkErr != nil {
+		return nil, err
+	}
+	dirs.add(parent)
+	return client.OpenFile(target, flag)
 }
 
 func createFile(client *sftp.Client, remotePath string) error {
@@ -152,18 +195,12 @@ func createFile(client *sftp.Client, remotePath string) error {
 	return dst.Close()
 }
 
-func uploadFileAt(client *sftp.Client, remotePath string, offset int64) (*sftp.File, error) {
+func uploadFileAt(client *sftp.Client, dirs *dirCache, remotePath string, offset int64) (*sftp.File, error) {
 	target := CleanPath(remotePath)
 	if target == "." || target == "/" {
 		return nil, errors.New("invalid upload file path")
 	}
-	parent := path.Dir(target)
-	if parent != "." && parent != "/" {
-		if err := client.MkdirAll(parent); err != nil {
-			return nil, err
-		}
-	}
-	dst, err := client.OpenFile(target, os.O_CREATE|os.O_WRONLY)
+	dst, err := openUploadTarget(client, dirs, target, os.O_CREATE|os.O_WRONLY)
 	if err != nil {
 		return nil, err
 	}

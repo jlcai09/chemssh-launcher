@@ -658,6 +658,7 @@ import {
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
 import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
+import { onProfilesChanged } from '../profileEvents'
 
 type PaneName = 'left' | 'right'
 type TabKind = 'local' | 'remote'
@@ -683,6 +684,10 @@ interface FileTab {
   session?: string
   profileID?: string
   profileName?: string
+  // /api/sftp/connect is still in flight. A list request now would carry an
+  // empty session, so directory changes are parked in pendingPath instead.
+  connecting?: boolean
+  pendingPath?: string
 }
 
 interface PaneState {
@@ -809,6 +814,7 @@ interface TransferItem {
   parentID?: string
   isGroup?: boolean
   expanded?: boolean
+  enumerating?: boolean
   // serverSide marks a copy the remote host performs itself; it has no byte
   // progress and cannot be paused, resumed or cancelled.
   serverSide?: boolean
@@ -890,6 +896,7 @@ const FLOATING_SCROLLBAR_MIN_THUMB = 36
 const FILE_ROW_SLOT_HEIGHT = 40
 const VIRTUAL_ROW_OVERSCAN = 10
 const TRANSFER_PROGRESS_POLL_MS = 80
+const UPLOAD_CONCURRENCY = 3
 const DIRECTORY_HISTORY_LIMIT = 20
 const TRANSFER_MAX_DEPTH = 64
 const transferPanelOptions = computed(() => [
@@ -900,9 +907,25 @@ const profiles = ref<Profile[]>([])
 const remoteProfiles = computed(() => profiles.value.filter(profile => profile.kind !== 'local'))
 const refreshingSavedProfiles = ref(false)
 const home = ref('.')
+let profileSyncSeq = 0
+let unsubscribeProfileEvents: (() => void) | null = null
 
-// Profiles are loaded once on mount; the launcher page can add or rename one
-// while this tab stays open, so the new-tab menu offers a refresh.
+// A save on the launcher page broadcasts to every open page, so the new-tab
+// menu picks up renamed, added or removed servers without the refresh button.
+// A failed background refresh keeps the current list instead of blanking it.
+async function syncSavedProfilesFromLauncher() {
+  const seq = ++profileSyncSeq
+  try {
+    const next = await api<Profile[]>('/api/profiles')
+    if (seq !== profileSyncSeq) return
+    profiles.value = next
+  } catch {
+    // Leave the last known list in place; the manual refresh reports errors.
+  }
+}
+
+// Manual refresh for the new-tab menu: profiles can be added, renamed or
+// deleted on the launcher page while this tab stays open.
 async function refreshSavedProfiles() {
   if (refreshingSavedProfiles.value) return
   refreshingSavedProfiles.value = true
@@ -1211,6 +1234,16 @@ function tabByID(paneName: PaneName, tabID: string) {
   return panes[paneName].tabs.find(tab => tab.id === tabID)
 }
 
+// A tab can be dragged to the other pane while an async operation is pending,
+// so completion handlers must look it up across panes, not in the origin pane.
+function locateTab(tabID: string): { pane: PaneName; tab: FileTab } | null {
+  for (const paneName of paneNames) {
+    const tab = tabByID(paneName, tabID)
+    if (tab) return { pane: paneName, tab }
+  }
+  return null
+}
+
 function activateTab(paneName: PaneName, tabID: string) {
   clearPaneGestures(paneName)
   panes[paneName].active = tabID
@@ -1252,7 +1285,8 @@ function pendingRemoteTab(profile: Profile, path: string): FileTab {
     anchorPath: '',
     history: [],
     profileID: profile.id,
-    profileName: profile.name || profile.ssh_host
+    profileName: profile.name || profile.ssh_host,
+    connecting: true
   }
 }
 
@@ -1404,7 +1438,7 @@ function syncTransferGroup(groupID: string) {
   if (children.length === 0) return
   group.total = children.reduce((sum, item) => sum + item.total, 0)
   group.loaded = children.reduce((sum, item) => sum + item.loaded, 0)
-  group.status = children.some(item => item.status === 'running') ? 'running' : children.some(item => item.status === 'error') ? 'error' : 'done'
+  group.status = group.enumerating || children.some(item => item.status === 'running') ? 'running' : children.some(item => item.status === 'error') ? 'error' : 'done'
   group.paused = group.status === 'running' && children.some(item => item.paused)
   group.retrying = group.status === 'running' && children.some(item => item.retrying)
   group.attempt = Math.max(0, ...children.filter(item => item.retrying).map(item => item.attempt || 0))
@@ -1523,6 +1557,7 @@ function transferStatusLabel(item: TransferItem) {
   if (item.status === 'done') return t('sftp.statusDone')
   if (item.cancelled) return t('sftp.statusCancelled')
   if (item.status === 'error') return t('sftp.statusError')
+  if (item.enumerating) return t('sftp.statusEnumerating')
   if (item.serverSide) return t('sftp.statusServerCopy')
   if (item.paused) return t('sftp.statusPaused')
   if (item.nativeDragState) return t(`sftp.dragJob.${item.nativeDragState}`)
@@ -2128,18 +2163,25 @@ async function openRemoteTab(paneName: PaneName, profile: Profile, path: string)
   log(t('sftp.logConnecting', { name: profile.name || profile.ssh_host }))
   try {
     const session = await withHostKey<{ id: string }>('/api/sftp/connect', { id: profile.id })
-    const liveTab = tabByID(paneName, tab.id)
-    if (!liveTab) {
+    const located = locateTab(tab.id)
+    if (!located) {
       await postJSON('/api/sftp/disconnect', { session: session.id }).catch(() => undefined)
       return
     }
-    liveTab.session = session.id
-    await loadTab(paneName, liveTab)
+    located.tab.session = session.id
+    located.tab.connecting = false
+    if (located.tab.pendingPath) {
+      located.tab.path = located.tab.pendingPath
+      located.tab.pendingPath = ''
+    }
+    await loadTab(located.pane, located.tab)
   } catch (error) {
-    const liveTab = tabByID(paneName, tab.id)
-    if (liveTab) {
-      liveTab.loading = false
-      liveTab.title = t('sftp.connectionFailed', { name: profile.name || t('sftp.remote') })
+    const located = locateTab(tab.id)
+    if (located) {
+      located.tab.connecting = false
+      located.tab.pendingPath = ''
+      located.tab.loading = false
+      located.tab.title = t('sftp.connectionFailed', { name: profile.name || t('sftp.remote') })
     }
     ElMessage.error((error as Error).message)
     log(t('sftp.logFailed', { error: (error as Error).message }))
@@ -2404,6 +2446,13 @@ const tabLoadSequence = new WeakMap<FileTab, number>()
 
 async function loadTab(paneName: PaneName, tab = activeTab(paneName), options: { recordHistory?: boolean; retried?: boolean } = {}) {
   if (!tab) return
+  // The tab is still dialing. Listing without a session fails and used to look
+  // like the connection itself failed, so keep the request until openRemoteTab
+  // binds the session and applies it.
+  if (tab.kind === 'remote' && !tab.session) {
+    if (tab.connecting) tab.pendingPath = tab.path
+    return
+  }
   const sequence = (tabLoadSequence.get(tab) ?? 0) + 1
   tabLoadSequence.set(tab, sequence)
   const isLatest = () => tabLoadSequence.get(tab) === sequence
@@ -3226,6 +3275,11 @@ async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel' | 
     if (selected.isGroup) syncTransferGroup(selected.id)
     if (selected.parentID) syncTransferGroup(selected.parentID)
   }
+  if (action === 'cancel') {
+    for (const selected of selectedTransferTargets(item)) {
+      if (selected.isGroup) cancelPipelineRun(selected.id)
+    }
+  }
   touchTransferItems()
   nextTick(updateTransferScrollbars)
 }
@@ -3439,66 +3493,267 @@ async function transferBetweenTabs(
     await loadTab(targetPane, target)
     return
   }
-  const expanded = await expandTransferEntries(source, entries)
-  const normalized = normalizeTransferTasks(expanded)
-  if (normalized.invalidCount > 0) ElMessage.error(t('sftp.skippedUnsafe', { count: normalized.invalidCount }))
-  if (normalized.renamedCount > 0) ElMessage.info(t('sftp.renamedSpaces', { count: normalized.renamedCount }))
-  const prepared = await prepareRelativeTransfers(normalized.tasks, target, targetBasePath)
-  if (prepared.cancelled || prepared.tasks.length === 0) return
-  const ordered = orderTransferTasks(prepared.tasks)
-  const transferGroups = createTransferGroups(source, target, prepared.tasks, targetBasePath)
-  const fileTasks = ordered.filter(task => !task.isDir)
-  for (const task of ordered.filter(task => task.isDir)) {
-    const group = transferGroups.get(task.rootName)
-    try {
-      await ensureTargetDirectory(target, task.relativePath, targetBasePath)
-    } catch (error) {
-      if (group) finishTransferItem(group, 'error', (error as Error).message)
-      throw error
-    }
-  }
+  const counters = { invalid: 0, renamed: 0 }
+  const roots = await resolveTransferRoots(entries, target, targetBasePath, counters)
+  if (!roots || roots.length === 0) return
+  await runTransferPipeline(source, target, roots, targetPane, targetBasePath, counters)
+  await loadTab(targetPane, target)
+}
 
+// Root names are resolved against the target's top level before enumeration so
+// conflict prompts and group rows appear immediately; the tree itself is
+// scanned lazily by the pipeline.
+async function resolveTransferRoots(
+  entries: FileEntry[],
+  target: FileTab,
+  targetBasePath: string,
+  counters: { invalid: number; renamed: number }
+): Promise<{ entry: FileEntry; rootName: string }[] | null> {
+  const topLevelItems = new Map((await listTabDirectory(target, targetBasePath)).entries.map(entry => [entry.name, entry] as const))
+  const resolved: { entry: FileEntry; rootName: string }[] = []
+  let applyAllAction: UploadConflictAction | null = null
+  for (const entry of entries) {
+    const original = sanitizeTransferRelativePath(entry.name)
+    const rootName = normalizeUploadRelativePath(original)
+    if (!rootName || !isSafeUploadRelativePath(rootName)) {
+      counters.invalid += 1
+      continue
+    }
+    if (rootName !== original) counters.renamed += 1
+    const existing = topLevelItems.get(rootName) ?? null
+    let action: UploadConflictAction = 'overwrite'
+    if (existing) {
+      const resolution: UploadConflictResolution = applyAllAction
+        ? { action: applyAllAction, applyAll: true }
+        : await promptConflict(rootName)
+      if (resolution.applyAll) applyAllAction = resolution.action
+      action = resolution.action
+    }
+    if (action === 'cancel') return null
+    if (action === 'skip') continue
+    const finalRootName = action === 'suffix' ? uniqueSuffixedName(rootName, topLevelItems) : rootName
+    topLevelItems.set(finalRootName, {
+      name: finalRootName,
+      path: joinPath(targetBasePath, finalRootName, target.kind),
+      is_dir: entry.is_dir,
+      size: 0,
+      mode: '',
+      mod_time: ''
+    })
+    resolved.push({ entry, rootName: finalRootName })
+  }
+  return resolved
+}
+
+type PipelineJob =
+  | { isDir: true; entry: FileEntry; relativePath: string; rootName: string }
+  | { isDir: false; task: RelativeTransfer<FileEntry>; item: TransferItem }
+
+const pipelineRuns = new Map<string, { cancelled: boolean; wake: () => void }>()
+
+function cancelPipelineRun(groupID: string) {
+  const run = pipelineRuns.get(groupID)
+  if (!run) return
+  run.cancelled = true
+  run.wake()
+}
+
+// Files transfer as soon as enumeration discovers them; the workers share one
+// queue so directory listings and copies overlap instead of scanning the whole
+// tree before the first row appears. Target parents are created on demand by
+// the backend write path, so only empty directories need explicit creation.
+async function runTransferPipeline(
+  source: FileTab,
+  target: FileTab,
+  roots: { entry: FileEntry; rootName: string }[],
+  targetPane: PaneName,
+  targetBasePath: string,
+  counters: { invalid: number; renamed: number }
+) {
+  const run = { cancelled: false, wake: () => {} }
+  let aborted = false
+  let abortReason = ''
+  const groups = new Map<string, TransferItem>()
+  const rootPending = new Map<string, number>()
   const itemsByTask = new Map<RelativeTransfer<FileEntry>, TransferItem>()
-  for (const task of fileTasks) {
-    const group = transferGroups.get(task.rootName)
-    const targetPath = joinPath(targetBasePath, task.relativePath, target.kind)
+  const processing = new Set<TransferItem>()
+  const queue: PipelineJob[] = []
+  let pending = 0
+  const waiters: (() => void)[] = []
+  const wake = () => { waiters.splice(0).forEach(waiter => waiter()) }
+  run.wake = wake
+  const enqueue = (job: PipelineJob) => {
+    queue.push(job)
+    pending += 1
+    wake()
+  }
+  const abortRun = (reason: string) => {
+    if (aborted) return
+    aborted = true
+    abortReason = reason
+    wake()
+    abortQueuedTransfers(itemsByTask, reason, processing)
+    ElMessage.error(reason)
+    log(t('sftp.logFailed', { error: reason }))
+  }
+  const enqueueFileTask = (task: RelativeTransfer<FileEntry>, group: TransferItem | null) => {
     const item = createTransferItem({
       name: task.displayPath,
       kind: 'file',
       sourceName: transferEndpointName(source),
       targetName: transferEndpointName(target),
       sourcePath: task.payload.path,
-      targetPath,
+      targetPath: joinPath(targetBasePath, task.relativePath, target.kind),
       total: task.payload.size || 0,
       parentID: group?.id
     })
     if (group) syncTransferGroup(group.id)
     itemsByTask.set(task, item)
     item.retry = () => retryFileTransfer(source, target, task, item, targetBasePath, targetPane)
+    enqueue({ isDir: false, task, item })
   }
 
-  for (const task of fileTasks) {
-    const item = itemsByTask.get(task)
-    if (!item) continue
-    if (item.cancelled || item.status !== 'running') {
-      if (item.parentID) syncTransferGroup(item.parentID)
+  for (const { entry, rootName } of roots) {
+    if (!entry.is_dir) {
+      enqueueFileTask({ payload: entry, relativePath: rootName, displayPath: rootName, rootName, isDir: false }, null)
       continue
     }
-    const targetPath = joinPath(targetBasePath, task.relativePath, target.kind)
-    log(t('sftp.logTransferStart', { path: task.payload.path, target: targetPath }))
-    try {
-      await runFileTransfer(source, target, task, item, targetBasePath, false)
-    } catch (error) {
-      finishTransferItem(item, 'error', (error as Error).message)
-      if (!isTransferCancelledError(error)) {
-        abortQueuedTransfers(itemsByTask, (error as Error).message)
-        throw error
-      }
-      log(t('sftp.logTransferCancelled', { path: task.displayPath }))
+    const group = createTransferItem({
+      name: rootName,
+      kind: 'folder',
+      sourceName: transferEndpointName(source),
+      targetName: transferEndpointName(target),
+      sourcePath: entry.path,
+      targetPath: joinPath(targetBasePath, rootName, target.kind),
+      total: 0,
+      isGroup: true,
+      expanded: false
+    })
+    group.enumerating = true
+    groups.set(rootName, group)
+    pipelineRuns.set(group.id, run)
+    rootPending.set(rootName, 1)
+    enqueue({ isDir: true, entry, relativePath: rootName, rootName })
+  }
+
+  const nextJob = async (): Promise<PipelineJob | null> => {
+    for (;;) {
+      if (run.cancelled || aborted) return null
+      const job = queue.shift()
+      if (job) return job
+      if (pending === 0) return null
+      await new Promise<void>(resolve => waiters.push(resolve))
     }
   }
-  finishEmptyTransferGroups(transferGroups)
-  await loadTab(targetPane, target)
+
+  const processDir = async (job: Extract<PipelineJob, { isDir: true }>) => {
+    const group = groups.get(job.rootName) ?? null
+    if (relativeDepth(job.relativePath) >= TRANSFER_MAX_DEPTH) {
+      abortRun(t('sftp.maxDepth', { max: TRANSFER_MAX_DEPTH, path: job.entry.path }))
+      return
+    }
+    let listing: { path: string; entries: FileEntry[] }
+    try {
+      listing = await listTabDirectory(source, job.entry.path)
+    } catch (error) {
+      abortRun((error as Error).message)
+      return
+    }
+    if (run.cancelled || aborted) return
+    let produced = 0
+    const childDirs: Extract<PipelineJob, { isDir: true }>[] = []
+    for (const child of listing.entries) {
+      const clean = sanitizeTransferRelativePath(`${job.relativePath}/${child.name}`)
+      const relativePath = normalizeUploadRelativePath(clean)
+      if (!relativePath || !isSafeUploadRelativePath(relativePath)) {
+        counters.invalid += 1
+        continue
+      }
+      if (relativePath !== clean) counters.renamed += 1
+      if (child.is_dir) {
+        rootPending.set(job.rootName, (rootPending.get(job.rootName) ?? 0) + 1)
+        childDirs.push({ isDir: true, entry: child, relativePath, rootName: job.rootName })
+      } else {
+        enqueueFileTask({ payload: child, relativePath, displayPath: relativePath, rootName: job.rootName, isDir: false }, group)
+      }
+      produced += 1
+    }
+    // Files jump ahead of sibling directories so the first copy starts while
+    // the rest of the tree is still being listed.
+    for (const childDir of childDirs) enqueue(childDir)
+    if (produced === 0) {
+      const targetPath = joinPath(targetBasePath, job.relativePath, target.kind)
+      try {
+        if (target.kind === 'local') await postJSON('/api/local/mkdir', { path: targetPath })
+        else await postJSON('/api/sftp/mkdirs', { session: target.session, paths: [targetPath] })
+      } catch (error) {
+        abortRun((error as Error).message)
+      }
+    }
+  }
+
+  const processFile = async (job: Extract<PipelineJob, { isDir: false }>) => {
+    const item = currentTransferItem(job.item)
+    if (item.cancelled || item.status !== 'running') {
+      if (item.parentID) syncTransferGroup(item.parentID)
+      return
+    }
+    processing.add(item)
+    log(t('sftp.logTransferStart', { path: job.task.payload.path, target: item.targetPath }))
+    try {
+      await runFileTransfer(source, target, job.task, item, targetBasePath, false)
+    } catch (error) {
+      finishTransferItem(item, 'error', (error as Error).message)
+      if (!isTransferCancelledError(error)) abortRun((error as Error).message)
+      else log(t('sftp.logTransferCancelled', { path: job.task.displayPath }))
+    } finally {
+      processing.delete(item)
+    }
+  }
+
+  const worker = async () => {
+    for (;;) {
+      const job = await nextJob()
+      if (!job) return
+      try {
+        if (job.isDir) await processDir(job)
+        else await processFile(job)
+      } finally {
+        pending -= 1
+        if (job.isDir) {
+          const left = (rootPending.get(job.rootName) ?? 1) - 1
+          rootPending.set(job.rootName, left)
+          if (left <= 0) {
+            const group = groups.get(job.rootName)
+            if (group) {
+              group.enumerating = false
+              syncTransferGroup(group.id)
+            }
+          }
+        }
+        wake()
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, worker))
+
+  if (run.cancelled) {
+    for (const item of itemsByTask.values()) {
+      const current = currentTransferItem(item)
+      if (current.status === 'running') finishTransferItem(current, 'error', t('sftp.transferCancelled'))
+    }
+  }
+  for (const group of groups.values()) {
+    pipelineRuns.delete(group.id)
+    group.enumerating = false
+    if (group.status !== 'running') continue
+    if (run.cancelled) finishTransferItem(group, 'error', t('sftp.transferCancelled'))
+    else if (aborted) finishTransferItem(group, 'error', abortReason)
+  }
+  finishEmptyTransferGroups(groups)
+  if (counters.invalid > 0) ElMessage.error(t('sftp.skippedUnsafe', { count: counters.invalid }))
+  if (counters.renamed > 0) ElMessage.info(t('sftp.renamedSpaces', { count: counters.renamed }))
 }
 
 // tryServerSideCopy pastes entries with the remote `cp` command when both tabs
@@ -3604,40 +3859,6 @@ async function tryServerSideCopy(source: FileTab, target: FileTab, entries: File
   return true
 }
 
-function createTransferGroups(source: FileTab, target: FileTab, tasks: RelativeTransfer<FileEntry>[], targetBasePath: string) {
-  const groupedRoots = new Map<string, { total: number; sourcePath: string; hasFile: boolean }>()
-  const byRoot = new Map<string, RelativeTransfer<FileEntry>[]>()
-  for (const task of tasks) {
-    const group = byRoot.get(task.rootName)
-    if (group) group.push(task)
-    else byRoot.set(task.rootName, [task])
-  }
-  for (const [rootName, group] of byRoot) {
-    if (!group.some(task => task.isDir || task.relativePath.includes('/'))) continue
-    const rootTask = group.find(task => task.relativePath === rootName) || group[0]
-    groupedRoots.set(rootName, {
-      total: group.reduce((sum, task) => sum + (task.isDir ? 0 : task.payload.size || 0), 0),
-      sourcePath: rootTask?.payload.path || rootName,
-      hasFile: group.some(task => !task.isDir)
-    })
-  }
-  const groups = new Map<string, TransferItem>()
-  for (const [rootName, info] of groupedRoots) {
-    groups.set(rootName, createTransferItem({
-      name: rootName,
-      kind: 'folder',
-      sourceName: transferEndpointName(source),
-      targetName: transferEndpointName(target),
-      sourcePath: info.sourcePath,
-      targetPath: joinPath(targetBasePath, rootName, target.kind),
-      total: info.total,
-      isGroup: true,
-      expanded: false
-    }))
-  }
-  return groups
-}
-
 function finishEmptyTransferGroups(groups: Map<string, TransferItem>) {
   for (const group of groups.values()) {
     const children = transferItems.value.filter(item => item.parentID === group.id)
@@ -3680,47 +3901,13 @@ async function retryFileTransfer(source: FileTab, target: FileTab, task: Relativ
   if (activeTab(targetPane) === target) await loadTab(targetPane, target)
 }
 
-function abortQueuedTransfers(items: Map<RelativeTransfer<FileEntry>, TransferItem>, reason: string) {
+function abortQueuedTransfers(items: Map<RelativeTransfer<FileEntry>, TransferItem>, reason: string, skip?: Set<TransferItem>) {
   for (const item of items.values()) {
     const current = currentTransferItem(item)
+    if (skip?.has(current)) continue
     if (current.status !== 'running') continue
     finishTransferItem(current, 'error', t('sftp.transferAborted', { error: reason }))
   }
-}
-
-async function expandTransferEntries(source: FileTab, entries: FileEntry[]) {
-  const tasks: RelativeTransfer<FileEntry>[] = []
-  for (const entry of entries) {
-    await collectTransferEntry(source, entry, entry.name, tasks)
-  }
-  return tasks
-}
-
-async function collectTransferEntry(source: FileTab, entry: FileEntry, relativePath: string, tasks: RelativeTransfer<FileEntry>[]) {
-  const cleanRelative = sanitizeTransferRelativePath(relativePath)
-  if (!cleanRelative) return
-  tasks.push({
-    payload: entry,
-    relativePath: cleanRelative,
-    displayPath: cleanRelative,
-    rootName: cleanRelative.split('/')[0] ?? entry.name,
-    isDir: entry.is_dir
-  })
-  if (!entry.is_dir) return
-  if (relativeDepth(cleanRelative) >= TRANSFER_MAX_DEPTH) {
-    throw new Error(t('sftp.maxDepth', { max: TRANSFER_MAX_DEPTH, path: entry.path }))
-  }
-  const listing = await listTabDirectory(source, entry.path)
-  for (const child of listing.entries) {
-    await collectTransferEntry(source, child, `${cleanRelative}/${child.name}`, tasks)
-  }
-}
-
-function orderTransferTasks<T>(tasks: RelativeTransfer<T>[]) {
-  return [...tasks].sort((a, b) => {
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
-    return relativeDepth(a.relativePath) - relativeDepth(b.relativePath)
-  })
 }
 
 async function transferFileTask(source: FileTab, target: FileTab, task: RelativeTransfer<FileEntry>, targetBasePath: string, transferID: string, resume = false) {
@@ -3814,27 +4001,6 @@ function chooseConflict(action: UploadConflictAction) {
   }
 }
 
-async function ensureTargetDirectory(target: FileTab, relativePath: string, targetBasePath: string) {
-  const targetPath = joinPath(targetBasePath, relativePath, target.kind)
-  const existing = await findEntryAtPath(target, targetPath)
-  if (existing) {
-    if (!existing.is_dir) throw new Error(t('sftp.targetFileExists', { path: targetPath }))
-    return
-  }
-  if (target.kind === 'local') {
-    await postJSON('/api/local/mkdir', { path: targetPath })
-  } else {
-    await postJSON('/api/sftp/mkdir', { session: target.session, path: targetPath })
-  }
-}
-
-async function findEntryAtPath(tab: FileTab, path: string) {
-  const parent = parentPath(path, tab.kind)
-  const name = baseName(path)
-  const listing = await listTabDirectory(tab, parent)
-  return listing.entries.find(entry => entry.name === name) || null
-}
-
 async function listTabDirectory(tab: FileTab, path: string) {
   return tab.kind === 'local'
     ? await api<{ path: string; entries: FileEntry[] }>(`/api/local/list?path=${encodeURIComponent(path)}`)
@@ -3849,32 +4015,30 @@ function splitRelativePath(relativePath: string) {
   return relativePath.replace(/\\/g, '/').split('/').filter(Boolean)
 }
 
-function sanitizeTransferRelativePath(relativePath: string) {
-  return relativePath.replace(/\\/g, '/').split('/').filter(part => part && part !== '.' && part !== '..').join('/')
+// Batch transfers pre-create their remote directory tree in one request.
+// Per-file MkdirAll costs a round trip each, and concurrent uploads into a
+// fresh directory would race each other.
+function collectTargetDirectories(tasks: { relativePath: string; isDir?: boolean }[], targetBasePath: string) {
+  const dirs = new Set<string>()
+  for (const task of tasks) {
+    const parts = splitRelativePath(task.relativePath)
+    const limit = task.isDir ? parts.length : parts.length - 1
+    for (let depth = 1; depth <= limit; depth += 1) {
+      dirs.add(joinPath(targetBasePath, parts.slice(0, depth).join('/'), 'remote'))
+    }
+  }
+  return [...dirs]
 }
 
-function normalizeTransferTasks<T>(tasks: RelativeTransfer<T>[]) {
-  let invalidCount = 0
-  let renamedCount = 0
-  const normalized: RelativeTransfer<T>[] = []
-  for (const task of tasks) {
-    const originalPath = task.relativePath.replace(/\\/g, '/').split('/').filter(part => part && part !== '.' && part !== '..').join('/')
-    const originalDisplayPath = (task.displayPath || task.relativePath).replace(/\\/g, '/').split('/').filter(part => part && part !== '.' && part !== '..').join('/')
-    const relativePath = normalizeUploadRelativePath(originalPath)
-    const displayPath = normalizeUploadRelativePath(originalDisplayPath)
-    if (!relativePath || !isSafeUploadRelativePath(relativePath)) {
-      invalidCount += 1
-      continue
-    }
-    if (relativePath !== originalPath || displayPath !== originalDisplayPath) renamedCount += 1
-    normalized.push({
-      ...task,
-      relativePath,
-      displayPath,
-      rootName: relativePath.split('/')[0] ?? task.rootName
-    })
-  }
-  return { tasks: normalized, invalidCount, renamedCount }
+async function ensureRemoteDirectories(tab: FileTab, tasks: { relativePath: string; isDir?: boolean }[], targetBasePath: string) {
+  if (tab.kind !== 'remote' || !tab.session) return
+  const paths = collectTargetDirectories(tasks, targetBasePath)
+  if (paths.length === 0) return
+  await postJSON('/api/sftp/mkdirs', { session: tab.session, paths })
+}
+
+function sanitizeTransferRelativePath(relativePath: string) {
+  return relativePath.replace(/\\/g, '/').split('/').filter(part => part && part !== '.' && part !== '..').join('/')
 }
 
 function uniqueSuffixedName(name: string, existing: Map<string, FileEntry>) {
@@ -4522,6 +4686,28 @@ async function moveEntriesToFolderPath(paneName: PaneName, payload: DragPayload,
   if (moved > 0) await loadTab(paneName, tab)
 }
 
+// Small files are bound by per-file round trips, not by bandwidth, and the
+// SFTP pool holds three connections, so a few uploads run side by side.
+async function runWithUploadConcurrency<T>(tasks: T[], limit: number, run: (task: T) => Promise<void>): Promise<unknown> {
+  let nextIndex = 0
+  let firstError: unknown = null
+  const worker = async () => {
+    while (firstError === null) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= tasks.length) return
+      try {
+        await run(tasks[index])
+      } catch (error) {
+        firstError = error
+        return
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker))
+  return firstError
+}
+
 async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetPathOverride?: string) {
   const tab = activeTab(paneName)
   if (!tab || tab.kind !== 'remote' || !tab.session) {
@@ -4529,6 +4715,7 @@ async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetP
     return
   }
   const targetBasePath = targetPathOverride || tab.path
+  const sessionID = tab.session
   const normalized = normalizeUploadEntries(entries)
   if (normalized.invalidCount > 0) ElMessage.error(t('sftp.skippedUnsafe', { count: normalized.invalidCount }))
   if (normalized.renamedCount > 0) ElMessage.info(t('sftp.normalizedUploads', { count: normalized.renamedCount }))
@@ -4547,6 +4734,7 @@ async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetP
     if (!task.relativePath.includes('/')) continue
     folderTotals.set(task.rootName, (folderTotals.get(task.rootName) || 0) + (task.payload.file.size || 0))
   }
+  const uploads: { task: RelativeTransfer<UploadEntry>; item: TransferItem }[] = []
   for (const task of prepared.tasks) {
     let parentID: string | undefined
     if (task.relativePath.includes('/')) {
@@ -4567,11 +4755,6 @@ async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetP
       }
       parentID = group.id
     }
-    const form = new FormData()
-    form.append('session', tab.session)
-    form.append('path', targetBasePath)
-    form.append('relative_path', task.relativePath)
-    form.append('file', task.payload.file)
     const item = createTransferItem({
       name: task.displayPath,
       kind: 'file',
@@ -4582,8 +4765,26 @@ async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetP
       total: task.payload.file.size || 0,
       parentID
     })
-    form.append('transfer_id', item.id)
     if (parentID) syncTransferGroup(parentID)
+    uploads.push({ task, item })
+  }
+
+  try {
+    await ensureRemoteDirectories(tab, prepared.tasks, targetBasePath)
+  } catch (error) {
+    for (const { item } of uploads) finishTransferItem(item, 'error', (error as Error).message)
+    throw error
+  }
+
+  const started = new Set<string>()
+  const firstError = await runWithUploadConcurrency(uploads, UPLOAD_CONCURRENCY, async ({ task, item }) => {
+    started.add(item.id)
+    const form = new FormData()
+    form.append('session', sessionID)
+    form.append('path', targetBasePath)
+    form.append('relative_path', task.relativePath)
+    form.append('file', task.payload.file)
+    form.append('transfer_id', item.id)
     log(t('sftp.logUpload', { path: task.displayPath, target: targetBasePath }))
     try {
       await runWithTransferProgress(item, item.id, () => uploadForm(form))
@@ -4592,6 +4793,12 @@ async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetP
       finishTransferItem(item, 'error', (error as Error).message)
       throw error
     }
+  })
+  if (firstError) {
+    for (const { item } of uploads) {
+      if (!started.has(item.id)) finishTransferItem(item, 'error', t('sftp.transferAborted', { error: (firstError as Error).message }))
+    }
+    throw firstError
   }
   await loadTab(paneName, tab)
 }
@@ -4776,6 +4983,9 @@ onMounted(async () => {
   }
   window.addEventListener('mouseup', finishSelection)
   window.addEventListener('message', handleShellMessage)
+  unsubscribeProfileEvents = onProfilesChanged(() => {
+    void syncSavedProfilesFromLauncher()
+  })
   document.addEventListener('click', handleContextMenuDocumentClick)
   window.addEventListener('keydown', handleContextMenuKeydown)
   window.addEventListener('keydown', handleDeleteKey)
@@ -4818,6 +5028,8 @@ onBeforeUnmount(() => {
   scrollResizeObserver = null
   window.removeEventListener('mouseup', finishSelection)
   window.removeEventListener('message', handleShellMessage)
+  unsubscribeProfileEvents?.()
+  unsubscribeProfileEvents = null
   document.removeEventListener('click', handleContextMenuDocumentClick)
   window.removeEventListener('keydown', handleContextMenuKeydown)
   window.removeEventListener('keydown', handleDeleteKey)

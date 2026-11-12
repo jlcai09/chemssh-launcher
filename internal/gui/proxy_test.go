@@ -195,6 +195,91 @@ func TestInjectAfterHeadOpen(t *testing.T) {
 	}
 }
 
+func TestRewriteChemSSHAssetURLsScopesToProfile(t *testing.T) {
+	body := []byte(`<!doctype html><html><head>` +
+		`<link rel="icon" href="/assets/icon.svg">` +
+		`<script type="module" crossorigin src="/assets/index.js"></script>` +
+		`<link rel="modulepreload" crossorigin href='/assets/vendor.js'>` +
+		`<script src="https://cdn.example.com/x.js"></script>` +
+		`</head></html>`)
+
+	got := string(rewriteChemSSHAssetURLs(body, "/my%20profile/chemssh"))
+	for _, want := range []string{
+		`href="/my%20profile/chemssh/assets/icon.svg"`,
+		`src="/my%20profile/chemssh/assets/index.js"`,
+		`href='/my%20profile/chemssh/assets/vendor.js'`,
+		`https://cdn.example.com/x.js`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rewritten HTML missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"/assets/`) || strings.Contains(got, `'/assets/`) {
+		t.Fatalf("root-absolute asset URLs remain:\n%s", got)
+	}
+	if unchanged := string(rewriteChemSSHAssetURLs(body, "")); unchanged != string(body) {
+		t.Fatalf("empty prefix must leave the body untouched:\n%s", unchanged)
+	}
+}
+
+func TestInjectChemSSHHTMLScopesAssetURLs(t *testing.T) {
+	body := []byte(`<html><head><script type="module" src="/assets/index.js"></script></head><body></body></html>`)
+	resp := &http.Response{
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+
+	injectChemSSHHTML(resp, "SNIPPET", "/team/chemssh")
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte(`src="/team/chemssh/assets/index.js"`)) {
+		t.Fatalf("asset URL not scoped to the profile: %s", got)
+	}
+	if !bytes.Contains(got, []byte("SNIPPET")) {
+		t.Fatalf("snippet not injected: %s", got)
+	}
+	if want := strconv.Itoa(len(got)); resp.Header.Get("Content-Length") != want || resp.ContentLength != int64(len(got)) {
+		t.Fatalf("content length not recomputed: header=%q field=%d want=%d", resp.Header.Get("Content-Length"), resp.ContentLength, len(got))
+	}
+}
+
+func TestChemSSHProxyScopesHTMLAssetsToSessionProfile(t *testing.T) {
+	server := NewServer(nil)
+	target, err := url.Parse("http://127.0.0.1:8888")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := config.NewProfileDefaults()
+	profile.ID = "remote-1"
+	profile.Name = "team box"
+	session := &activeSession{id: profile.ID, name: profile.Name, profile: profile, forwarding: true}
+	proxy := server.newChemSSHReverseProxy(target, session)
+
+	body := []byte(`<html><head><script type="module" src="/assets/index.js"></script></head><body></body></html>`)
+	resp := &http.Response{
+		Header:        http.Header{},
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+
+	if err := proxy.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte(`src="/team%20box/chemssh/assets/index.js"`)) {
+		t.Fatalf("proxied HTML asset was not scoped to the session profile: %s", got)
+	}
+}
+
 func TestInjectChemSSHImportReloaderPlainHTML(t *testing.T) {
 	body := []byte("<html><head><title>x</title></head><body></body></html>")
 	resp := &http.Response{
@@ -204,7 +289,7 @@ func TestInjectChemSSHImportReloaderPlainHTML(t *testing.T) {
 	}
 	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
 
-	injectChemSSHHTML(resp, chemsshImportReloaderScript)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript, "")
 
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -244,7 +329,7 @@ func TestInjectChemSSHImportReloaderGzip(t *testing.T) {
 	resp.Header.Set("Content-Type", "text/html")
 	resp.Header.Set("Content-Encoding", "gzip")
 
-	injectChemSSHHTML(resp, chemsshImportReloaderScript)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript, "")
 
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -269,7 +354,7 @@ func TestInjectChemSSHImportReloaderSkipsNonHTML(t *testing.T) {
 	}
 	resp.Header.Set("Content-Type", "application/javascript")
 
-	injectChemSSHHTML(resp, chemsshImportReloaderScript)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript, "")
 
 	got, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(got, body) {
@@ -287,7 +372,7 @@ func TestInjectChemSSHImportReloaderSkipsUnsupportedEncoding(t *testing.T) {
 	resp.Header.Set("Content-Type", "text/html")
 	resp.Header.Set("Content-Encoding", "br")
 
-	injectChemSSHHTML(resp, chemsshImportReloaderScript)
+	injectChemSSHHTML(resp, chemsshImportReloaderScript, "")
 
 	got, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(got, body) {
@@ -304,7 +389,7 @@ func TestInjectChemSSHClientScriptsAddsTokenShimAndCookie(t *testing.T) {
 	}
 	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
 
-	injectChemSSHClientScripts(resp, "launch-token")
+	injectChemSSHClientScripts(resp, "launch-token", "")
 
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -351,7 +436,7 @@ func TestInjectChemSSHClientScriptsHandlesGzipHTML(t *testing.T) {
 	resp.Header.Set("Content-Type", "text/html")
 	resp.Header.Set("Content-Encoding", "gzip")
 
-	injectChemSSHClientScripts(resp, "launch-token")
+	injectChemSSHClientScripts(resp, "launch-token", "")
 
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -379,7 +464,7 @@ func TestInjectChemSSHClientScriptsSkipsNonHTML(t *testing.T) {
 	}
 	resp.Header.Set("Content-Type", "application/json")
 
-	injectChemSSHClientScripts(resp, "launch-token")
+	injectChemSSHClientScripts(resp, "launch-token", "")
 
 	got, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(got, body) {

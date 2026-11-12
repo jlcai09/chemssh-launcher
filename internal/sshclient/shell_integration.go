@@ -33,6 +33,14 @@ func interactiveShellCommand(integration *shellIntegration, proxyEnv []config.En
 	if integration == nil {
 		return ""
 	}
+	command := interactiveShellExecCommand(integration, proxyEnv)
+	// Keep the PID across exec so Linux can report this terminal's actual cwd
+	// even when a login profile replaces PROMPT_COMMAND or the shell is not bash.
+	script := "printf '%s' \"$$\" > " + shellQuote(integration.shimDir+"/shell.pid") + "\n" + command
+	return "exec /bin/sh -c " + shellQuote(script)
+}
+
+func interactiveShellExecCommand(integration *shellIntegration, proxyEnv []config.EnvPair) string {
 	if integration.bash {
 		prefix := ""
 		if len(proxyEnv) > 0 {
