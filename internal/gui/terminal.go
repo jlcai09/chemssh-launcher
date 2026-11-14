@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -16,7 +15,6 @@ import (
 
 const (
 	shellAttachTimeout = 30 * time.Second
-	shellInputLimit    = 1 << 20
 	shellOutputBuffer  = 32 * 1024
 )
 
@@ -30,6 +28,7 @@ type launcherShell struct {
 	profileID string
 	name      string
 	shell     *sshclient.InteractiveShell
+	hub       *shellHub
 
 	mu          sync.Mutex
 	attached    bool
@@ -77,6 +76,7 @@ func (m *shellManager) add(profile config.Profile, sh *sshclient.InteractiveShel
 		profileID: profile.ID,
 		name:      profile.Name,
 		shell:     sh,
+		hub:       newShellHub(),
 	}
 	session.attachTimer = time.AfterFunc(shellAttachTimeout, func() {
 		if m.closeIfUnattached(id) {
@@ -86,7 +86,26 @@ func (m *shellManager) add(profile config.Profile, sh *sshclient.InteractiveShel
 	m.mu.Lock()
 	m.sessions[id] = session
 	m.mu.Unlock()
+	// The hub owns the only reader: output produced before the page attaches is
+	// buffered and replayed instead of being lost, and one websocket can carry
+	// every terminal without a stream per tab.
+	go m.pump(session)
 	return session, nil
+}
+
+func (m *shellManager) pump(session *launcherShell) {
+	buffer := make([]byte, shellOutputBuffer)
+	for {
+		n, err := session.shell.Output.Read(buffer)
+		if n > 0 {
+			session.hub.publish(buffer[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
+	session.hub.close()
+	m.close(session.id)
 }
 
 func (m *shellManager) get(id string) *launcherShell {
@@ -161,18 +180,17 @@ func (m *shellManager) closeAll() {
 	}
 }
 
-func (s *launcherShell) attach() bool {
+// markAttached records that a page subscribed before the startup grace period
+// expired. Additional subscribers are allowed: one page can watch the session
+// again after a websocket reconnect.
+func (s *launcherShell) markAttached() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.attached {
-		return false
-	}
 	s.attached = true
 	if s.attachTimer != nil {
 		s.attachTimer.Stop()
 		s.attachTimer = nil
 	}
-	return true
 }
 
 func (s *launcherShell) close() {
@@ -190,6 +208,9 @@ func (s *launcherShell) close() {
 		s.attachTimer = nil
 	}
 	s.mu.Unlock()
+	if s.hub != nil {
+		s.hub.close()
+	}
 	_ = s.shell.Close()
 }
 
@@ -251,63 +272,6 @@ func (s *Server) handleShellOpen(w http.ResponseWriter, r *http.Request) {
 	}, nil)
 }
 
-func (s *Server) handleShellOutput(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
-		return
-	}
-	if err := s.validateLauncherAPIRequest(r); err != nil {
-		writeError(w, http.StatusForbidden, err)
-		return
-	}
-	id := r.URL.Query().Get("id")
-	session := s.shells.get(id)
-	if session == nil {
-		writeError(w, http.StatusNotFound, errors.New("SSH terminal session not found"))
-		return
-	}
-	if !session.attach() {
-		writeError(w, http.StatusConflict, errors.New("SSH terminal is already attached"))
-		return
-	}
-	defer s.shells.close(id)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, errors.New("streaming is unsupported"))
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-r.Context().Done():
-			s.shells.close(id)
-		case <-done:
-		}
-	}()
-
-	buffer := make([]byte, shellOutputBuffer)
-	for {
-		n, err := session.shell.Output.Read(buffer)
-		if n > 0 {
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-				return
-			}
-			flusher.Flush()
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
 func (s *Server) handleShellCwd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
@@ -329,31 +293,6 @@ func (s *Server) handleShellCwd(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, map[string]string{"path": dir}, nil)
-}
-
-func (s *Server) handleShellInput(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
-		return
-	}
-	session := s.shells.get(r.URL.Query().Get("id"))
-	if session == nil {
-		writeError(w, http.StatusNotFound, errors.New("SSH terminal session not found"))
-		return
-	}
-	body := http.MaxBytesReader(w, r.Body, shellInputLimit)
-	data, err := io.ReadAll(body)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	if len(data) > 0 {
-		if err := session.shell.WriteInput(data); err != nil {
-			writeError(w, http.StatusConflict, err)
-			return
-		}
-	}
-	writeJSON(w, map[string]bool{"ok": true}, nil)
 }
 
 func (s *Server) handleShellResize(w http.ResponseWriter, r *http.Request) {

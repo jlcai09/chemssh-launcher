@@ -15,6 +15,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// sshHandshakeTimeout bounds the banner/key exchange. The TCP dial has its own
+// timeout, but a half-open connection otherwise leaves the handshake blocked
+// until the OS retransmission timeout (minutes), which used to freeze a whole
+// reconnect and every transfer waiting on it.
+const sshHandshakeTimeout = 20 * time.Second
+
 func Dial(profile config.Profile, secrets secret.Store) (*ssh.Client, error) {
 	return DialWithHostKeyPolicy(profile, secrets, HostKeyStrict)
 }
@@ -33,11 +39,15 @@ func DialWithHostKeyPolicy(profile config.Profile, secrets secret.Store, policy 
 	if err != nil {
 		return nil, err
 	}
+	_ = conn.SetDeadline(time.Now().Add(sshHandshakeTimeout))
 	clientConn, chans, reqs, err := ssh.NewClientConn(conn, address, cfg)
 	if err != nil {
 		_ = conn.Close()
 		return nil, describeHandshakeError(profile, address, err)
 	}
+	// Clear the handshake deadline; later keepalives and transfers manage their
+	// own timeouts instead of inheriting a short absolute deadline.
+	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(clientConn, chans, reqs), nil
 }
 

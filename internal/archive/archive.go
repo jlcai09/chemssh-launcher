@@ -1,6 +1,6 @@
-// Package archive builds the tar/zstd/gzip/xz command lines used by the SFTP
-// page. It is pure logic: the caller decides whether the commands run locally
-// or over SSH, and whether a name already exists.
+// Package archive builds the tar/zstd/gzip/xz/zip/7z command lines used by the
+// SFTP page. It is pure logic: the caller decides whether the commands run
+// locally or over SSH, and whether a name already exists.
 package archive
 
 import (
@@ -10,10 +10,12 @@ import (
 
 // Format names double as the file-name suffix, so the UI can show them as is.
 const (
-	FormatTarZst = "tar.zst"
-	FormatTarGz  = "tar.gz"
-	FormatTarXz  = "tar.xz"
-	FormatTar    = "tar"
+	FormatTarZst   = "tar.zst"
+	FormatTarGz    = "tar.gz"
+	FormatTarXz    = "tar.xz"
+	FormatTar      = "tar"
+	FormatZip      = "zip"
+	FormatSevenZip = "7z"
 )
 
 // ArchivePrefix is the base name used when several entries are bundled.
@@ -27,15 +29,18 @@ const ZstdLevel = "-1"
 
 // Tools records which utilities exist on the host that owns the files.
 type Tools struct {
-	Tar  bool `json:"tar"`
-	Zstd bool `json:"zstd"`
-	Gzip bool `json:"gzip"`
-	Xz   bool `json:"xz"`
+	Tar      bool `json:"tar"`
+	Zstd     bool `json:"zstd"`
+	Gzip     bool `json:"gzip"`
+	Xz       bool `json:"xz"`
+	Zip      bool `json:"zip"`
+	Unzip    bool `json:"unzip"`
+	SevenZip bool `json:"seven_zip"`
 }
 
 // Formats lists the archive formats the available tools can produce.
 func Formats(t Tools) []string {
-	formats := make([]string, 0, 4)
+	formats := make([]string, 0, 6)
 	if t.Tar && t.Zstd {
 		formats = append(formats, FormatTarZst)
 	}
@@ -47,6 +52,12 @@ func Formats(t Tools) []string {
 	}
 	if t.Tar {
 		formats = append(formats, FormatTar)
+	}
+	if t.Zip {
+		formats = append(formats, FormatZip)
+	}
+	if t.SevenZip {
+		formats = append(formats, FormatSevenZip)
 	}
 	return formats
 }
@@ -113,6 +124,10 @@ func CompressPlan(t Tools, format, archiveName string, names []string, token str
 		return Plan{Steps: []Step{{Argv: append([]string{"tar", "-cJf", archiveName, "--"}, names...)}}}, nil
 	case FormatTar:
 		return Plan{Steps: []Step{{Argv: append([]string{"tar", "-cf", archiveName, "--"}, names...)}}}, nil
+	case FormatZip:
+		return Plan{Steps: []Step{{Argv: append([]string{"zip", "-r", archiveName, "--"}, names...)}}}, nil
+	case FormatSevenZip:
+		return Plan{Steps: []Step{{Argv: append([]string{"7z", "a", "-y", archiveName, "--"}, names...)}}}, nil
 	default:
 		return Plan{}, fmt.Errorf("unknown archive format %q", format)
 	}
@@ -135,6 +150,8 @@ var extractSuffixes = []struct {
 	{".zst", false, "zstd", []string{"zstd", "-d", "-f"}},
 	{".gz", false, "gzip", []string{"gzip", "-d", "-f"}},
 	{".xz", false, "xz", []string{"xz", "-d", "-f"}},
+	{".zip", false, "unzip", []string{"unzip", "-o"}},
+	{".7z", false, "seven_zip", []string{"7z", "x", "-y"}},
 }
 
 func hasTool(t Tools, name string) bool {
@@ -147,6 +164,10 @@ func hasTool(t Tools, name string) bool {
 		return t.Gzip
 	case "xz":
 		return t.Xz
+	case "unzip":
+		return t.Unzip
+	case "seven_zip":
+		return t.SevenZip
 	}
 	return false
 }
@@ -209,7 +230,7 @@ func ArchiveStem(names []string) string {
 func NextArchiveName(format string, names []string, taken func(string) bool) (string, error) {
 	suffix := "." + format
 	switch format {
-	case FormatTarZst, FormatTarGz, FormatTarXz, FormatTar:
+	case FormatTarZst, FormatTarGz, FormatTarXz, FormatTar, FormatZip, FormatSevenZip:
 	default:
 		return "", fmt.Errorf("unknown archive format %q", format)
 	}

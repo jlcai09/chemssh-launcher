@@ -183,6 +183,20 @@ export function nativeDragTransferRoots(job: NativeDragJob): NativeDragTransferR
   })
 }
 
+// Replace one job's projected rows where they already are. Progress events must
+// not move a visible task; only a job without rows yet joins at the top.
+export function mergeNativeDragRows<T extends { id: string; nativeDragOwnerID?: string; nativeDragID?: string }>(
+  items: T[],
+  jobID: string,
+  rows: T[]
+): T[] {
+  const owned = (item: T) => item.nativeDragOwnerID === jobID || item.nativeDragID === jobID
+  const anchor = items.findIndex(owned)
+  if (anchor < 0) return [...rows, ...items]
+  const rest = items.filter(item => !owned(item))
+  return [...rest.slice(0, anchor), ...rows, ...rest.slice(anchor)]
+}
+
 export function retainTransferHistory<T extends { id: string; status: string; parentID?: string }>(items: T[], limit = 300): T[] {
   const terminalRoots = items.filter(item => !item.parentID && item.status !== 'running').slice(0, limit)
   const retained = new Set(terminalRoots.map(item => item.id))

@@ -23,7 +23,7 @@ import (
 const archiveProbeTTL = 60 * time.Second
 
 // remoteToolProbeScript prints the archive utilities present on the host.
-const remoteToolProbeScript = `for t in tar zstd gzip xz; do command -v "$t" >/dev/null 2>&1 && echo "$t"; done`
+const remoteToolProbeScript = `for t in tar zstd gzip xz zip unzip 7z; do command -v "$t" >/dev/null 2>&1 && echo "$t"; done`
 
 type archiveProbeEntry struct {
 	tools archive.Tools
@@ -106,6 +106,12 @@ func (s *Server) probeRemoteArchiveTools(sessionID string) (archive.Tools, error
 			tools.Gzip = true
 		case "xz":
 			tools.Xz = true
+		case "zip":
+			tools.Zip = true
+		case "unzip":
+			tools.Unzip = true
+		case "7z":
+			tools.SevenZip = true
 		}
 	}
 	s.archiveTools.set(sessionID, tools)
@@ -118,10 +124,13 @@ func (s *Server) probeLocalArchiveTools() archive.Tools {
 		return tools
 	}
 	tools := archive.Tools{
-		Tar:  hasLocalTool("tar"),
-		Zstd: hasLocalTool("zstd"),
-		Gzip: hasLocalTool("gzip"),
-		Xz:   hasLocalTool("xz"),
+		Tar:      hasLocalTool("tar"),
+		Zstd:     hasLocalTool("zstd"),
+		Gzip:     hasLocalTool("gzip"),
+		Xz:       hasLocalTool("xz"),
+		Zip:      hasLocalTool("zip"),
+		Unzip:    hasLocalTool("unzip"),
+		SevenZip: hasLocalTool("7z"),
 	}
 	s.archiveTools.set(key, tools)
 	return tools

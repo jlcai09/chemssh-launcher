@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	poolMinSize         = 2                // 最小连接数
-	poolMaxSize         = 3                // 最大连接数
+	poolMinSize = 2 // 最小连接数
+	// Max connections is one above the transfer worker count so browsing a
+	// directory stays possible while every worker copies a file.
+	poolMaxSize         = 4
 	healthCheckInterval = 30 * time.Second // 健康检查间隔
 	keepAliveInterval   = 20 * time.Second // SSH 传输层保活间隔
 	idleTimeout         = 5 * time.Minute  // 空闲超时
@@ -639,6 +641,14 @@ func (p *connectionPool) reconnect() error {
 	p.mu.Lock()
 	p.lastDial = time.Now()
 	p.mu.Unlock()
+
+	// The probe failed, so the transport is dead or wedged. Close it before
+	// dialing: blocked reads and writes on its channels then fail immediately
+	// instead of waiting for the OS TCP timeout (minutes), which is what made a
+	// stalled transfer freeze its SFTP session and the UI with it.
+	if sshClient != nil {
+		_ = sshClient.Close()
+	}
 
 	newSSH, err := dial()
 	if err != nil {

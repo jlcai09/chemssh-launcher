@@ -314,8 +314,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/session/statuses", s.apiHandler(gzipHandler(s.handleStatuses)))
 	s.mux.HandleFunc("/api/session/activate", s.apiHandler(gzipHandler(s.handleActivate)))
 	s.mux.HandleFunc("/api/session/shell/open", s.apiHandler(gzipHandler(s.handleShellOpen)))
-	s.mux.HandleFunc("/api/session/shell/output", s.handleShellOutput)
-	s.mux.HandleFunc("/api/session/shell/input", s.apiHandler(s.handleShellInput))
+	// The websocket handshake cannot carry the launcher header, so it validates
+	// the token cookie and same-origin headers itself instead of using apiHandler.
+	s.mux.HandleFunc("/api/events", s.handleEventsWS)
 	s.mux.HandleFunc("/api/session/shell/cwd", s.apiHandler(gzipHandler(s.handleShellCwd)))
 	s.mux.HandleFunc("/api/session/shell/resize", s.apiHandler(gzipHandler(s.handleShellResize)))
 	s.mux.HandleFunc("/api/session/shell/close", s.apiHandler(gzipHandler(s.handleShellClose)))

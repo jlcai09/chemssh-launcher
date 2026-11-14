@@ -417,6 +417,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import '@xterm/xterm/css/xterm.css'
 import { api, APIError, formatBytes, joinPath, parentPath, postJSON, withLauncherToken, type FileEntry, type Profile, type ShellOpenResponse } from '../api'
+import { appEvents } from '../appEvents'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import {
   collectDropUploadEntries,
@@ -497,7 +498,7 @@ interface TerminalRuntime {
   fitAddon: FitAddon
   searchAddon: SearchAddon
   sessionID: string
-  outputAbort: AbortController | null
+  outputStop: (() => void) | null
   pendingInput: string
   inputFlushing: boolean
   resizeTimer: number | null
@@ -1548,7 +1549,7 @@ async function ensureRuntime(tab: TerminalTab) {
     fitAddon,
     searchAddon,
     sessionID: '',
-    outputAbort: null,
+    outputStop: null,
     pendingInput: '',
     inputFlushing: false,
     resizeTimer: null,
@@ -2243,12 +2244,7 @@ async function downloadFromShell(tab: TerminalTab, cwd: string, argv: string[]) 
 async function sendRawInput(tab: TerminalTab, data: string) {
   const runtime = runtimeFor(tab)
   if (!runtime?.sessionID) return
-  const res = await fetch(`/api/session/shell/input?id=${encodeURIComponent(runtime.sessionID)}`, {
-    method: 'POST',
-    headers: withLauncherToken({ 'Content-Type': 'text/plain; charset=utf-8' }),
-    body: data
-  })
-  if (!res.ok) throw new Error(await responseError(res))
+  appEvents.sendTerminalInput(runtime.sessionID, data)
 }
 
 function quoteShellPath(path: string) {
@@ -2353,7 +2349,7 @@ async function connect(tab: TerminalTab, cdPath = '', options: { resume?: boolea
       runtime.pendingCd = cdPath
     }
     void sendResize(tab)
-    void streamOutput(tab, opened.id)
+    attachTerminalOutput(tab, opened.id)
     if (tab.sftp.open) void loadSftpPanel(tab, tab.cwd || tab.sftp.path || '.')
     runtime.term.focus()
   } catch (error) {
@@ -2368,27 +2364,17 @@ async function connect(tab: TerminalTab, cdPath = '', options: { resume?: boolea
   }
 }
 
-async function streamOutput(tab: TerminalTab, id: string) {
+// Output arrives over the shared app events channel. One websocket carries
+// every terminal, so opening more tabs no longer consumes one HTTP connection
+// each; the hub replays buffered output when the channel reconnects.
+function attachTerminalOutput(tab: TerminalTab, id: string) {
   const runtime = runtimeFor(tab)
   if (!runtime) return
-  runtime.outputAbort = new AbortController()
-  let streamFailed = false
+  runtime.outputStop?.()
   let sentCd = false
-  try {
-    const res = await fetch(`/api/session/shell/output?id=${encodeURIComponent(id)}`, {
-      method: 'GET',
-      headers: withLauncherToken(),
-      cache: 'no-store',
-      signal: runtime.outputAbort.signal
-    })
-    if (!res.ok || !res.body) {
-      throw new Error(await responseError(res))
-    }
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
+  const decoder = new TextDecoder()
+  runtime.outputStop = appEvents.watchTerminal(id, {
+    onData: bytes => {
       if (!sentCd) {
         sentCd = true
         if (runtime.pendingCd) {
@@ -2398,25 +2384,22 @@ async function streamOutput(tab: TerminalTab, id: string) {
           void flushInput(tab)
         }
       }
-      consumeTerminalOutput(tab, decoder.decode(value, { stream: true }))
-    }
-  } catch (error) {
-    if (!runtime.disposed && (error as Error)?.name !== 'AbortError') {
-      streamFailed = true
-      writeNotice(tab, `${t('terminal.connectionLost')}: ${errorMessage(error)}`)
-      writeNotice(tab, t('terminal.reconnectHint'))
-    }
-  } finally {
-    if (!runtime.disposed && tab.status === 'connected' && runtime.sessionID === id) {
+      consumeTerminalOutput(tab, decoder.decode(bytes, { stream: true }))
+    },
+    onGap: () => {
+      writeNotice(tab, t('terminal.outputGap'))
+    },
+    onExit: () => {
+      if (runtime.disposed || tab.status !== 'connected' || runtime.sessionID !== id) return
       tab.status = 'idle'
       runtime.sessionID = ''
       runtime.pendingInput = ''
       resetStreamState(tab)
       resetSftpPanelData(tab)
-      if (!streamFailed) writeNotice(tab, t('terminal.sessionEnded'))
+      writeNotice(tab, t('terminal.sessionEnded'))
       releaseSftpIfIdle(tab)
     }
-  }
+  })
 }
 
 async function disconnect(tab: TerminalTab, quiet: boolean) {
@@ -2434,9 +2417,9 @@ async function disconnect(tab: TerminalTab, quiet: boolean) {
     window.clearTimeout(runtime.resizeTimer)
     runtime.resizeTimer = null
   }
-  if (runtime.outputAbort) {
-    runtime.outputAbort.abort()
-    runtime.outputAbort = null
+  if (runtime.outputStop) {
+    runtime.outputStop()
+    runtime.outputStop = null
   }
   if (id) {
     await postJSON('/api/session/shell/close', { id }).catch(() => undefined)
@@ -2484,15 +2467,8 @@ async function flushInput(tab: TerminalTab) {
       const chunk = runtime.pendingInput
       const id = runtime.sessionID
       runtime.pendingInput = ''
-      const res = await fetch(`/api/session/shell/input?id=${encodeURIComponent(id)}`, {
-        method: 'POST',
-        headers: withLauncherToken({ 'Content-Type': 'text/plain; charset=utf-8' }),
-        body: chunk
-      })
-      if (!res.ok) break
+      appEvents.sendTerminalInput(id, chunk)
     }
-  } catch {
-    // The session may have been closed while typing; status handling covers it.
   } finally {
     runtime.inputFlushing = false
   }

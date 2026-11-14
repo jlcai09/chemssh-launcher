@@ -449,8 +449,8 @@ func (s *Server) handleSFTPUploadLocal(w http.ResponseWriter, r *http.Request) {
 	}
 	src := newLocalFileSource(localPath)
 	dst := &sftpFileTarget{manager: s.sftp, session: req.Session, path: targetPath}
-	if err := s.runResumableTransfer(req.TransferID, req.Resume, filepath.Base(localPath), src, dst); err != nil {
-		writeSFTPError(w, err)
+	if err := s.startResumableTransfer(req.TransferID, req.Resume, filepath.Base(localPath), src, dst); err != nil {
+		writeTransferStartError(w, err)
 		return
 	}
 	s.logs.add("SFTP upload local: " + localPath + " -> " + req.Path)
@@ -492,8 +492,8 @@ func (s *Server) handleSFTPDownloadLocal(w http.ResponseWriter, r *http.Request)
 	targetPath := filepath.Join(targetDir, targetName)
 	src := &sftpFileSource{manager: s.sftp, session: req.Session, path: req.Path}
 	dst := newLocalFileTarget(targetPath)
-	if err := s.runResumableTransfer(req.TransferID, req.Resume, targetName, src, dst); err != nil {
-		writeSFTPError(w, err)
+	if err := s.startResumableTransfer(req.TransferID, req.Resume, targetName, src, dst); err != nil {
+		writeTransferStartError(w, err)
 		return
 	}
 	s.logs.add("SFTP download local: " + req.Path + " -> " + targetDir)
@@ -529,8 +529,8 @@ func (s *Server) handleSFTPCopyRemote(w http.ResponseWriter, r *http.Request) {
 	}
 	src := &sftpFileSource{manager: s.sftp, session: req.SourceSession, path: req.SourcePath}
 	dst := &sftpFileTarget{manager: s.sftp, session: req.TargetSession, path: targetPath}
-	if err := s.runResumableTransfer(req.TransferID, req.Resume, path.Base(req.SourcePath), src, dst); err != nil {
-		writeSFTPError(w, err)
+	if err := s.startResumableTransfer(req.TransferID, req.Resume, path.Base(req.SourcePath), src, dst); err != nil {
+		writeTransferStartError(w, err)
 		return
 	}
 	s.logs.add("SFTP remote copy: " + req.SourcePath + " -> " + req.TargetPath)
@@ -625,6 +625,19 @@ func (s *Server) handleSFTPCopyOnServer(w http.ResponseWriter, r *http.Request) 
 	}
 	s.logs.add(fmt.Sprintf("SFTP server-side copy: %d/%d item(s) -> %s", copied, len(results), req.TargetPath))
 	writeJSON(w, serverCopyResponse{Supported: true, Results: results}, nil)
+}
+
+// writeTransferStartError reports why a transfer could not be claimed. Once the
+// copy runs in the background, failures arrive over the shared events channel.
+func writeTransferStartError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errTransferAlreadyRunning):
+		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, errTransferCancelled):
+		writeError(w, http.StatusBadRequest, err)
+	default:
+		writeError(w, http.StatusBadGateway, err)
+	}
 }
 
 // sftpTransportLostHeader marks responses whose failure was caused by a dead

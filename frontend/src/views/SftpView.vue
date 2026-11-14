@@ -419,7 +419,7 @@
           </div>
         </div>
 
-        <div v-else-if="panes[paneName].dropActive" class="canvas-file-drop-overlay is-upload-overlay">
+        <div v-else-if="panes[paneName].dropActive && folderDropTarget?.pane !== paneName" class="canvas-file-drop-overlay is-upload-overlay">
           <el-icon><Upload /></el-icon>
           <span>{{ dropHint(paneName) }}</span>
         </div>
@@ -657,7 +657,9 @@ import {
   type UploadEntry
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
-import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
+import { appEvents } from '../appEvents'
+import { waitForTransferProgress } from '../transferProgress'
+import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, mergeNativeDragRows, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 import { onProfilesChanged } from '../profileEvents'
 
 type PaneName = 'left' | 'right'
@@ -823,19 +825,6 @@ interface TransferItem {
   nativeDragState?: NativeDragJob['state']
 }
 
-interface TransferProgress {
-  id: string
-  loaded: number
-  total: number
-  done: boolean
-  paused: boolean
-  cancelled: boolean
-  error: string
-  retrying?: boolean
-  attempt?: number
-  max_attempts?: number
-}
-
 interface ServerCopySupport {
   supported: boolean
   reason?: string
@@ -895,7 +884,7 @@ const FILE_COLUMN_RESIZER_WIDTH = 10
 const FLOATING_SCROLLBAR_MIN_THUMB = 36
 const FILE_ROW_SLOT_HEIGHT = 40
 const VIRTUAL_ROW_OVERSCAN = 10
-const TRANSFER_PROGRESS_POLL_MS = 80
+const TRANSFER_CONTROL_TIMEOUT_MS = 8000
 const UPLOAD_CONCURRENCY = 3
 const DIRECTORY_HISTORY_LIMIT = 20
 const TRANSFER_MAX_DEPTH = 64
@@ -1041,7 +1030,7 @@ function syncNativeDragTransfers(jobs: NativeDragJob[]) {
         })
       }
     }
-    transferItems.value = [...rows, ...transferItems.value.filter(item => item.nativeDragOwnerID !== job.id && item.nativeDragID !== job.id)]
+    transferItems.value = mergeNativeDragRows(transferItems.value, job.id, rows)
   }
   transferItems.value = retainTransferHistory(transferItems.value)
   if (inserted) transferPanelMode.value = 'transfers'
@@ -3252,14 +3241,25 @@ async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel' | 
     for (const target of targets) await target.retry?.()
     return
   }
-  await Promise.all(targets.map(async target => {
+  // Stop the pipeline before the request round trip so no new file starts while
+  // a cancel is still being delivered over a saturated connection.
+  if (action === 'cancel') {
+    for (const selected of selectedTransferTargets(item)) {
+      if (selected.isGroup) cancelPipelineRun(selected.id)
+    }
+  }
+  // Apply the action locally first: the backend acknowledgement can be queued
+  // behind busy transfer connections, and a row that keeps saying "estimating"
+  // while the request waits is exactly the stuck state the user cannot escape.
+  const controlRequests: Promise<void>[] = []
+  for (const target of targets) {
     if (target.nativeDragID) {
       // Host events are authoritative, including pause-vs-delivery races.
-      try { await controlNativeDragJob(target.nativeDragID, action) }
-      catch (error) { ElMessage.error(error instanceof Error ? error.message : t('sftp.dragOutFailed')) }
-      return
+      controlRequests.push(controlNativeDragJob(target.nativeDragID, action)
+        .then(() => undefined)
+        .catch(error => { ElMessage.error(error instanceof Error ? error.message : t('sftp.dragOutFailed')) }))
+      continue
     }
-    await postJSON('/api/transfer-control', { id: target.id, action })
     if (action === 'pause') {
       target.paused = true
     } else if (action === 'resume') {
@@ -3267,21 +3267,45 @@ async function runTransferContextAction(action: 'pause' | 'resume' | 'cancel' | 
     } else {
       target.paused = false
       target.cancelled = true
+      target.retrying = false
       finishTransferItem(target, 'error', t('sftp.transferCancelled'))
     }
     if (target.parentID) syncTransferGroup(target.parentID)
-  }))
+    controlRequests.push(sendTransferControl(target.id, action))
+  }
   for (const selected of selectedTransferTargets(item)) {
     if (selected.isGroup) syncTransferGroup(selected.id)
     if (selected.parentID) syncTransferGroup(selected.parentID)
   }
-  if (action === 'cancel') {
-    for (const selected of selectedTransferTargets(item)) {
-      if (selected.isGroup) cancelPipelineRun(selected.id)
-    }
-  }
   touchTransferItems()
   nextTick(updateTransferScrollbars)
+  await Promise.all(controlRequests)
+}
+
+// Bounded control request: each attempt gets a short deadline, and a couple of
+// retries cover the moment when every browser connection is busy. The UI has
+// already applied the action, so a slow delivery never blocks the menu.
+async function sendTransferControl(id: string, action: 'pause' | 'resume' | 'cancel') {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await new Promise(resolve => window.setTimeout(resolve, 400 * attempt))
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), TRANSFER_CONTROL_TIMEOUT_MS)
+    try {
+      await api<{ ok: boolean }>('/api/transfer-control', {
+        method: 'POST',
+        body: JSON.stringify({ id, action }),
+        signal: controller.signal
+      })
+      return
+    } catch (error) {
+      if (attempt === 2) {
+        const message = error instanceof Error ? error.message : String(error)
+        log(`${action} ${id}: ${message}`)
+      }
+    } finally {
+      window.clearTimeout(timer)
+    }
+  }
 }
 
 // "Open" acts on the whole selection: right-clicking one row of a multi-row
@@ -4804,53 +4828,29 @@ async function uploadEntries(paneName: PaneName, entries: UploadEntry[], targetP
 }
 
 async function runWithTransferProgress(item: TransferItem, transferID: string, action: () => Promise<void>) {
-  let stopped = false
-  let timer: number | undefined
-  let progressError: Error | null = null
-  const poll = async () => {
-    if (stopped) return
-    let progress: TransferProgress
-    try {
-      progress = await api<TransferProgress>(`/api/transfer-progress?id=${encodeURIComponent(transferID)}`)
-    } catch {
-      // The transfer may not have reached the backend copy stage yet.
-      return
-    }
-    const target = currentTransferItem(item)
-    target.paused = progress.paused
-    target.cancelled = progress.cancelled
-    target.retrying = Boolean(progress.retrying) && !progress.done
-    target.attempt = progress.attempt || 0
-    target.maxAttempts = progress.max_attempts || 0
-    updateTransferItem(target, progress.loaded, progress.total || target.total)
-    if (progress.cancelled) {
-      stopped = true
-      throw new Error(progress.error || t('sftp.transferCancelled'))
-    }
-    if (progress.done && progress.error) {
-      stopped = true
-      throw new Error(progress.error)
-    }
-    if (progress.done) stopped = true
-  }
-  timer = window.setInterval(() => {
-    poll().catch(error => {
-      progressError = error as Error
-      stopped = true
-    })
-  }, TRANSFER_PROGRESS_POLL_MS)
+  const waiter = waitForTransferProgress(
+    handler => appEvents.watchTransfer(transferID, handler),
+    progress => {
+      const target = currentTransferItem(item)
+      target.paused = progress.paused
+      // A cancel applied locally must survive progress responses that were
+      // already in flight; otherwise the next queued file would start again.
+      target.cancelled = target.cancelled || progress.cancelled
+      target.retrying = Boolean(progress.retrying) && !progress.done
+      target.attempt = progress.attempt || 0
+      target.maxAttempts = progress.max_attempts || 0
+      updateTransferItem(target, progress.loaded, progress.total || target.total)
+    },
+    () => t('sftp.transferCancelled')
+  )
   try {
-    await poll()
     await action()
-    if (progressError) throw progressError
-    await poll()
-    if (progressError) throw progressError
+    await waiter.done
     const target = currentTransferItem(item)
     if (target.cancelled) throw new Error(target.error || t('sftp.transferCancelled'))
     if (target.status === 'running') updateTransferItem(target, target.total, target.total)
   } finally {
-    stopped = true
-    if (timer !== undefined) window.clearInterval(timer)
+    waiter.stop()
   }
 }
 

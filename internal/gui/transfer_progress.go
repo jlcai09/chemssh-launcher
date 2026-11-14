@@ -38,7 +38,10 @@ type transferProgressState struct {
 	hasSource     bool
 }
 
-var errTransferAlreadyRunning = errors.New("transfer is already running")
+var (
+	errTransferAlreadyRunning = errors.New("transfer is already running")
+	errTransferCancelled      = errors.New("transfer cancelled")
+)
 
 func newTransferProgressStore() *transferProgressStore {
 	return &transferProgressStore{items: map[string]*transferProgressState{}}
@@ -83,6 +86,12 @@ func (s *transferProgressStore) begin(id string, total int64, resume bool) (int6
 	state := s.stateLocked(id)
 	if state.active {
 		return 0, errTransferAlreadyRunning
+	}
+	// A cancel that lands while the request is still being queued must not be
+	// lost when the copy finally starts; otherwise the task stays "estimating"
+	// and keeps running after the user cancelled it.
+	if state.progress.Cancelled {
+		return 0, errTransferCancelled
 	}
 	state.active = true
 	offset := int64(0)
@@ -229,6 +238,29 @@ func (s *transferProgressStore) finish(id string, err error) {
 	state.progress = item
 	state.cond.Broadcast()
 	s.mu.Unlock()
+}
+
+// failStalled marks a transfer that stopped reporting progress as cancelled.
+// The copy loop notices the flag at its next checkpoint, and the UI can release
+// a row that would otherwise sit on "estimating" forever.
+func (s *transferProgressStore) failStalled(id string, idle time.Duration) bool {
+	if id == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.stateLocked(id)
+	if state.progress.Done || state.progress.Cancelled {
+		return false
+	}
+	state.progress.Cancelled = true
+	state.progress.Paused = false
+	state.progress.Done = true
+	state.progress.Retrying = false
+	state.progress.NextRetryAt = time.Time{}
+	state.progress.Error = fmt.Sprintf("transfer stalled: no progress for %s", idle.Round(time.Second))
+	state.cond.Broadcast()
+	return true
 }
 
 func (s *transferProgressStore) snapshot(id string) (transferProgress, bool) {

@@ -2,17 +2,20 @@
 // backend probes the host that owns the files, so the available formats differ
 // between the local pane and each remote server.
 
-export type ArchiveFormat = 'tar.zst' | 'tar.gz' | 'tar.xz' | 'tar'
+export type ArchiveFormat = 'tar.zst' | 'tar.gz' | 'tar.xz' | 'tar' | 'zip' | '7z'
 
 export interface ArchiveTools {
   tar: boolean
   zstd: boolean
   gzip: boolean
   xz: boolean
+  zip: boolean
+  unzip: boolean
+  seven_zip: boolean
   formats: ArchiveFormat[]
 }
 
-type ArchiveToolName = 'tar' | 'zstd' | 'gzip' | 'xz'
+type ArchiveToolName = 'tar' | 'zstd' | 'gzip' | 'xz' | 'unzip' | 'seven_zip'
 
 // Longest suffixes first, mirroring internal/archive/archive.go.
 const EXTRACT_SUFFIXES: [suffix: string, tools: ArchiveToolName[]][] = [
@@ -25,7 +28,9 @@ const EXTRACT_SUFFIXES: [suffix: string, tools: ArchiveToolName[]][] = [
   ['.tar', ['tar']],
   ['.zst', ['zstd']],
   ['.gz', ['gzip']],
-  ['.xz', ['xz']]
+  ['.xz', ['xz']],
+  ['.zip', ['unzip']],
+  ['.7z', ['seven_zip']]
 ]
 
 /** True when the name looks like an archive and the host can extract it. */

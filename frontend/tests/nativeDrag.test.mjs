@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs } from '../src/nativeDrag.ts'
+import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, mergeNativeDragRows, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs } from '../src/nativeDrag.ts'
 
 test('large ordinary transfer batches retain active native jobs and only trim finished history', () => {
   const native = { id: 'native', status: 'running', paused: true }
@@ -150,6 +150,32 @@ test('remote root folder children keep their full relative paths', () => {
   })
   assert.equal(roots[0].group, true)
   assert.equal(roots[0].children[0].name, 'tmp/file.dat')
+})
+
+test('progress updates replace native rows in place instead of reshuffling the list', () => {
+  const row = (id, owner, name = id) => ({ id, nativeDragOwnerID: owner, name })
+  const first = [row('a1', 'a'), row('b1', 'b'), { id: 'plain' }]
+
+  // A's progress must not move A above B even though A updated first.
+  const afterA = mergeNativeDragRows(first, 'a', [row('a1', 'a', 'A1')])
+  assert.deepEqual(afterA.map(item => item.id), ['a1', 'b1', 'plain'])
+  assert.equal(afterA[0].name, 'A1')
+
+  // B's progress must not reorder B either, even when its row count grows.
+  const afterB = mergeNativeDragRows(afterA, 'b', [row('b1', 'b'), row('b2', 'b')])
+  assert.deepEqual(afterB.map(item => item.id), ['a1', 'b1', 'b2', 'plain'])
+
+  // Only a job that has no rows yet joins at the top; later updates stay put.
+  const fresh = mergeNativeDragRows(afterB, 'c', [row('c1', 'c')])
+  assert.deepEqual(fresh.map(item => item.id), ['c1', 'a1', 'b1', 'b2', 'plain'])
+  const updated = mergeNativeDragRows(fresh, 'c', [row('c1', 'c', 'C1')])
+  assert.deepEqual(updated.map(item => item.id), ['c1', 'a1', 'b1', 'b2', 'plain'])
+  assert.equal(updated[0].name, 'C1')
+
+  // Rows matched by their nativeDragID are replaced too, as child rows are.
+  const child = { id: 'a1:file:x', nativeDragID: 'a', parentID: 'a1' }
+  const withChild = mergeNativeDragRows([row('a1', 'a'), child, row('b1', 'b')], 'a', [row('a1', 'a')])
+  assert.deepEqual(withChild.map(item => item.id), ['a1', 'b1'])
 })
 
 test('transfer history retains a complete collapsible parent and child family', () => {

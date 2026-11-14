@@ -19,6 +19,11 @@ import (
 const (
 	transferMaxAttempts   = 5
 	transferRetryMaxDelay = 15 * time.Second
+	// transferIdleTimeout is how long a copy may report no new bytes before it
+	// is treated as stalled. Dead transports are unblocked by the pool's
+	// reconnect, but a server-side stall has no other upper bound. The value
+	// leaves room for one reconnect (probe, dial and handshake deadlines).
+	transferIdleTimeout = 120 * time.Second
 )
 
 var transferRetryBaseDelay = time.Second
@@ -214,6 +219,23 @@ func transferRetryDelay(attempt int) time.Duration {
 	return delay
 }
 
+// startResumableTransfer claims the transfer id and copies in the background.
+// The HTTP handler returns immediately, so a long copy no longer occupies one of
+// the browser's few per-origin connections; that saturation is what blocked
+// cancelling, directory listings and terminal input while transfers ran.
+func (s *Server) startResumableTransfer(id string, resume bool, displayName string, src resumableSource, dst resumableTarget) error {
+	offset, err := s.transfers.begin(id, 0, resume)
+	if err != nil {
+		return err
+	}
+	go func() {
+		// The copy records both success and failure in the progress store; the
+		// HTTP response was already sent before the first byte moved.
+		_ = s.runClaimedResumableTransfer(id, offset, resume, displayName, src, dst)
+	}()
+	return nil
+}
+
 // runResumableTransfer copies src to dst and survives transport failures: each
 // retry reopens both sides at the last confirmed byte offset instead of
 // restarting, and re-establishes dropped SSH connections first.
@@ -222,6 +244,51 @@ func (s *Server) runResumableTransfer(id string, resume bool, displayName string
 	if err != nil {
 		return err
 	}
+	return s.runClaimedResumableTransfer(id, offset, resume, displayName, src, dst)
+}
+
+// startTransferWatchdog cancels a copy that reports no new bytes for
+// transferIdleTimeout. Retry backoff and user pauses count as intentional and
+// keep refreshing the deadline.
+func (s *Server) startTransferWatchdog(id string) func() {
+	if id == "" {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		lastLoaded := int64(-1)
+		lastChange := time.Now()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				progress, ok := s.transfers.snapshot(id)
+				if !ok || progress.Done {
+					return
+				}
+				if progress.Paused || progress.Retrying || progress.Loaded != lastLoaded {
+					lastLoaded = progress.Loaded
+					lastChange = time.Now()
+					continue
+				}
+				if time.Since(lastChange) >= transferIdleTimeout {
+					if s.transfers.failStalled(id, transferIdleTimeout) && s.logs != nil {
+						s.logs.add("transfer stalled, cancelled: " + id)
+					}
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func (s *Server) runClaimedResumableTransfer(id string, offset int64, resume bool, displayName string, src resumableSource, dst resumableTarget) error {
+	stopWatchdog := s.startTransferWatchdog(id)
+	defer stopWatchdog()
 	storedSize, storedModTime, hasStoredIdentity := s.transfers.sourceIdentity(id)
 	if !resume {
 		offset = 0

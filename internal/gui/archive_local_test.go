@@ -61,6 +61,53 @@ func TestLocalCompressNeverOverwritesAndExtracts(t *testing.T) {
 	}
 }
 
+func TestLocalZipAndSevenZipRoundTrip(t *testing.T) {
+	cases := []struct {
+		format string
+		tools  []string
+	}{
+		{"zip", []string{"zip", "unzip"}},
+		{"7z", []string{"7z"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.format, func(t *testing.T) {
+			for _, tool := range tc.tools {
+				if !hasLocalTool(tool) {
+					t.Skipf("%s is not installed", tool)
+				}
+			}
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "sub", "b.txt"), []byte("world"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			server := newLocalArchiveTestServer()
+			paths := []string{filepath.Join(dir, "a.txt"), filepath.Join(dir, "sub")}
+			created := postLocalCompress(t, server, localArchiveCompressRequest{TargetDirectory: dir, Paths: paths, Format: tc.format})
+			if created != "archive."+tc.format {
+				t.Fatalf("archive = %q", created)
+			}
+
+			out := filepath.Join(dir, "out")
+			if err := os.Mkdir(out, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			postLocalExtract(t, server, localArchiveExtractRequest{Path: filepath.Join(dir, created), TargetDirectory: out})
+			for _, name := range []string{"a.txt", filepath.Join("sub", "b.txt")} {
+				if _, err := os.Stat(filepath.Join(out, name)); err != nil {
+					t.Fatalf("extracted %s missing: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
 func TestLocalCompressRejectsEntriesOutsideTheFolder(t *testing.T) {
 	if !hasLocalTool("tar") {
 		t.Skip("tar is not installed")

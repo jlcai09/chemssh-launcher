@@ -276,8 +276,8 @@ func (s *Server) handleLocalCopy(w http.ResponseWriter, r *http.Request) {
 	}
 	src := newLocalFileSource(sourcePath)
 	dst := newLocalFileTarget(filepath.Join(targetDir, targetName))
-	if err := s.runResumableTransfer(req.TransferID, req.Resume, targetName, src, dst); err != nil {
-		writeError(w, http.StatusBadGateway, err)
+	if err := s.startResumableTransfer(req.TransferID, req.Resume, targetName, src, dst); err != nil {
+		writeTransferStartError(w, err)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true}, nil)

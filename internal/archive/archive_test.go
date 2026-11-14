@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-var allTools = Tools{Tar: true, Zstd: true, Gzip: true, Xz: true}
+var allTools = Tools{Tar: true, Zstd: true, Gzip: true, Xz: true, Zip: true, Unzip: true, SevenZip: true}
 
 func TestFormatsFollowInstalledTools(t *testing.T) {
 	cases := []struct {
@@ -14,10 +14,12 @@ func TestFormatsFollowInstalledTools(t *testing.T) {
 		tools Tools
 		want  []string
 	}{
-		{"all", allTools, []string{FormatTarZst, FormatTarGz, FormatTarXz, FormatTar}},
+		{"all", allTools, []string{FormatTarZst, FormatTarGz, FormatTarXz, FormatTar, FormatZip, FormatSevenZip}},
 		{"tar only", Tools{Tar: true}, []string{FormatTar}},
 		{"tar and zstd", Tools{Tar: true, Zstd: true}, []string{FormatTarZst, FormatTar}},
 		{"no tar", Tools{Zstd: true, Gzip: true, Xz: true}, []string{}},
+		{"zip and 7z without tar", Tools{Zip: true, Unzip: true, SevenZip: true}, []string{FormatZip, FormatSevenZip}},
+		{"unzip alone cannot compress", Tools{Unzip: true}, []string{}},
 	}
 	for _, tc := range cases {
 		if got := Formats(tc.tools); !reflect.DeepEqual(got, tc.want) {
@@ -63,8 +65,16 @@ func TestNextArchiveNameAppendsNewWhileTaken(t *testing.T) {
 		t.Fatalf("third name = %q", name)
 	}
 
-	if _, err := NextArchiveName("zip", selection, func(string) bool { return false }); err == nil {
+	if _, err := NextArchiveName("rar", selection, func(string) bool { return false }); err == nil {
 		t.Fatal("unknown format must fail")
+	}
+	name, err = NextArchiveName(FormatZip, selection, func(string) bool { return false })
+	if err != nil || name != "archive.zip" {
+		t.Fatalf("zip name = %q, %v", name, err)
+	}
+	name, err = NextArchiveName(FormatSevenZip, []string{"data"}, func(string) bool { return false })
+	if err != nil || name != "data.7z" {
+		t.Fatalf("7z name = %q, %v", name, err)
 	}
 }
 
@@ -100,6 +110,12 @@ func TestCompressPlanForEachFormat(t *testing.T) {
 
 	plan, _ = CompressPlan(allTools, FormatTarXz, "archive.tar.xz", []string{"a"}, "tok")
 	assertSteps(t, plan, [][]string{{"tar", "-cJf", "archive.tar.xz", "--", "a"}})
+
+	plan, _ = CompressPlan(allTools, FormatZip, "archive.zip", []string{"a.txt", "-b.txt"}, "tok")
+	assertSteps(t, plan, [][]string{{"zip", "-r", "archive.zip", "--", "a.txt", "-b.txt"}})
+
+	plan, _ = CompressPlan(allTools, FormatSevenZip, "archive.7z", []string{"a"}, "tok")
+	assertSteps(t, plan, [][]string{{"7z", "a", "-y", "archive.7z", "--", "a"}})
 }
 
 func TestCompressPlanForTarZstUsesTwoStepsAndLowestLevel(t *testing.T) {
@@ -121,6 +137,18 @@ func TestCompressPlanRejectsUnavailableFormat(t *testing.T) {
 	if _, err := CompressPlan(Tools{Tar: true}, FormatTarZst, "archive.tar.zst", []string{"a"}, "tok"); err == nil {
 		t.Fatal("tar.zst without zstd must fail")
 	}
+	if _, err := CompressPlan(Tools{Zip: true}, FormatZip, "archive.zip", []string{"a"}, "tok"); err != nil {
+		t.Fatal("zip with the zip tool must be offered")
+	}
+	if _, err := CompressPlan(Tools{Unzip: true}, FormatZip, "archive.zip", []string{"a"}, "tok"); err == nil {
+		t.Fatal("zip without the zip tool must fail")
+	}
+	if _, err := CompressPlan(Tools{SevenZip: true}, FormatSevenZip, "archive.7z", []string{"a"}, "tok"); err != nil {
+		t.Fatal("7z with the 7z tool must be offered")
+	}
+	if _, err := CompressPlan(Tools{Tar: true}, FormatSevenZip, "archive.7z", []string{"a"}, "tok"); err == nil {
+		t.Fatal("7z without the 7z tool must fail")
+	}
 	if _, err := CompressPlan(allTools, FormatTar, "archive.tar", nil, "tok"); err == nil {
 		t.Fatal("empty name list must fail")
 	}
@@ -139,7 +167,10 @@ func TestExtractPlanCoversEverySuffix(t *testing.T) {
 		{"a.txt.zst", [][]string{{"zstd", "-d", "-f", "/d/a.txt.zst"}}},
 		{"a.txt.gz", [][]string{{"gzip", "-d", "-f", "/d/a.txt.gz"}}},
 		{"a.txt.xz", [][]string{{"xz", "-d", "-f", "/d/a.txt.xz"}}},
+		{"a.zip", [][]string{{"unzip", "-o", "/d/a.zip"}}},
+		{"a.7z", [][]string{{"7z", "x", "-y", "/d/a.7z"}}},
 		{"A.TAR.GZ", [][]string{{"tar", "-xzf", "/d/A.TAR.GZ"}}},
+		{"A.ZIP", [][]string{{"unzip", "-o", "/d/A.ZIP"}}},
 	}
 	for _, tc := range cases {
 		plan, ok := ExtractPlan(tc.file, allTools, "/d/"+tc.file, "tok")
@@ -175,11 +206,26 @@ func TestExtractPlanRequiresMatchingTools(t *testing.T) {
 	if _, ok := ExtractPlan("a.tar", Tools{Tar: true}, "/d/a.tar", "tok"); !ok {
 		t.Fatal("plain tar must be offered with tar")
 	}
+	if _, ok := ExtractPlan("a.zip", Tools{Zip: true}, "/d/a.zip", "tok"); ok {
+		t.Fatal("zip extraction needs unzip, not zip")
+	}
+	if _, ok := ExtractPlan("a.zip", Tools{Unzip: true}, "/d/a.zip", "tok"); !ok {
+		t.Fatal("zip must be offered with unzip")
+	}
+	if _, ok := ExtractPlan("a.7z", Tools{Zip: true, Unzip: true}, "/d/a.7z", "tok"); ok {
+		t.Fatal("7z extraction needs 7z")
+	}
+	if _, ok := ExtractPlan("a.7z", Tools{SevenZip: true}, "/d/a.7z", "tok"); !ok {
+		t.Fatal("7z must be offered with 7z")
+	}
 	if _, ok := ExtractPlan("notes.txt", allTools, "/d/notes.txt", "tok"); ok {
 		t.Fatal("plain text is not an archive")
 	}
 	if SuffixSupported("notes.txt") {
 		t.Fatal("txt must not look like an archive")
+	}
+	if !SuffixSupported("a.zip") || !SuffixSupported("A.7Z") {
+		t.Fatal("zip and 7z must look like archives")
 	}
 }
 

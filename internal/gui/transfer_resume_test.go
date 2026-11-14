@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -338,5 +339,102 @@ func TestUnsupportedTransferIsNotRetried(t *testing.T) {
 	}
 	if src.calls != 1 {
 		t.Fatalf("Stat calls = %d, want 1 (no retries)", src.calls)
+	}
+}
+
+type gatedSource struct {
+	data    []byte
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *gatedSource) Stat() (int64, time.Time, error) {
+	return int64(len(s.data)), time.Unix(1700000000, 0), nil
+}
+
+func (s *gatedSource) OpenAt(offset int64) (io.ReadCloser, error) {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return io.NopCloser(bytes.NewReader(s.data[offset:])), nil
+}
+
+func (s *gatedSource) Reconnect() error { return nil }
+
+func TestStartResumableTransferReturnsWhileTheCopyIsStillRunning(t *testing.T) {
+	server := newTestTransferServer()
+	data := bytes.Repeat([]byte("x"), 256*1024)
+	src := &gatedSource{data: data, started: make(chan struct{}), release: make(chan struct{})}
+	dst := newLocalFileTarget(filepath.Join(t.TempDir(), "out.bin"))
+
+	// The start call represents the HTTP handler: it must return before the
+	// first byte moves, so a long copy cannot hold a browser connection.
+	if err := server.startResumableTransfer("async-copy", false, "out.bin", src, dst); err != nil {
+		t.Fatalf("startResumableTransfer: %v", err)
+	}
+	select {
+	case <-src.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("copy did not start in the background")
+	}
+	if progress, _ := server.transfers.snapshot("async-copy"); progress.Done {
+		t.Fatal("transfer must still be running while the source is gated")
+	}
+	close(src.release)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		progress, _ := server.transfers.snapshot("async-copy")
+		if progress.Done {
+			if progress.Error != "" {
+				t.Fatalf("progress error = %q", progress.Error)
+			}
+			if progress.Loaded != int64(len(data)) || progress.Total != int64(len(data)) {
+				t.Fatalf("progress = %d/%d, want %d", progress.Loaded, progress.Total, len(data))
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background transfer did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestCancelledTransferCannotStartLater(t *testing.T) {
+	store := newTransferProgressStore()
+	if err := store.control("picked", "cancel"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.begin("picked", 0, false); !errors.Is(err, errTransferCancelled) {
+		t.Fatalf("begin error = %v, want errTransferCancelled", err)
+	}
+	if progress, _ := store.snapshot("picked"); !progress.Cancelled {
+		t.Fatal("cancel flag must survive a refused start")
+	}
+	// A different transfer id is unaffected.
+	if _, err := store.begin("other", 0, false); err != nil {
+		t.Fatalf("begin other: %v", err)
+	}
+}
+
+func TestStalledTransferIsMarkedCancelledOnce(t *testing.T) {
+	store := newTransferProgressStore()
+	if _, err := store.begin("stalled", 100, false); err != nil {
+		t.Fatal(err)
+	}
+	store.setLoaded("stalled", 10)
+	if !store.failStalled("stalled", 2*time.Minute) {
+		t.Fatal("stalled transfer was not marked")
+	}
+	progress, _ := store.snapshot("stalled")
+	if !progress.Cancelled || !progress.Done {
+		t.Fatalf("progress = %+v, want cancelled and done", progress)
+	}
+	if !strings.Contains(progress.Error, "stalled") {
+		t.Fatalf("error = %q, want a stalled message", progress.Error)
+	}
+	if store.failStalled("stalled", time.Second) {
+		t.Fatal("an already terminal transfer must not be marked twice")
 	}
 }
