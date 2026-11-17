@@ -68,9 +68,10 @@ export class AppEvents {
     }
   }
 
-  sendTerminalInput(session: string, text: string): void {
-    if (!session || !text) return
-    this.sendTerminalBytes(session, base64FromText(text))
+  /** True only when handed to an open socket; this is not a remote ACK. */
+  sendTerminalInput(session: string, text: string): boolean {
+    if (!session || !text) return false
+    return this.sendTerminalBytes(session, base64FromText(text))
   }
 
   watchTransfer(id: string, handler: (progress: TransferProgressSnapshot) => void): () => void {
@@ -109,15 +110,16 @@ export class AppEvents {
     socket?.close()
   }
 
-  private sendTerminalBytes(session: string, data: string): void {
-    if (this.open && this.socket) {
+  private sendTerminalBytes(session: string, data: string): boolean {
+    if (this.open && this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ type: 'terminal:input', session, data }))
-      return
+      return true
     }
     // Replaying keystrokes after a reconnect would type into a shell whose
     // state the user cannot see any more, so input typed while the channel is
     // down is dropped instead of queued.
     this.ensureConnected()
+    return false
   }
 
   private send(payload: Record<string, unknown>): void {

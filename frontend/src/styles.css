@@ -2389,6 +2389,13 @@ p,
   user-select: none;
 }
 
+.terminal-flow-control-tooltip.el-popper {
+  max-width: min(380px, calc(100vw - 32px));
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
 /* Low effects mode: solid surfaces and explicit control states without
    backdrop blur, fixed backgrounds, or large soft shadows. This keeps WebView2
    GPU memory lower while preserving clear affordances for forms and buttons. */
@@ -3596,6 +3603,21 @@ body,
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10.5px;
   letter-spacing: 0.01em;
+}
+
+.terminal-flow-control {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-secondary);
+  font-size: inherit;
+  cursor: help;
+}
+
+.terminal-flow-control.is-pause-requested {
+  color: var(--el-color-warning);
 }
 
 .terminal-status {

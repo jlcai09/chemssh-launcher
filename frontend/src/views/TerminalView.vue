@@ -349,6 +349,11 @@
         <div class="terminal-footer-address" :title="connectionAddress">
           {{ connectionAddress || t('terminal.noSession') }}
         </div>
+        <el-tooltip v-if="connected" :content="t('terminal.flowControlHint')" placement="top" popper-class="chemssh-passive-tooltip terminal-flow-control-tooltip" :enterable="false" :show-after="500">
+          <span class="terminal-flow-control" :class="{ 'is-pause-requested': activeTab?.flowControl === 'pause-requested' }" role="status" aria-live="polite" aria-atomic="true">
+            {{ flowControlText }}
+          </span>
+        </el-tooltip>
         <div class="terminal-status" :class="`is-${statusKind}`">
           <span class="state-dot" :class="{ running: statusKind === 'connected' }" />
           <span>{{ statusText }}</span>
@@ -418,6 +423,7 @@ import { SearchAddon } from '@xterm/addon-search'
 import '@xterm/xterm/css/xterm.css'
 import { api, APIError, formatBytes, joinPath, parentPath, postJSON, withLauncherToken, type FileEntry, type Profile, type ShellOpenResponse } from '../api'
 import { appEvents } from '../appEvents'
+import { nextTerminalFlowControl, type TerminalFlowControl } from '../terminalFlowControl'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import {
   collectDropUploadEntries,
@@ -479,6 +485,7 @@ interface TerminalTab {
   id: string
   profileID: string
   status: TerminalStatus
+  flowControl: TerminalFlowControl
   cwd: string
   // Directory the shell sat in when the session dropped, so a reconnect can
   // `cd` back into it instead of landing in the remote home.
@@ -583,6 +590,16 @@ const activeTab = computed(() => tabs.value.find(tab => tab.id === activeTabID.v
 const activeProfile = computed(() => remoteProfiles.value.find(profile => profile.id === activeTab.value?.profileID) || null)
 const connectionAddress = computed(() => activeProfile.value ? profileSessionURL(activeProfile.value) : '')
 const connected = computed(() => activeTab.value?.status === 'connected')
+const flowControlText = computed(() => {
+  switch (activeTab.value?.flowControl) {
+    case 'pause-requested':
+      return t('terminal.flowControlPauseSent')
+    case 'resume-requested':
+      return t('terminal.flowControlResumeSent')
+    default:
+      return t('terminal.flowControlShortcuts')
+  }
+})
 const statusKind = computed<TerminalStatus>(() => activeTab.value?.status || 'idle')
 const canReconnect = computed(() => {
   const tab = activeTab.value
@@ -1195,6 +1212,7 @@ function resetStreamState(tab: TerminalTab) {
   // continues in that directory instead of the remote home.
   if (tab.cwd) tab.resumePath = tab.cwd
   tab.cwd = ''
+  tab.flowControl = 'none'
   const runtime = runtimeFor(tab)
   if (!runtime) return
   runtime.controlBuffer = ''
@@ -1599,6 +1617,7 @@ async function createTab(profileID = lastProfileID || remoteProfiles.value[0]?.i
     id: `terminal-tab-${Date.now()}-${tabSeq}`,
     profileID,
     status: 'idle',
+    flowControl: 'none',
     cwd: '',
     resumePath: '',
     wasConnected: false,
@@ -2241,10 +2260,16 @@ async function downloadFromShell(tab: TerminalTab, cwd: string, argv: string[]) 
   }
 }
 
-async function sendRawInput(tab: TerminalTab, data: string) {
+function sendTrackedInput(tab: TerminalTab, data: string) {
   const runtime = runtimeFor(tab)
   if (!runtime?.sessionID) return
-  appEvents.sendTerminalInput(runtime.sessionID, data)
+  if (appEvents.sendTerminalInput(runtime.sessionID, data)) {
+    tab.flowControl = nextTerminalFlowControl(tab.flowControl, data)
+  }
+}
+
+async function sendRawInput(tab: TerminalTab, data: string) {
+  sendTrackedInput(tab, data)
 }
 
 function quoteShellPath(path: string) {
@@ -2465,9 +2490,8 @@ async function flushInput(tab: TerminalTab) {
   try {
     while (runtime.pendingInput && runtime.sessionID) {
       const chunk = runtime.pendingInput
-      const id = runtime.sessionID
       runtime.pendingInput = ''
-      appEvents.sendTerminalInput(id, chunk)
+      sendTrackedInput(tab, chunk)
     }
   } finally {
     runtime.inputFlushing = false
