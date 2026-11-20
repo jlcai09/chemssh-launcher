@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 
-use windows::core::{implement, Result as WinResult, BOOL, HSTRING, PCWSTR};
+use windows::core::{implement, Result as WinResult, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{
-    DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, E_INVALIDARG, HWND, S_OK,
+    BOOL, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, E_INVALIDARG, HWND,
+    S_OK,
 };
 use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::Ole::{
