@@ -1,3 +1,5 @@
+import { invokeApi, isTauriRuntime } from './tauriBridge'
+
 export interface Profile {
   id: string
   kind: 'remote' | 'local' | ''
@@ -109,6 +111,17 @@ function requestNeedsLauncherToken(method?: string) {
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  if (isTauriRuntime()) {
+    try {
+      return await invokeApi<T>(path, options)
+    } catch (raw) {
+      const message = raw instanceof Error ? raw.message : String(raw)
+      const err = new APIError(message || 'Request failed')
+      err.status = 500
+      err.data = { error: message }
+      throw err
+    }
+  }
   const defaultHeaders: HeadersInit | undefined = options.body instanceof FormData ? undefined : { 'Content-Type': 'application/json' }
   const headers = mergeHeaders(defaultHeaders, options.headers)
   const res = await fetch(path, { ...options, headers: requestNeedsLauncherToken(options.method) ? withLauncherToken(headers) : headers })

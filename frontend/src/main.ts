@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import { installTauriNativeDragBridge } from './tauriBridge'
 import {
   ElAlert,
   ElButton,
@@ -65,6 +66,7 @@ async function bootstrap() {
     // The bridge is absent when the UI runs in an ordinary browser.
   }
   if (isTauri()) {
+    installTauriNativeDragBridge()
     void invoke('window_ready', { maximize: true }).catch(() => {
       // Rust fallback timer guarantees the window becomes visible.
     })

@@ -1,0 +1,55 @@
+name: Tauri v2 CI (0.4.0)
+
+on:
+  push:
+    branches: [tauri]
+  pull_request:
+    branches: [tauri]
+
+jobs:
+  linux-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install Linux Tauri v2 system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Frontend build & tests
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend run build
+          pnpm --dir frontend test
+      - name: Rust workspace check & tests
+        run: |
+          cargo check --workspace
+          cargo test --workspace
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Frontend build & tests
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend run build
+          pnpm --dir frontend test
+      - name: Rust workspace tests (including Windows OLE)
+        run: cargo test --workspace
+      - name: Build Tauri v2 Windows bundle
+        run: pnpm --dir frontend tauri build

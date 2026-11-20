@@ -5,6 +5,10 @@
 
 import type { TransferProgressSnapshot } from './transferProgress'
 
+function hasTauriInternals(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
 interface EventsFrame {
   type: string
   session?: string
@@ -55,6 +59,7 @@ export class AppEvents {
   private attempts = 0
   private terminals = new Map<string, TerminalWatch>()
   private transfers = new Map<string, Set<(progress: TransferProgressSnapshot) => void>>()
+  private tauriTransferSubscribed = false
 
   watchTerminal(session: string, sink: TerminalSink): () => void {
     if (!session) return () => {}
@@ -80,8 +85,27 @@ export class AppEvents {
     if (!handlers) {
       handlers = new Set()
       this.transfers.set(id, handlers)
-      this.ensureConnected()
-      this.send({ type: 'transfer:watch', id })
+      if (hasTauriInternals()) {
+        if (!this.tauriTransferSubscribed) {
+          this.tauriTransferSubscribed = true
+          void import('./tauriBridge')
+            .then(({ subscribeTauriTransferProgress }) =>
+              subscribeTauriTransferProgress(items => {
+                for (const progress of items) {
+                  const target = this.transfers.get(progress.id)
+                  if (!target) continue
+                  for (const cb of target) cb(progress)
+                }
+              }),
+            )
+            .catch(() => {
+              this.tauriTransferSubscribed = false
+            })
+        }
+      } else {
+        this.ensureConnected()
+        this.send({ type: 'transfer:watch', id })
+      }
     }
     handlers.add(handler)
     return () => {
@@ -111,6 +135,12 @@ export class AppEvents {
   }
 
   private sendTerminalBytes(session: string, data: string): boolean {
+    if (hasTauriInternals()) {
+      void import('./tauriBridge')
+        .then(({ sendTauriTerminalInput }) => sendTauriTerminalInput(session, data))
+        .catch(() => undefined)
+      return true
+    }
     if (this.open && this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ type: 'terminal:input', session, data }))
       return true
