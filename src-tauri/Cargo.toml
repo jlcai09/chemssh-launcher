@@ -12,13 +12,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 core-config = { path = "../crates/core-config" }
 core-secret = { path = "../crates/core-secret" }
 core-session = { path = "../crates/core-session" }
+core-ssh = { path = "../crates/core-ssh" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["macros", "sync", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

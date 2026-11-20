@@ -50,6 +50,18 @@ pub fn run() {
             commands::backend::get_backend_info,
             commands::backend::export_profiles,
             commands::backend::import_profiles,
+            commands::sessions::test_profile_connection,
+            commands::sessions::start_session,
+            commands::sessions::pause_forwarding,
+            commands::sessions::stop_session,
+            commands::sessions::get_session_status,
+            commands::sessions::list_session_statuses,
+            commands::sessions::get_session_logs,
+            commands::sessions::stream_session_logs,
+            commands::terminal::open_terminal,
+            commands::terminal::send_terminal_input,
+            commands::terminal::resize_terminal,
+            commands::terminal::close_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ChemSSH Launcher Tauri application");

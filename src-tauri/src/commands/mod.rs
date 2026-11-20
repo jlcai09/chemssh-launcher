@@ -1,5 +1,7 @@
 pub mod backend;
 pub mod profiles;
+pub mod sessions;
+pub mod terminal;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
