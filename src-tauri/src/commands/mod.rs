@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod dragout;
 pub mod local_fs;
 pub mod profiles;
 pub mod sessions;

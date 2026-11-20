@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager, WindowEvent};
 
 use crate::commands::WindowRevealState;
 use crate::state::AppState;
@@ -31,6 +31,23 @@ pub fn run() {
                 }
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+                let active_transfers = state.transfers.active_count();
+                let active_drags = state.drag_jobs.active_count();
+                if active_transfers > 0 || active_drags > 0 {
+                    api.prevent_close();
+                    let _ = window.emit(
+                        "app://close-requested",
+                        commands::dragout::ActiveWorkSummary {
+                            active_transfers,
+                            active_drag_jobs: active_drags,
+                        },
+                    );
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::ping,
@@ -91,6 +108,11 @@ pub fn run() {
             commands::sftp::sftp_archive_tools,
             commands::sftp::sftp_compress,
             commands::sftp::sftp_extract,
+            commands::dragout::is_native_drag_supported,
+            commands::dragout::list_native_drag_jobs,
+            commands::dragout::control_native_drag_job,
+            commands::dragout::has_active_work,
+            commands::dragout::start_native_drag_out,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ChemSSH Launcher Tauri application");

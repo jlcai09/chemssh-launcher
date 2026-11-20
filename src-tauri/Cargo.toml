@@ -18,6 +18,7 @@ core-secret = { path = "../crates/core-secret" }
 core-session = { path = "../crates/core-session" }
 core-ssh = { path = "../crates/core-ssh" }
 core-transfer = { path = "../crates/core-transfer" }
+win-native = { path = "../crates/win-native" }
 russh-sftp = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use core_config::{paths, FileStore};
 use core_secret::{KeyringStore, SecretStore};
 use core_transfer::TransferProgressStore;
+use win_native::DragJobRegistry;
 
 use crate::commands::sessions::SessionManager;
 use crate::commands::sftp::SftpManager;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub terminals: Arc<TerminalManager>,
     pub sftp: Arc<SftpManager>,
     pub transfers: Arc<TransferProgressStore>,
+    pub drag_jobs: Arc<DragJobRegistry>,
 }
 
 impl AppState {
@@ -40,6 +42,7 @@ impl AppState {
             terminals: Arc::new(TerminalManager::default()),
             sftp: Arc::new(SftpManager::default()),
             transfers: Arc::new(TransferProgressStore::new()),
+            drag_jobs: Arc::new(DragJobRegistry::new()),
         })
     }
 
@@ -62,6 +65,7 @@ impl AppState {
             terminals: Arc::new(TerminalManager::default()),
             sftp: Arc::new(SftpManager::default()),
             transfers: Arc::new(TransferProgressStore::new()),
+            drag_jobs: Arc::new(DragJobRegistry::new()),
         }
     }
 }
