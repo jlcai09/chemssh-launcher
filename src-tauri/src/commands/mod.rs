@@ -1,7 +1,10 @@
 pub mod backend;
+pub mod local_fs;
 pub mod profiles;
 pub mod sessions;
+pub mod sftp;
 pub mod terminal;
+pub mod transfer;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

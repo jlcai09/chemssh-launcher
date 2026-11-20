@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use core_config::{paths, FileStore};
 use core_secret::{KeyringStore, SecretStore};
+use core_transfer::TransferProgressStore;
 
 use crate::commands::sessions::SessionManager;
+use crate::commands::sftp::SftpManager;
 use crate::commands::terminal::TerminalManager;
 
 pub struct AppState {
@@ -16,6 +18,8 @@ pub struct AppState {
     pub sftp_cache_dir: PathBuf,
     pub sessions: Arc<SessionManager>,
     pub terminals: Arc<TerminalManager>,
+    pub sftp: Arc<SftpManager>,
+    pub transfers: Arc<TransferProgressStore>,
 }
 
 impl AppState {
@@ -34,6 +38,8 @@ impl AppState {
             sftp_cache_dir,
             sessions: Arc::new(SessionManager::default()),
             terminals: Arc::new(TerminalManager::default()),
+            sftp: Arc::new(SftpManager::default()),
+            transfers: Arc::new(TransferProgressStore::new()),
         })
     }
 
@@ -54,6 +60,8 @@ impl AppState {
             sftp_cache_dir,
             sessions: Arc::new(SessionManager::default()),
             terminals: Arc::new(TerminalManager::default()),
+            sftp: Arc::new(SftpManager::default()),
+            transfers: Arc::new(TransferProgressStore::new()),
         }
     }
 }
