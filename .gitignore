@@ -25,6 +25,10 @@
 *.out
 coverage.*
 
+# Rust / Tauri build output
+/target/
+/src-tauri/target/
+
 # Frontend dependencies/build output
 /frontend/node_modules/
 /frontend/dist/

@@ -1,0 +1,4 @@
+[package]
+name = "core-secret"
+version.workspace = true
+edition.workspace = true

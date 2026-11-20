@@ -1,0 +1,4 @@
+[package]
+name = "win-native"
+version.workspace = true
+edition.workspace = true

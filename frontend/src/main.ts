@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import {
   ElAlert,
   ElButton,
@@ -62,6 +63,11 @@ async function bootstrap() {
     ;(window as Window & { __chemsshAppReady?: () => void }).__chemsshAppReady?.()
   } catch {
     // The bridge is absent when the UI runs in an ordinary browser.
+  }
+  if (isTauri()) {
+    void invoke('window_ready', { maximize: true }).catch(() => {
+      // Rust fallback timer guarantees the window becomes visible.
+    })
   }
 }
 

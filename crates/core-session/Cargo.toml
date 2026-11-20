@@ -1,0 +1,4 @@
+[package]
+name = "core-session"
+version.workspace = true
+edition.workspace = true

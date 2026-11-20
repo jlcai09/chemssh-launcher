@@ -1,0 +1,4 @@
+[package]
+name = "core-config"
+version.workspace = true
+edition.workspace = true

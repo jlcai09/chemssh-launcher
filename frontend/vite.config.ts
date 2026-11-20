@@ -6,11 +6,12 @@ const frontendRoot = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
   root: frontendRoot,
-  base: '/static/vue/',
+  base: '/',
   plugins: [vue()],
   server: {
     host: '127.0.0.1',
     port: 5174,
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8888',
@@ -23,7 +24,7 @@ export default defineConfig({
     }
   },
   build: {
-    outDir: '../internal/gui/static/vue',
+    outDir: 'dist',
     emptyOutDir: true
   }
 })

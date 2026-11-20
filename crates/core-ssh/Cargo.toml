@@ -1,0 +1,4 @@
+[package]
+name = "core-ssh"
+version.workspace = true
+edition.workspace = true

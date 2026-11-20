@@ -2,8 +2,11 @@
   "name": "chemssh-launcher-frontend",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5174",
+    "tauri": "tauri",
+    "test": "pnpm run test:native-drag && pnpm run test:transfer-progress && pnpm run test:app-events && pnpm run test:terminal-flow-control",
     "test:native-drag": "node --experimental-strip-types --test tests/nativeDrag.test.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 5174",
@@ -13,6 +16,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
+    "@tauri-apps/api": "^2.12.5",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0",
@@ -20,6 +24,7 @@
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.12.6",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "^5.7.3",
     "unplugin-element-plus": "^0.11.2",
