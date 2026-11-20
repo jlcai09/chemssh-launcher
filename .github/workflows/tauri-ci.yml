@@ -58,7 +58,7 @@ jobs:
       - name: Rust workspace tests (including Windows OLE)
         run: cargo test --workspace
       - name: Build Tauri v2 Windows bundle
-        run: pnpm --dir frontend tauri build
+        run: .\frontend\node_modules\.bin\tauri.cmd build
       - name: Upload Windows build artifacts
         uses: actions/upload-artifact@v4
         with:
