@@ -59,10 +59,18 @@ pub(crate) fn open_path_in_system(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let status = {
         use std::os::windows::process::CommandExt;
-        Command::new("explorer")
-            .arg(path)
-            .creation_flags(0x0800_0000)
-            .spawn()
+        if path.is_dir() {
+            Command::new("explorer")
+                .arg(path)
+                .creation_flags(0x0800_0000)
+                .spawn()
+        } else {
+            Command::new("rundll32.exe")
+                .arg("url.dll,FileProtocolHandler")
+                .arg(path)
+                .creation_flags(0x0800_0000)
+                .spawn()
+        }
     };
     #[cfg(target_os = "macos")]
     let status = Command::new("open").arg(path).spawn();
@@ -70,6 +78,50 @@ pub(crate) fn open_path_in_system(path: &Path) -> Result<(), String> {
     let status = Command::new("xdg-open").arg(path).spawn();
 
     status.map(|_| ()).map_err(|e| e.to_string())
+}
+
+pub(crate) fn open_text_file_in_system(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        return Command::new("notepad.exe")
+            .arg(path)
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if Command::new("open").args(["-t"]).arg(path).spawn().is_ok() {
+            return Ok(());
+        }
+        return Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LauncherLogsResponse {
+    pub lines: Vec<String>,
+}
+
+#[tauri::command]
+pub fn get_launcher_logs(state: State<'_, AppState>) -> LauncherLogsResponse {
+    LauncherLogsResponse {
+        lines: state.launcher_logs.snapshot(),
+    }
 }
 
 #[tauri::command]

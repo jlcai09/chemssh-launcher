@@ -3,11 +3,17 @@ pub mod hostkey;
 pub mod proxy_bridge;
 pub mod remote_command;
 pub mod shell;
+pub mod shell_integration;
 pub mod tunnel;
+pub mod x11;
 
+use std::time::Duration;
 use thiserror::Error;
 
-pub use client::{ExecOutput, SshConnection, SshCredentials};
+pub use client::{
+    fetch_local_identity, ChemSshIdentity, CheckPortResult, ExecOutput, RemoteProcessHandle,
+    SshConnection, SshCredentials,
+};
 pub use hostkey::{
     fingerprint_sha256, normalize_host_address, HostKeyPolicy, HostKeyVerificationError,
     KnownHostsVerifier,
@@ -21,8 +27,17 @@ pub use remote_command::{
     assemble_remote_command, effective_check_port_command, effective_local_start_command,
     effective_start_command, port_warning, shell_quote,
 };
-pub use shell::{PtyShellSession, SendInputResult, TerminalEvent};
+pub use shell::{PtyShellSession, SendInputResult, ShellOpenOptions, TerminalEvent};
+pub use shell_integration::{
+    build_query_cwd_command, build_shell_integration_setup_script,
+    cleanup_shell_integration_command, interactive_shell_command, parse_query_cwd_output,
+    parse_shell_integration_output, proxy_login_shell_command, ShellIntegration,
+};
 pub use tunnel::{LocalTunnel, ReverseProxyChannel};
+pub use x11::{
+    parse_x11_display, prepare_local_x_server, verify_x_server, ParsedX11Display, PreparedX11,
+    X11ForwarderState, X11Target,
+};
 
 #[derive(Debug, Error)]
 pub enum SshError {
@@ -46,6 +61,16 @@ pub enum SshError {
     Sftp(String),
     #[error("pty shell failed: {0}")]
     Shell(String),
+    #[error("x11 forwarding failed: {0}")]
+    X11(String),
+    #[error("x11 forwarding request timed out")]
+    X11Timeout,
+    #[error("ssh configuration error: {0}")]
+    Config(String),
+    #[error("ssh protocol error: {0}")]
+    Protocol(String),
+    #[error("ssh timeout after {0:?}")]
+    Timeout(Duration),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -7,7 +7,7 @@ use core_transfer::{
 };
 use tauri::State;
 
-use crate::commands::backend::open_path_in_system;
+use crate::commands::backend::{open_path_in_system, open_text_file_in_system};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -39,7 +39,14 @@ pub fn local_rename_cmd(from: String, to: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn local_delete_cmd(path: String) -> Result<(), String> {
-    local_delete(&PathBuf::from(path)).map_err(|e| e.to_string())
+    let target = PathBuf::from(path);
+    #[cfg(target_os = "windows")]
+    {
+        if win_native::move_to_trash(&target).is_ok() {
+            return Ok(());
+        }
+    }
+    local_delete(&target).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -75,6 +82,11 @@ pub fn local_copy_cmd(
 #[tauri::command]
 pub fn local_open_cmd(path: String) -> Result<(), String> {
     open_path_in_system(&PathBuf::from(path))
+}
+
+#[tauri::command]
+pub fn local_open_text_cmd(path: String) -> Result<(), String> {
+    open_text_file_in_system(&PathBuf::from(path))
 }
 
 #[tauri::command]

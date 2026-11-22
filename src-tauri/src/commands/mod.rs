@@ -4,6 +4,7 @@ pub mod local_fs;
 pub mod profiles;
 pub mod sessions;
 pub mod sftp;
+pub mod sftp_sync;
 pub mod terminal;
 pub mod transfer;
 

@@ -5,7 +5,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+use url::Url;
 
 use crate::commands::WindowRevealState;
 use crate::state::AppState;
@@ -16,9 +17,54 @@ pub fn run() {
     let reveal_state = WindowRevealState::default();
     let fallback_flag = Arc::clone(&reveal_state.revealed);
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(app_state)
         .manage(reveal_state)
+        .register_uri_scheme_protocol("fileicon", |ctx, request| {
+            if request.method() == tauri::http::Method::OPTIONS {
+                return tauri::http::Response::builder()
+                    .status(204)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                    .header("Access-Control-Allow-Headers", "*")
+                    .body(Vec::new())
+                    .unwrap_or_default();
+            }
+
+            let uri = request.uri().to_string();
+            let parsed = Url::parse(&uri).ok();
+            let mut name = String::new();
+            let mut is_dir = false;
+            let mut size = 16u32;
+
+            if let Some(url) = parsed {
+                for (k, v) in url.query_pairs() {
+                    match k.as_ref() {
+                        "name" => name = v.into_owned(),
+                        "is_dir" => {
+                            let val = v.trim().to_ascii_lowercase();
+                            is_dir = val == "1" || val == "true";
+                        }
+                        "size" => {
+                            if let Ok(parsed_size) = v.trim().parse::<u32>() {
+                                size = parsed_size;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let state = ctx.app_handle().state::<AppState>();
+            let icon = state.file_icons.get_icon(&name, is_dir, size);
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", icon.content_type)
+                .header("Cache-Control", "public, max-age=86400")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(icon.bytes.to_vec())
+                .unwrap_or_default()
+        })
         .setup(move |app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -65,6 +111,7 @@ pub fn run() {
             commands::backend::get_ui_settings,
             commands::backend::save_ui_settings,
             commands::backend::get_backend_info,
+            commands::backend::get_launcher_logs,
             commands::backend::open_config_dir,
             commands::backend::open_sftp_cache_dir,
             commands::backend::clear_cache,
@@ -80,6 +127,7 @@ pub fn run() {
             commands::sessions::get_session_logs,
             commands::sessions::stream_session_logs,
             commands::terminal::open_terminal,
+            commands::terminal::poll_terminal_events,
             commands::terminal::get_terminal_cwd,
             commands::terminal::send_terminal_input,
             commands::terminal::resize_terminal,
@@ -92,6 +140,7 @@ pub fn run() {
             commands::local_fs::local_delete_cmd,
             commands::local_fs::local_copy_cmd,
             commands::local_fs::local_open_cmd,
+            commands::local_fs::local_open_text_cmd,
             commands::local_fs::local_archive_tools,
             commands::local_fs::local_compress,
             commands::local_fs::local_extract,
@@ -101,6 +150,7 @@ pub fn run() {
             commands::transfer::control_transfer,
             commands::transfer::stream_transfer_progress,
             commands::sftp::sftp_connect,
+            commands::sftp::sftp_reconnect,
             commands::sftp::sftp_disconnect,
             commands::sftp::sftp_list,
             commands::sftp::sftp_realpath,
@@ -109,8 +159,16 @@ pub fn run() {
             commands::sftp::sftp_create_file,
             commands::sftp::sftp_rename,
             commands::sftp::sftp_delete,
+            commands::sftp::sftp_open_file,
+            commands::sftp::sftp_open_sync_events,
+            commands::sftp::sftp_server_copy_support,
+            commands::sftp::sftp_copy_on_server,
             commands::sftp::sftp_upload_local,
             commands::sftp::sftp_download_local,
+            commands::sftp::sftp_upload_bytes_begin,
+            commands::sftp::sftp_upload_bytes_chunk,
+            commands::sftp::sftp_upload_bytes_finish,
+            commands::sftp::sftp_download_bytes,
             commands::sftp::sftp_copy_remote,
             commands::sftp::sftp_archive_tools,
             commands::sftp::sftp_compress,
@@ -121,6 +179,25 @@ pub fn run() {
             commands::dragout::has_active_work,
             commands::dragout::start_native_drag_out,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ChemSSH Launcher Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building ChemSSH Launcher Tauri application");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            let state = app_handle.state::<AppState>();
+            let sessions = Arc::clone(&state.sessions);
+            let terminals = Arc::clone(&state.terminals);
+            let sftp = Arc::clone(&state.sftp);
+            tauri::async_runtime::block_on(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(3), async move {
+                    tokio::join!(
+                        sessions.stop_all_on_exit(),
+                        terminals.close_all(),
+                        sftp.disconnect_all(),
+                    );
+                })
+                .await;
+            });
+        }
+    });
 }

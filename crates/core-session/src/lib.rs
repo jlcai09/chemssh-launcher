@@ -3,7 +3,7 @@ pub mod port;
 
 use thiserror::Error;
 
-pub use health::{wait_for_url, wait_for_url_with_options, HealthOptions};
+pub use health::{probe_once, wait_for_url, wait_for_url_with_options, HealthOptions};
 pub use port::{check_port_available, is_port_available, suggest_free_ports};
 
 #[derive(Debug, Error)]
@@ -88,6 +88,7 @@ mod tests {
             Duration::from_millis(20),
             &HealthOptions {
                 reject_statuses: reject,
+                ..Default::default()
             },
         )
         .await

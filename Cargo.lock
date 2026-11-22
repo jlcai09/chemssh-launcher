@@ -542,6 +542,7 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "tokio",
+ "url",
  "win-native",
 ]
 
@@ -705,13 +706,17 @@ name = "core-ssh"
 version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "core-config",
+ "hex",
+ "rand 0.10.4",
  "regex",
  "russh",
  "russh-sftp",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5695,6 +5700,7 @@ dependencies = [
 name = "win-native"
 version = "0.4.0"
 dependencies = [
+ "png",
  "serde",
  "thiserror 2.0.21",
  "tokio",

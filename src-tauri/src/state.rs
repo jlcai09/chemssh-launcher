@@ -1,14 +1,46 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use core_config::{paths, FileStore};
 use core_secret::{KeyringStore, SecretStore};
 use core_transfer::TransferProgressStore;
-use win_native::DragJobRegistry;
+use win_native::{DragJobRegistry, FileIconService};
 
 use crate::commands::sessions::SessionManager;
 use crate::commands::sftp::SftpManager;
+use crate::commands::sftp_sync::SftpOpenSyncManager;
 use crate::commands::terminal::TerminalManager;
+
+const MAX_LAUNCHER_LOG_LINES: usize = 2000;
+
+#[derive(Default)]
+pub struct LauncherLogStore {
+    lines: Mutex<VecDeque<String>>,
+}
+
+impl LauncherLogStore {
+    pub fn push(&self, line: impl Into<String>) {
+        let raw = line.into();
+        let trimmed = raw.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.lines.lock() {
+            while guard.len() >= MAX_LAUNCHER_LOG_LINES {
+                guard.pop_front();
+            }
+            guard.push_back(trimmed.to_string());
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .map(|guard| guard.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
 
 pub struct AppState {
     pub profiles: Arc<FileStore>,
@@ -20,8 +52,11 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     pub terminals: Arc<TerminalManager>,
     pub sftp: Arc<SftpManager>,
+    pub sftp_sync: Arc<SftpOpenSyncManager>,
     pub transfers: Arc<TransferProgressStore>,
     pub drag_jobs: Arc<DragJobRegistry>,
+    pub file_icons: Arc<FileIconService>,
+    pub launcher_logs: Arc<LauncherLogStore>,
 }
 
 impl AppState {
@@ -41,8 +76,11 @@ impl AppState {
             sessions: Arc::new(SessionManager::default()),
             terminals: Arc::new(TerminalManager::default()),
             sftp: Arc::new(SftpManager::default()),
+            sftp_sync: Arc::new(SftpOpenSyncManager::new()),
             transfers: Arc::new(TransferProgressStore::new()),
             drag_jobs: Arc::new(DragJobRegistry::new()),
+            file_icons: Arc::new(FileIconService::new()),
+            launcher_logs: Arc::new(LauncherLogStore::default()),
         })
     }
 
@@ -64,8 +102,11 @@ impl AppState {
             sessions: Arc::new(SessionManager::default()),
             terminals: Arc::new(TerminalManager::default()),
             sftp: Arc::new(SftpManager::default()),
+            sftp_sync: Arc::new(SftpOpenSyncManager::new()),
             transfers: Arc::new(TransferProgressStore::new()),
             drag_jobs: Arc::new(DragJobRegistry::new()),
+            file_icons: Arc::new(FileIconService::new()),
+            launcher_logs: Arc::new(LauncherLogStore::default()),
         }
     }
 }

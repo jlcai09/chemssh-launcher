@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveTauriCommand } from '../src/tauriBridge.ts'
+import { resolveTauriCommand, tauriFileIconURL } from '../src/tauriBridge.ts'
 
 test('maps profile CRUD and secret-safe routes to Tauri commands', () => {
   assert.deepEqual(resolveTauriCommand('/api/profiles', 'GET'), {
@@ -101,4 +101,67 @@ test('maps session, terminal, SFTP, local FS, and transfer routes to Tauri comma
   assert.deepEqual(resolveTauriCommand('/api/backend/open-config-dir', 'POST'), {
     command: 'open_config_dir',
   })
+  assert.deepEqual(resolveTauriCommand('/api/launcher-logs', 'GET'), {
+    command: 'get_launcher_logs',
+  })
+  assert.deepEqual(resolveTauriCommand('/api/local/open-text', 'POST', { path: '/tmp/a.txt' }), {
+    command: 'local_open_text_cmd',
+    args: { path: '/tmp/a.txt' },
+  })
+  assert.deepEqual(
+    resolveTauriCommand('/api/sftp/reconnect', 'POST', { session: 's1', accept_host_key: true }),
+    {
+      command: 'sftp_reconnect',
+      args: { profileId: 's1', hostKeyPolicy: 'accept_new' },
+    },
+  )
+  assert.deepEqual(
+    resolveTauriCommand('/api/sftp/open', 'POST', { session: 's1', path: '/home/user/a.png' }),
+    {
+      command: 'sftp_open_file',
+      args: { profileId: 's1', path: '/home/user/a.png', asText: false },
+    },
+  )
+  assert.deepEqual(
+    resolveTauriCommand('/api/sftp/open-text', 'POST', { session: 's1', path: '/home/user/a.txt' }),
+    {
+      command: 'sftp_open_file',
+      args: { profileId: 's1', path: '/home/user/a.txt', asText: true },
+    },
+  )
+  assert.deepEqual(resolveTauriCommand('/api/sftp/open-sync-events?after=12', 'GET'), {
+    command: 'sftp_open_sync_events',
+    args: { after: 12 },
+  })
+  assert.deepEqual(
+    resolveTauriCommand('/api/sftp/server-copy-support?source=s1&target=s2', 'GET'),
+    {
+      command: 'sftp_server_copy_support',
+      args: { source: 's1', target: 's2' },
+    },
+  )
+  assert.deepEqual(
+    resolveTauriCommand('/api/sftp/copy-on-server', 'POST', {
+      source_session: 's1',
+      target_session: 's2',
+      target_path: '/home/user/dst',
+      items: [{ source_path: '/home/user/a', relative_path: 'a' }],
+    }),
+    {
+      command: 'sftp_copy_on_server',
+      args: {
+        sourceSession: 's1',
+        targetSession: 's2',
+        targetPath: '/home/user/dst',
+        items: [{ source_path: '/home/user/a', relative_path: 'a' }],
+      },
+    },
+  )
+})
+
+test('tauriFileIconURL encodes name, is_dir, and size parameters', () => {
+  const url = tauriFileIconURL('script.py', false, 16)
+  assert.match(url, /\/icon\?name=script\.py&is_dir=0&size=16$/)
+  const dirUrl = tauriFileIconURL('folder', true, 32)
+  assert.match(dirUrl, /\/icon\?name=folder&is_dir=1&size=32$/)
 })

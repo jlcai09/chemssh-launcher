@@ -18,12 +18,15 @@ pub async fn list_remote_dir(sftp: &SftpSession, path: &str) -> Result<Vec<FsEnt
         .map_err(|e| TransferError::Sftp(format!("list {path}: {e}")))?;
     let base = path.trim_end_matches('/');
     let mut entries = Vec::new();
+    let mut symlink_indices = Vec::new();
+
     for entry in dir {
         let name = entry.file_name();
         if name == "." || name == ".." {
             continue;
         }
         let meta = entry.metadata();
+        let is_symlink = entry.file_type().is_symlink() || meta.is_symlink();
         let is_dir = meta.is_dir();
         let full_path = if base.is_empty() {
             format!("/{name}")
@@ -31,6 +34,9 @@ pub async fn list_remote_dir(sftp: &SftpSession, path: &str) -> Result<Vec<FsEnt
             format!("{base}/{name}")
         };
         let mod_time_ms = meta.mtime.map(|m| m as i64 * 1000).unwrap_or(0);
+        if is_symlink {
+            symlink_indices.push((entries.len(), full_path.clone()));
+        }
         entries.push(FsEntry {
             name,
             path: full_path,
@@ -39,14 +45,116 @@ pub async fn list_remote_dir(sftp: &SftpSession, path: &str) -> Result<Vec<FsEnt
             mod_time_ms,
             mod_time: format_iso_utc(mod_time_ms),
             mode: format_unix_mode(is_dir, meta.permissions),
+            is_symlink,
+            link_target: String::new(),
+            link_broken: false,
         });
     }
+
+    if !symlink_indices.is_empty() {
+        let queue = tokio::sync::Mutex::new(symlink_indices);
+        let results = tokio::sync::Mutex::new(Vec::new());
+
+        let resolve_worker = || async {
+            loop {
+                let next = {
+                    let mut guard = queue.lock().await;
+                    guard.pop()
+                };
+                let Some((idx, full_path)) = next else {
+                    break;
+                };
+                let link_target = sftp.read_link(&full_path).await.unwrap_or_default();
+                let target_meta = sftp.metadata(&full_path).await.ok();
+                let mut guard = results.lock().await;
+                guard.push((idx, link_target, target_meta));
+            }
+        };
+
+        tokio::join!(
+            resolve_worker(),
+            resolve_worker(),
+            resolve_worker(),
+            resolve_worker(),
+            resolve_worker(),
+            resolve_worker(),
+            resolve_worker(),
+            resolve_worker(),
+        );
+
+        let resolved = results.into_inner();
+        for (idx, link_target, target_meta) in resolved {
+            if let Some(entry) = entries.get_mut(idx) {
+                entry.link_target = link_target;
+                match target_meta {
+                    Some(meta) => {
+                        let is_dir = meta.is_dir();
+                        let mod_time_ms = meta.mtime.map(|m| m as i64 * 1000).unwrap_or(entry.mod_time_ms);
+                        entry.is_dir = is_dir;
+                        entry.size = if is_dir { 0 } else { meta.size.unwrap_or(entry.size) };
+                        entry.mod_time_ms = mod_time_ms;
+                        entry.mod_time = format_iso_utc(mod_time_ms);
+                        entry.mode = format_unix_mode(is_dir, meta.permissions);
+                        entry.link_broken = false;
+                    }
+                    None => {
+                        entry.is_dir = false;
+                        entry.link_broken = true;
+                    }
+                }
+            }
+        }
+    }
+
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
+}
+
+pub async fn delete_remote_path(sftp: &SftpSession, path: &str) -> Result<(), TransferError> {
+    let lmeta = sftp
+        .symlink_metadata(path)
+        .await
+        .map_err(|e| TransferError::Sftp(format!("lstat {path}: {e}")))?;
+
+    if lmeta.is_symlink() || !lmeta.is_dir() {
+        sftp.remove_file(path)
+            .await
+            .map_err(|e| TransferError::Sftp(format!("remove {path}: {e}")))?;
+        return Ok(());
+    }
+
+    let entries = sftp
+        .read_dir(path)
+        .await
+        .map_err(|e| TransferError::Sftp(format!("read dir {path}: {e}")))?;
+    let base = path.trim_end_matches('/');
+    for entry in entries {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let child = if base.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("{base}/{name}")
+        };
+        if entry.file_type().is_symlink() || !entry.metadata().is_dir() {
+            sftp.remove_file(&child)
+                .await
+                .map_err(|e| TransferError::Sftp(format!("remove {child}: {e}")))?;
+        } else {
+            Box::pin(delete_remote_path(sftp, &child)).await?;
+        }
+    }
+
+    sftp.remove_dir(path)
+        .await
+        .map_err(|e| TransferError::Sftp(format!("rmdir {path}: {e}")))?;
+    Ok(())
 }
 
 pub async fn upload_file_resumable(

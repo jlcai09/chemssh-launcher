@@ -1,13 +1,20 @@
+pub mod file_icon;
+pub mod file_icon_fallback;
+#[cfg(target_os = "windows")]
+pub mod file_icon_windows;
 pub mod jobs;
 #[cfg(target_os = "windows")]
 pub mod ole_windows;
 #[cfg(not(target_os = "windows"))]
 pub mod platform_stub;
+pub mod trash_windows;
 
 use serde::Serialize;
 use thiserror::Error;
 
+pub use file_icon::{FileIconData, FileIconService};
 pub use jobs::{is_terminal_state, DragJob, DragJobRegistry, FileProgress};
+pub use trash_windows::move_to_trash;
 
 #[cfg(target_os = "windows")]
 pub use ole_windows::start_shell_file_drag;

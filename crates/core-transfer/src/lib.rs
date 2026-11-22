@@ -16,7 +16,8 @@ pub use local_fs::{
 };
 pub use progress::{TransferProgress, TransferProgressStore};
 pub use sftp_ops::{
-    copy_remote_to_remote, download_file_resumable, list_remote_dir, upload_file_resumable,
+    copy_remote_to_remote, delete_remote_path, download_file_resumable, list_remote_dir,
+    upload_file_resumable,
 };
 
 #[derive(Debug, Error)]

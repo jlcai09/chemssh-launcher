@@ -435,6 +435,7 @@ import {
 import { t } from '../i18n'
 import { onProfilesChanged } from '../profileEvents'
 import { isTerminalDirectory, terminalUploadDirectory } from '../terminalDirectory'
+import { downloadRemoteFileViaTauri, isTauriRuntime, uploadFormViaTauri } from '../tauriBridge'
 
 const props = defineProps<{ active: boolean }>()
 
@@ -1933,6 +1934,9 @@ function releaseSftpIfIdle(tab: TerminalTab) {
 }
 
 function uploadForm(form: FormData, onProgress?: (loaded: number) => void) {
+  if (isTauriRuntime()) {
+    return uploadFormViaTauri(form, loaded => onProgress?.(loaded))
+  }
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/sftp/upload')
@@ -2238,6 +2242,11 @@ async function downloadFromShell(tab: TerminalTab, cwd: string, argv: string[]) 
   try {
     const sessionID = await connectSftp(tab)
     for (const remotePath of paths) {
+      if (isTauriRuntime()) {
+        await downloadRemoteFileViaTauri(sessionID, remotePath)
+        if (paths.length > 1) await new Promise<void>(resolve => window.setTimeout(resolve, 300))
+        continue
+      }
       const res = await fetch(
         `/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(remotePath)}`,
         { headers: withLauncherToken() }

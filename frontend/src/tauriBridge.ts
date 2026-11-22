@@ -149,15 +149,39 @@ function decodeBase64Bytes(b64: string): Uint8Array {
   return bytes
 }
 
+function encodeBase64Bytes(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 8192
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
+  }
+  return btoa(binary)
+}
+
 interface TerminalStreamBuffer {
   sink: TerminalSink | null
   queued: TauriTerminalEvent[]
   exited: boolean
+  lastSeq: number
+  channelDelivered: boolean
 }
 
 const terminalStreams = new Map<string, TerminalStreamBuffer>()
+let terminalPollTimer: number | null = null
+let terminalPollInFlight = false
 
-function dispatchTerminalEvent(buf: TerminalStreamBuffer, ev: TauriTerminalEvent) {
+function dispatchTerminalEvent(
+  buf: TerminalStreamBuffer,
+  ev: TauriTerminalEvent,
+  fromChannel = false,
+) {
+  if (fromChannel) {
+    buf.channelDelivered = true
+  }
+  if (typeof ev.seq === 'number') {
+    if (ev.seq <= buf.lastSeq) return
+    buf.lastSeq = ev.seq
+  }
   if (!buf.sink) {
     buf.queued.push(ev)
     return
@@ -170,16 +194,64 @@ function dispatchTerminalEvent(buf: TerminalStreamBuffer, ev: TauriTerminalEvent
   }
 }
 
+async function pollTerminalEventsOnce(): Promise<void> {
+  if (terminalPollInFlight) return
+  const cursors: Record<string, number> = {}
+  let pending = false
+  for (const [sessionId, buf] of terminalStreams.entries()) {
+    if (!buf.exited && !buf.channelDelivered) {
+      cursors[sessionId] = buf.lastSeq
+      pending = true
+    }
+  }
+  if (!pending) {
+    if (terminalPollTimer !== null) {
+      window.clearInterval(terminalPollTimer)
+      terminalPollTimer = null
+    }
+    return
+  }
+  terminalPollInFlight = true
+  try {
+    const batches = await invoke<Record<string, TauriTerminalEvent[]>>('poll_terminal_events', {
+      cursors,
+    })
+    for (const [sessionId, events] of Object.entries(batches || {})) {
+      const buf = terminalStreams.get(sessionId)
+      if (!buf || !Array.isArray(events)) continue
+      for (const ev of events) {
+        dispatchTerminalEvent(buf, ev, false)
+      }
+    }
+  } catch (err) {
+    console.error('[tauriBridge] poll_terminal_events failed:', err)
+  } finally {
+    terminalPollInFlight = false
+  }
+}
+
+function ensureTerminalPollLoop(): void {
+  if (typeof window === 'undefined') return
+  if (terminalPollTimer !== null) return
+  terminalPollTimer = window.setInterval(() => {
+    void pollTerminalEventsOnce()
+  }, 100)
+}
+
 export function attachTauriTerminalSink(sessionId: string, sink: TerminalSink): () => void {
   let buf = terminalStreams.get(sessionId)
   if (!buf) {
-    buf = { sink: null, queued: [], exited: false }
+    buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false }
     terminalStreams.set(sessionId, buf)
   }
   buf.sink = sink
   const pending = buf.queued.splice(0, buf.queued.length)
   for (const ev of pending) {
-    dispatchTerminalEvent(buf, ev)
+    dispatchTerminalEvent(buf, ev, false)
+  }
+  if (!buf.exited && !buf.channelDelivered) {
+    ensureTerminalPollLoop()
+    void pollTerminalEventsOnce()
   }
   return () => {
     const current = terminalStreams.get(sessionId)
@@ -241,6 +313,9 @@ export function resolveTauriCommand(
   }
 
   // Backend & UI settings
+  if (pathname === '/api/launcher-logs' && verb === 'GET') {
+    return { command: 'get_launcher_logs' }
+  }
   if (pathname === '/api/ui-settings' && verb === 'GET') {
     return { command: 'get_ui_settings' }
   }
@@ -377,8 +452,11 @@ export function resolveTauriCommand(
       args: { src, dst, transferId: body.transfer_id ?? null },
     }
   }
-  if ((pathname === '/api/local/open' || pathname === '/api/local/open-text') && verb === 'POST') {
+  if (pathname === '/api/local/open' && verb === 'POST') {
     return { command: 'local_open_cmd', args: { path: body.path ?? '' } }
+  }
+  if (pathname === '/api/local/open-text' && verb === 'POST') {
+    return { command: 'local_open_text_cmd', args: { path: body.path ?? '' } }
   }
   if (pathname === '/api/local/archive-tools' && verb === 'GET') {
     return { command: 'local_archive_tools' }
@@ -417,7 +495,7 @@ export function resolveTauriCommand(
   }
   if (pathname === '/api/sftp/reconnect' && verb === 'POST') {
     return {
-      command: 'sftp_connect',
+      command: 'sftp_reconnect',
       args: {
         profileId: body.session ?? body.profile_id ?? body.id ?? '',
         hostKeyPolicy: resolveHostKeyPolicy(body),
@@ -575,6 +653,52 @@ export function resolveTauriCommand(
       },
     }
   }
+  if (pathname === '/api/sftp/open' && verb === 'POST') {
+    return {
+      command: 'sftp_open_file',
+      args: {
+        profileId: body.session ?? body.profile_id ?? '',
+        path: body.path ?? '',
+        asText: false,
+      },
+    }
+  }
+  if (pathname === '/api/sftp/open-text' && verb === 'POST') {
+    return {
+      command: 'sftp_open_file',
+      args: {
+        profileId: body.session ?? body.profile_id ?? '',
+        path: body.path ?? '',
+        asText: true,
+      },
+    }
+  }
+  if (pathname === '/api/sftp/open-sync-events' && verb === 'GET') {
+    return {
+      command: 'sftp_open_sync_events',
+      args: { after: Number(params.get('after') || 0) },
+    }
+  }
+  if (pathname === '/api/sftp/server-copy-support' && verb === 'GET') {
+    return {
+      command: 'sftp_server_copy_support',
+      args: {
+        source: params.get('source') ?? '',
+        target: params.get('target') ?? '',
+      },
+    }
+  }
+  if (pathname === '/api/sftp/copy-on-server' && verb === 'POST') {
+    return {
+      command: 'sftp_copy_on_server',
+      args: {
+        sourceSession: body.source_session ?? '',
+        targetSession: body.target_session ?? '',
+        targetPath: body.target_path ?? '',
+        items: Array.isArray(body.items) ? body.items : [],
+      },
+    }
+  }
   if (pathname === '/api/sftp/extract' && verb === 'POST') {
     const archiveName = body.archive_name ?? body.path ?? ''
     const cwd = body.cwd ?? body.target_directory ?? parentDir(archiveName, 'remote')
@@ -606,15 +730,6 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
   ) {
     return { ok: true } as unknown as T
   }
-  if (pathname === '/api/launcher-logs' && verb === 'GET') {
-    return { lines: [] } as unknown as T
-  }
-  if (pathname === '/api/sftp/server-copy-support' && verb === 'GET') {
-    return { supported: false } as unknown as T
-  }
-  if (pathname === '/api/sftp/open-sync-events' && verb === 'GET') {
-    return { events: [] } as unknown as T
-  }
   if (pathname === '/api/transfer-control' && verb === 'POST' && body.action === 'reset') {
     return { ok: true } as unknown as T
   }
@@ -637,7 +752,7 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
     let boundBuf: TerminalStreamBuffer | null = null
     channel.onmessage = ev => {
       if (boundBuf) {
-        dispatchTerminalEvent(boundBuf, ev)
+        dispatchTerminalEvent(boundBuf, ev, true)
       } else {
         earlyQueue.push(ev)
       }
@@ -657,13 +772,14 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
     })
     let buf = terminalStreams.get(res.id)
     if (!buf) {
-      buf = { sink: null, queued: [], exited: false }
+      buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false }
       terminalStreams.set(res.id, buf)
     }
     boundBuf = buf
     for (const ev of earlyQueue) {
-      dispatchTerminalEvent(buf, ev)
+      dispatchTerminalEvent(buf, ev, true)
     }
+    ensureTerminalPollLoop()
     return res as unknown as T
   }
 
@@ -672,25 +788,6 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
     terminalStreams.delete(sessionId)
     await invoke('close_terminal', { sessionId })
     return { ok: true } as unknown as T
-  }
-
-  // SFTP remote file open (downloads to cache dir then opens locally)
-  if ((pathname === '/api/sftp/open' || pathname === '/api/sftp/open-text') && verb === 'POST') {
-    const profileId = body.session ?? body.profile_id ?? ''
-    const remotePath = body.path ?? ''
-    const backend = await invoke<{ sftp_open_cache_dir: string }>('get_backend_info')
-    const localDir = joinTargetPath(backend.sftp_open_cache_dir, profileId || 'remote', 'local')
-    await invoke('local_mkdir_cmd', { path: localDir })
-    const localPath = joinTargetPath(localDir, fileBaseName(remotePath), 'local')
-    await invoke('sftp_download_local', {
-      profileId,
-      remotePath,
-      localPath,
-      transferId: `open-${Date.now()}`,
-      resume: false,
-    })
-    await invoke('local_open_cmd', { path: localPath })
-    return { path: localPath } as unknown as T
   }
 
   // Local directory listing returns `{ path, entries }`
@@ -896,4 +993,81 @@ export function installTauriNativeDragBridge(): void {
       )
     }
   }
+}
+
+export function tauriFileIconURL(name: string, isDir: boolean, size = 16): string {
+  const params = new URLSearchParams({
+    name: name || (isDir ? 'folder' : 'file'),
+    is_dir: isDir ? '1' : '0',
+    size: String(size || 16),
+  })
+  const isWindows =
+    typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent || '')
+  const origin = isWindows ? 'http://fileicon.localhost' : 'fileicon://localhost'
+  return `${origin}/icon?${params.toString()}`
+}
+
+export async function uploadFormViaTauri(
+  form: FormData,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<void> {
+  const file = form.get('file')
+  if (!(file instanceof File)) {
+    throw new Error('upload form is missing file payload')
+  }
+  const sessionId = String(form.get('session') ?? '')
+  const targetDir = String(form.get('path') ?? '.')
+  const relativePath = String(form.get('relative_path') ?? '') || file.name
+  const transferId = String(form.get('transfer_id') ?? '')
+  const remotePath = joinTargetPath(targetDir, relativePath, 'remote')
+
+  const { upload_id: uploadId } = await invoke<{ upload_id: string }>('sftp_upload_bytes_begin', {
+    profileId: sessionId,
+    remotePath,
+    transferId: transferId || null,
+    totalSize: file.size,
+  })
+
+  const chunkSize = 512 * 1024
+  try {
+    let offset = 0
+    while (offset < file.size) {
+      const end = Math.min(file.size, offset + chunkSize)
+      const buf = await file.slice(offset, end).arrayBuffer()
+      const chunkB64 = encodeBase64Bytes(new Uint8Array(buf))
+      await invoke('sftp_upload_bytes_chunk', { uploadId, chunkB64 })
+      offset = end
+      onProgress?.(offset, file.size)
+    }
+    await invoke('sftp_upload_bytes_finish', { uploadId, abort: false })
+  } catch (err) {
+    await invoke('sftp_upload_bytes_finish', { uploadId, abort: true }).catch(() => undefined)
+    throw err
+  }
+}
+
+export async function downloadRemoteFileViaTauri(
+  sessionId: string,
+  remotePath: string,
+  suggestedName?: string,
+): Promise<void> {
+  const res = await invoke<{ name: string; data_b64: string; size: number }>(
+    'sftp_download_bytes',
+    {
+      profileId: sessionId,
+      remotePath,
+    },
+  )
+  const bytes = decodeBase64Bytes(res.data_b64)
+  const copy = new Uint8Array(bytes.byteLength)
+  copy.set(bytes)
+  const blob = new Blob([copy.buffer])
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = suggestedName || res.name || fileBaseName(remotePath) || 'download'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

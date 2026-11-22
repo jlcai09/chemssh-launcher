@@ -71,18 +71,28 @@ export class AppEvents {
   private terminals = new Map<string, TerminalWatch>()
   private transfers = new Map<string, Set<(progress: TransferProgressSnapshot) => void>>()
   private tauriTransferSubscribed = false
+  private tauriBridgePromise: Promise<typeof import('./tauriBridge')> | null = null
+
+  private getTauriBridge(): Promise<typeof import('./tauriBridge')> {
+    if (!this.tauriBridgePromise) {
+      this.tauriBridgePromise = import('./tauriBridge')
+    }
+    return this.tauriBridgePromise
+  }
 
   watchTerminal(session: string, sink: TerminalSink): () => void {
     if (!session) return () => {}
     if (hasTauriInternals()) {
       let detach: (() => void) | null = null
       let cancelled = false
-      void import('./tauriBridge')
+      void this.getTauriBridge()
         .then(({ attachTauriTerminalSink }) => {
           if (cancelled) return
           detach = attachTauriTerminalSink(session, sink)
         })
-        .catch(() => undefined)
+        .catch(err => {
+          console.error('[appEvents] watchTerminal bridge failed:', err)
+        })
       return () => {
         cancelled = true
         detach?.()
@@ -113,7 +123,7 @@ export class AppEvents {
       if (hasTauriInternals()) {
         if (!this.tauriTransferSubscribed) {
           this.tauriTransferSubscribed = true
-          void import('./tauriBridge')
+          void this.getTauriBridge()
             .then(({ subscribeTauriTransferProgress }) =>
               subscribeTauriTransferProgress(items => {
                 for (const progress of items) {
@@ -123,8 +133,9 @@ export class AppEvents {
                 }
               }),
             )
-            .catch(() => {
+            .catch(err => {
               this.tauriTransferSubscribed = false
+              console.error('[appEvents] subscribeTauriTransferProgress failed:', err)
             })
         }
       } else {
@@ -163,9 +174,11 @@ export class AppEvents {
 
   private sendTerminalBytes(session: string, data: string): boolean {
     if (hasTauriInternals()) {
-      void import('./tauriBridge')
+      void this.getTauriBridge()
         .then(({ sendTauriTerminalInput }) => sendTauriTerminalInput(session, data))
-        .catch(() => undefined)
+        .catch(err => {
+          console.error('[appEvents] sendTauriTerminalInput failed:', err)
+        })
       return true
     }
     if (this.open && this.socket?.readyState === WebSocket.OPEN) {

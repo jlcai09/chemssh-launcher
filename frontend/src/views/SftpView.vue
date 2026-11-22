@@ -658,6 +658,7 @@ import {
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
 import { appEvents } from '../appEvents'
+import { downloadRemoteFileViaTauri, isTauriRuntime, tauriFileIconURL, uploadFormViaTauri } from '../tauriBridge'
 import { waitForTransferProgress } from '../transferProgress'
 import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, mergeNativeDragRows, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 import { onProfilesChanged } from '../profileEvents'
@@ -1706,6 +1707,9 @@ function fileIconSourceName(entry: FileEntry) {
 }
 
 function fileIconURL(entry: FileEntry) {
+  if (isTauriRuntime()) {
+    return tauriFileIconURL(fileIconSourceName(entry), entry.is_dir, 16)
+  }
   const params = new URLSearchParams({
     name: fileIconSourceName(entry),
     is_dir: entry.is_dir ? '1' : '0',
@@ -4182,6 +4186,14 @@ function downloadSelected(paneName: PaneName) {
   const tab = activeTab(paneName)
   const entry = tab?.selected[0]
   if (!tab?.session || !entry || entry.is_dir) return
+  if (isTauriRuntime()) {
+    void downloadRemoteFileViaTauri(tab.session, entry.path, entry.name).catch(err => {
+      const msg = t('sftp.entryError', { name: entry.name, error: (err as Error).message })
+      log(msg)
+      ElMessage.error(msg)
+    })
+    return
+  }
   const url = `/api/sftp/download?session=${encodeURIComponent(tab.session)}&path=${encodeURIComponent(entry.path)}`
   window.open(url, '_blank', 'noopener')
 }
@@ -4855,6 +4867,9 @@ async function runWithTransferProgress(item: TransferItem, transferID: string, a
 }
 
 function uploadForm(form: FormData) {
+  if (isTauriRuntime()) {
+    return uploadFormViaTauri(form)
+  }
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/sftp/upload')
