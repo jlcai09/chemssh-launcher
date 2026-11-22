@@ -4,8 +4,8 @@
   "version": "0.4.0",
   "identifier": "com.chemssh.launcher",
   "build": {
-    "beforeDevCommand": "pnpm --dir frontend dev",
-    "beforeBuildCommand": "pnpm --dir frontend build",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
     "devUrl": "http://127.0.0.1:5174",
     "frontendDist": "../frontend/dist"
   },
