@@ -6,7 +6,18 @@
 import type { TransferProgressSnapshot } from './transferProgress'
 
 function hasTauriInternals(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  if (typeof window === 'undefined') return false
+  if ('__TAURI_INTERNALS__' in window) return true
+  try {
+    if (window.parent && window.parent !== window && '__TAURI_INTERNALS__' in window.parent) {
+      ;(window as any).__TAURI_INTERNALS__ = (window.parent as any).__TAURI_INTERNALS__
+      ;(window as any).isTauri = true
+      return true
+    }
+  } catch {
+    // ignore cross-origin parent
+  }
+  return false
 }
 
 interface EventsFrame {
@@ -63,6 +74,20 @@ export class AppEvents {
 
   watchTerminal(session: string, sink: TerminalSink): () => void {
     if (!session) return () => {}
+    if (hasTauriInternals()) {
+      let detach: (() => void) | null = null
+      let cancelled = false
+      void import('./tauriBridge')
+        .then(({ attachTauriTerminalSink }) => {
+          if (cancelled) return
+          detach = attachTauriTerminalSink(session, sink)
+        })
+        .catch(() => undefined)
+      return () => {
+        cancelled = true
+        detach?.()
+      }
+    }
     this.terminals.set(session, { sink, lastSeq: 0 })
     this.ensureConnected()
     this.send({ type: 'terminal:attach', session, since: 0 })
@@ -114,7 +139,9 @@ export class AppEvents {
       current.delete(handler)
       if (current.size === 0) {
         this.transfers.delete(id)
-        this.send({ type: 'transfer:unwatch', id })
+        if (!hasTauriInternals()) {
+          this.send({ type: 'transfer:unwatch', id })
+        }
       }
     }
   }

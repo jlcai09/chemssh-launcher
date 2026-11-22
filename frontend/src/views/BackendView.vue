@@ -104,6 +104,7 @@ import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, Download, FolderOpened, Refresh, Upload } from '@element-plus/icons-vue'
 import { api, postJSON } from '../api'
+import { isTauriRuntime } from '../tauriBridge'
 import { createAutoScroll } from '../autoScroll'
 import { languagePreference, setLanguagePreference, systemLanguageTag, t } from '../i18n'
 import type { LanguagePreference } from '../i18n'
@@ -210,12 +211,18 @@ async function clearCache() {
 }
 
 async function exportProfiles() {
-  const res = await fetch('/api/backend/export')
-  if (!res.ok) {
-    const data = await res.json()
-    throw new Error(data.error || t('backend.exportFailed'))
+  let blob: Blob
+  if (isTauriRuntime()) {
+    const rawJson = await api<string>('/api/backend/export')
+    blob = new Blob([rawJson], { type: 'application/json;charset=utf-8' })
+  } else {
+    const res = await fetch('/api/backend/export')
+    if (!res.ok) {
+      const data = await res.json()
+      throw new Error(data.error || t('backend.exportFailed'))
+    }
+    blob = await res.blob()
   }
-  const blob = await res.blob()
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url

@@ -5,7 +5,7 @@ use russh_sftp::protocol::OpenFlags;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
-use crate::local_fs::FsEntry;
+use crate::local_fs::{format_iso_utc, format_unix_mode, FsEntry};
 use crate::progress::TransferProgressStore;
 use crate::TransferError;
 
@@ -30,12 +30,15 @@ pub async fn list_remote_dir(sftp: &SftpSession, path: &str) -> Result<Vec<FsEnt
         } else {
             format!("{base}/{name}")
         };
+        let mod_time_ms = meta.mtime.map(|m| m as i64 * 1000).unwrap_or(0);
         entries.push(FsEntry {
             name,
             path: full_path,
             is_dir,
             size: if is_dir { 0 } else { meta.size.unwrap_or(0) },
-            mod_time_ms: meta.mtime.map(|m| m as i64 * 1000).unwrap_or(0),
+            mod_time_ms,
+            mod_time: format_iso_utc(mod_time_ms),
+            mode: format_unix_mode(is_dir, meta.permissions),
         });
     }
     entries.sort_by(|a, b| {

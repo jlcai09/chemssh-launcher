@@ -173,11 +173,23 @@ pub fn reorder_profiles(state: State<'_, AppState>, ids: Vec<String>) -> Result<
 pub fn duplicate_profile(
     state: State<'_, AppState>,
     id_or_name: String,
+    new_name: Option<String>,
 ) -> Result<Profile, String> {
-    state
+    let source = state.profiles.get(&id_or_name).map_err(|e| e.to_string())?;
+    let mut dup = state
         .profiles
         .duplicate(&id_or_name)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if let Some(name) = new_name.filter(|s| !s.trim().is_empty()) {
+        dup.name = name;
+        dup = state.profiles.save(dup).map_err(|e| e.to_string())?;
+    }
+    for key in [KEY_PASSWORD, KEY_PRIVATE_PASSPHRASE, KEY_SECURITY_TOKEN] {
+        if let Ok(Some(val)) = state.secrets.get(&source.id, key) {
+            let _ = state.secrets.set(&dup.id, key, &val);
+        }
+    }
+    Ok(dup)
 }
 
 #[tauri::command]

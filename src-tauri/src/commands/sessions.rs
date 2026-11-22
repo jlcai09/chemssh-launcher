@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,8 +8,7 @@ use core_secret::{KEY_PASSWORD, KEY_PRIVATE_PASSPHRASE};
 use core_session::{check_port_available, suggest_free_ports, wait_for_url};
 use core_ssh::{
     assemble_remote_command, port_warning, remove_proxy_bridge, write_proxy_bridge, HostKeyPolicy,
-    HostKeyVerificationError, KnownHostsVerifier, LocalTunnel, ReverseProxyChannel, SshConnection,
-    SshCredentials, SshError,
+    KnownHostsVerifier, LocalTunnel, ReverseProxyChannel, SshConnection, SshCredentials, SshError,
 };
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -18,11 +18,25 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use crate::state::AppState;
 
 const MAX_LOG_LINES: usize = 2000;
+static NEXT_OPEN_SEQ: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn format_ssh_error(err: SshError) -> String {
+    match err {
+        SshError::HostKeyVerification(hk) => serde_json::json!({
+            "error": hk.to_string(),
+            "host_key": hk,
+        })
+        .to_string(),
+        other => other.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalProxyStatus {
     pub enabled: bool,
+    pub active: bool,
     pub proxy_url: Option<String>,
+    pub bridge: bool,
     pub bridge_path: Option<String>,
     pub error: Option<String>,
 }
@@ -30,9 +44,14 @@ pub struct LocalProxyStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionStatus {
     pub profile_id: String,
+    pub name: String,
     pub running: bool,
+    pub forwarding: bool,
     pub forwarding_active: bool,
+    pub open_seq: u64,
+    pub open_browser: bool,
     pub phase: String,
+    pub url: String,
     pub local_url: String,
     pub warnings: Vec<String>,
     pub local_proxy: LocalProxyStatus,
@@ -43,13 +62,13 @@ pub struct SessionStatus {
 pub struct LogBatchEvent {
     pub profile_id: String,
     pub lines: Vec<String>,
+    pub is_replay: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectionTestResult {
     pub ok: bool,
     pub message: String,
-    pub host_key_error: Option<HostKeyVerificationError>,
 }
 
 struct ActiveSession {
@@ -88,17 +107,43 @@ impl ActiveSession {
 #[derive(Default)]
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<ActiveSession>>>,
+    active_profile_id: Mutex<Option<String>>,
 }
 
 impl SessionManager {
     pub async fn status(&self, profile_id: &str) -> Option<SessionStatus> {
+        if profile_id.is_empty() {
+            let active_id = self.active_profile_id.lock().await.clone();
+            if let Some(id) = active_id {
+                if let Some(s) = self.sessions.lock().await.get(&id).cloned() {
+                    let st = s.status.lock().await.clone();
+                    if st.running {
+                        return Some(st);
+                    }
+                }
+            }
+            let sessions: Vec<Arc<ActiveSession>> =
+                self.sessions.lock().await.values().cloned().collect();
+            for s in sessions {
+                let st = s.status.lock().await.clone();
+                if st.running {
+                    return Some(st);
+                }
+            }
+            return None;
+        }
         let session = self.sessions.lock().await.get(profile_id).cloned()?;
         let snapshot = session.status.lock().await.clone();
         Some(snapshot)
     }
 
+    pub async fn activate(&self, profile_id: &str) {
+        *self.active_profile_id.lock().await = Some(profile_id.to_string());
+    }
+
     pub async fn all_statuses(&self) -> Vec<SessionStatus> {
-        let sessions: Vec<Arc<ActiveSession>> = self.sessions.lock().await.values().cloned().collect();
+        let sessions: Vec<Arc<ActiveSession>> =
+            self.sessions.lock().await.values().cloned().collect();
         let mut out = Vec::with_capacity(sessions.len());
         for s in sessions {
             out.push(s.status.lock().await.clone());
@@ -120,7 +165,10 @@ impl SessionManager {
     }
 }
 
-pub(crate) fn load_ssh_credentials(state: &AppState, profile: &Profile) -> Result<SshCredentials, String> {
+pub(crate) fn load_ssh_credentials(
+    state: &AppState,
+    profile: &Profile,
+) -> Result<SshCredentials, String> {
     let password = state
         .secrets
         .get(&profile.id, KEY_PASSWORD)
@@ -149,7 +197,6 @@ pub async fn test_profile_connection(
         return Ok(ConnectionTestResult {
             ok: true,
             message: format!("Local profile targets {}", profile.browser_url()),
-            host_key_error: None,
         });
     }
     let creds = load_ssh_credentials(&state, &profile)?;
@@ -165,19 +212,9 @@ pub async fn test_profile_connection(
             Ok(ConnectionTestResult {
                 ok: true,
                 message: "SSH connection and authentication succeeded".into(),
-                host_key_error: None,
             })
         }
-        Err(SshError::HostKeyVerification(err)) => Ok(ConnectionTestResult {
-            ok: false,
-            message: err.to_string(),
-            host_key_error: Some(err),
-        }),
-        Err(err) => Ok(ConnectionTestResult {
-            ok: false,
-            message: err.to_string(),
-            host_key_error: None,
-        }),
+        Err(err) => Err(format_ssh_error(err)),
     }
 }
 
@@ -195,6 +232,7 @@ pub async fn start_session(
 
     if let Some(existing) = state.sessions.status(&profile.id).await {
         if existing.running {
+            state.sessions.activate(&profile.id).await;
             return Ok(existing);
         }
     }
@@ -220,7 +258,7 @@ pub async fn start_session(
     let connection = Arc::new(
         SshConnection::connect(&profile, &creds, verifier)
             .await
-            .map_err(|e| e.to_string())?,
+            .map_err(format_ssh_error)?,
     );
 
     // Optional local network proxy: failure must degrade with warning, never fail the session.
@@ -229,7 +267,9 @@ pub async fn start_session(
     let mut proxy_bridge_path: Option<String> = None;
     let mut local_proxy_status = LocalProxyStatus {
         enabled: profile.proxy_active(),
+        active: false,
         proxy_url: None,
+        bridge: false,
         bridge_path: None,
         error: None,
     };
@@ -240,12 +280,21 @@ pub async fn start_session(
             Ok(channel) => {
                 let proxy_url = channel.proxy_url.clone();
                 proxy_env = proxy_env_pairs(&proxy_url, &lp.no_proxy);
+                local_proxy_status.active = true;
                 local_proxy_status.proxy_url = Some(proxy_url.clone());
 
                 match connection.open_sftp().await {
                     Ok(sftp) => {
-                        match write_proxy_bridge(&sftp, profile.remote_port, &proxy_url, &lp.no_proxy).await {
+                        match write_proxy_bridge(
+                            &sftp,
+                            profile.remote_port,
+                            &proxy_url,
+                            &lp.no_proxy,
+                        )
+                        .await
+                        {
                             Ok(path) => {
+                                local_proxy_status.bridge = true;
                                 local_proxy_status.bridge_path = Some(path.clone());
                                 proxy_bridge_path = Some(path);
                             }
@@ -282,12 +331,19 @@ pub async fn start_session(
         .await
         .map_err(|e| e.to_string())?;
 
+    let browser_url = profile.browser_url();
+    let open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
     let initial_status = SessionStatus {
         profile_id: profile.id.clone(),
+        name: profile.name.clone(),
         running: true,
+        forwarding: true,
         forwarding_active: true,
+        open_seq,
+        open_browser: profile.open_browser,
         phase: "starting".into(),
-        local_url: profile.browser_url(),
+        url: browser_url.clone(),
+        local_url: browser_url,
         warnings: warnings.clone(),
         local_proxy: local_proxy_status,
         last_error: None,
@@ -314,8 +370,8 @@ pub async fn start_session(
         .lock()
         .await
         .insert(profile.id.clone(), Arc::clone(&active));
+    state.sessions.activate(&profile.id).await;
 
-    // Start remote ChemSSH command in background and stream output to session logs.
     let remote_cmd = assemble_remote_command(&profile, &proxy_env);
     let exec_session = Arc::clone(&active);
     let exec_conn = Arc::clone(&connection);
@@ -333,7 +389,9 @@ pub async fn start_session(
         match result {
             Ok(code) => {
                 exec_session
-                    .push_log(format!("[session] remote command exited with status {code:?}"))
+                    .push_log(format!(
+                        "[session] remote command exited with status {code:?}"
+                    ))
                     .await;
             }
             Err(err) => {
@@ -344,15 +402,21 @@ pub async fn start_session(
         }
         let mut st = exec_session.status.lock().await;
         st.running = false;
+        st.forwarding = false;
         st.forwarding_active = false;
         st.phase = "stopped".into();
     });
 
-    // Wait briefly for health URL; if not yet ready, keep session running in starting phase.
     let health_url = profile.health_url();
     let health_session = Arc::clone(&active);
     tokio::spawn(async move {
-        match wait_for_url(&health_url, Duration::from_secs(30), Duration::from_millis(400)).await {
+        match wait_for_url(
+            &health_url,
+            Duration::from_secs(30),
+            Duration::from_millis(400),
+        )
+        .await
+        {
             Ok(()) => {
                 let mut st = health_session.status.lock().await;
                 if st.running {
@@ -371,6 +435,15 @@ pub async fn start_session(
     });
 
     Ok(initial_status)
+}
+
+#[tauri::command]
+pub async fn activate_session(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<(), String> {
+    state.sessions.activate(&profile_id).await;
+    Ok(())
 }
 
 /// Pauses local forwarding while keeping the remote reverse proxy channel and bridge file alive.
@@ -392,6 +465,7 @@ pub async fn pause_forwarding(
         tunnel.stop();
     }
     let mut status = session.status.lock().await;
+    status.forwarding = false;
     status.forwarding_active = false;
     status.phase = "paused".into();
     Ok(status.clone())
@@ -420,6 +494,7 @@ pub async fn stop_session(state: State<'_, AppState>, profile_id: String) -> Res
 
     let mut status = session.status.lock().await;
     status.running = false;
+    status.forwarding = false;
     status.forwarding_active = false;
     status.phase = "stopped".into();
     Ok(())
@@ -428,9 +503,12 @@ pub async fn stop_session(state: State<'_, AppState>, profile_id: String) -> Res
 #[tauri::command]
 pub async fn get_session_status(
     state: State<'_, AppState>,
-    profile_id: String,
+    profile_id: Option<String>,
 ) -> Result<Option<SessionStatus>, String> {
-    Ok(state.sessions.status(&profile_id).await)
+    Ok(state
+        .sessions
+        .status(profile_id.as_deref().unwrap_or(""))
+        .await)
 }
 
 #[tauri::command]
@@ -455,12 +533,11 @@ pub async fn stream_session_logs(
     on_event: Channel<LogBatchEvent>,
 ) -> Result<(), String> {
     let snapshot = state.sessions.logs(&profile_id).await;
-    if !snapshot.is_empty() {
-        let _ = on_event.send(LogBatchEvent {
-            profile_id: profile_id.clone(),
-            lines: snapshot,
-        });
-    }
+    let _ = on_event.send(LogBatchEvent {
+        profile_id: profile_id.clone(),
+        lines: snapshot,
+        is_replay: true,
+    });
     let Some(mut rx) = state.sessions.subscribe_logs(&profile_id).await else {
         return Ok(());
     };
@@ -478,7 +555,11 @@ pub async fn stream_session_logs(
                 }
                 _ = tick.tick(), if !batch.is_empty() => {
                     let lines = std::mem::take(&mut batch);
-                    if on_event.send(LogBatchEvent { profile_id: profile_id.clone(), lines }).is_err() {
+                    if on_event.send(LogBatchEvent {
+                        profile_id: profile_id.clone(),
+                        lines,
+                        is_replay: false,
+                    }).is_err() {
                         break;
                     }
                 }

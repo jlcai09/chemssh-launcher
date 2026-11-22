@@ -61,6 +61,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ArrowLeft, ArrowRight, Close, Download, FolderOpened, Monitor, Operation, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { api } from '../api'
 import { t } from '../i18n'
 
 type PageTitleKey = 'app.launcher' | 'app.terminal' | 'app.sftp' | 'app.backend' | 'shell.blankTitle'
@@ -203,7 +204,7 @@ function normalizeShellURL(value: string) {
   return value
 }
 
-const embeddableSchemes = ['http:', 'https:']
+const embeddableSchemes = ['http:', 'https:', 'tauri:']
 
 function absoluteURL(value: string) {
   const text = normalizeAddressInput(value)
@@ -458,8 +459,7 @@ async function pollSession() {
   if (pollInFlight || disposed) return
   pollInFlight = true
   try {
-    const res = await fetch('/api/session/status')
-    const status = await res.json()
+    const status = await api<any>('/api/session/status')
     if (disposed) return
     const url = status.forwarding && status.url ? status.url : ''
     const openSeq = Number(status.open_seq || 0)

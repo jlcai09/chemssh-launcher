@@ -11,11 +11,18 @@ use core_transfer::{
 };
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
+use serde::Serialize;
 use tauri::State;
 use tokio::sync::Mutex;
 
-use crate::commands::sessions::load_ssh_credentials;
+use crate::commands::sessions::{format_ssh_error, load_ssh_credentials};
 use crate::state::AppState;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SftpConnectResponse {
+    pub id: String,
+    pub path: String,
+}
 
 struct SftpEntry {
     connection: Arc<SshConnection>,
@@ -45,7 +52,7 @@ pub async fn sftp_connect(
     state: State<'_, AppState>,
     profile_id: String,
     host_key_policy: Option<HostKeyPolicy>,
-) -> Result<String, String> {
+) -> Result<SftpConnectResponse, String> {
     let profile = state
         .profiles
         .get(&profile_id)
@@ -63,7 +70,7 @@ pub async fn sftp_connect(
     let connection = Arc::new(
         SshConnection::connect(&profile, &creds, verifier)
             .await
-            .map_err(|e| e.to_string())?,
+            .map_err(format_ssh_error)?,
     );
     let sftp = Arc::new(connection.open_sftp().await.map_err(|e| e.to_string())?);
     let home = sftp
@@ -71,14 +78,15 @@ pub async fn sftp_connect(
         .await
         .unwrap_or_else(|_| "/".to_string());
 
+    let id = profile.id.clone();
     state.sftp.clients.lock().await.insert(
-        profile.id,
+        id.clone(),
         SftpEntry {
             connection,
             sftp,
         },
     );
-    Ok(home)
+    Ok(SftpConnectResponse { id, path: home })
 }
 
 #[tauri::command]
@@ -119,7 +127,42 @@ pub async fn sftp_mkdir(
     path: String,
 ) -> Result<(), String> {
     let (_, sftp) = state.sftp.get_entry(&profile_id).await?;
-    sftp.create_dir(&path).await.map_err(|e| e.to_string())
+    mkdir_remote_recursive(&sftp, &path).await
+}
+
+#[tauri::command]
+pub async fn sftp_mkdirs(
+    state: State<'_, AppState>,
+    profile_id: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let (_, sftp) = state.sftp.get_entry(&profile_id).await?;
+    for path in paths {
+        mkdir_remote_recursive(&sftp, &path).await?;
+    }
+    Ok(())
+}
+
+async fn mkdir_remote_recursive(sftp: &SftpSession, path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" || trimmed == "." {
+        return Ok(());
+    }
+    if sftp.try_exists(trimmed).await.unwrap_or(false) {
+        return Ok(());
+    }
+    let is_abs = trimmed.starts_with('/');
+    let mut cur = String::new();
+    for seg in trimmed.split('/').filter(|s| !s.is_empty()) {
+        if is_abs || !cur.is_empty() {
+            cur.push('/');
+        }
+        cur.push_str(seg);
+        if !sftp.try_exists(&cur).await.unwrap_or(false) {
+            let _ = sftp.create_dir(&cur).await;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -130,7 +173,10 @@ pub async fn sftp_create_file(
 ) -> Result<(), String> {
     let (_, sftp) = state.sftp.get_entry(&profile_id).await?;
     let _file = sftp
-        .open_with_flags(&path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE)
+        .open_with_flags(
+            &path,
+            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -152,11 +198,23 @@ pub async fn sftp_delete(
     state: State<'_, AppState>,
     profile_id: String,
     path: String,
-    is_dir: bool,
+    is_dir: Option<bool>,
 ) -> Result<(), String> {
-    let (_, sftp) = state.sftp.get_entry(&profile_id).await?;
-    if is_dir {
-        sftp.remove_dir(&path).await.map_err(|e| e.to_string())
+    let (conn, sftp) = state.sftp.get_entry(&profile_id).await?;
+    let dir_flag = match is_dir {
+        Some(v) => v,
+        None => sftp
+            .metadata(&path)
+            .await
+            .map(|m| m.is_dir())
+            .unwrap_or(false),
+    };
+    if dir_flag {
+        if sftp.remove_dir(&path).await.is_err() {
+            let cmd = format!("rm -rf -- {}", core_ssh::shell_quote(&path));
+            let _ = conn.exec_command(&cmd).await.map_err(|e| e.to_string())?;
+        }
+        Ok(())
     } else {
         sftp.remove_file(&path).await.map_err(|e| e.to_string())
     }

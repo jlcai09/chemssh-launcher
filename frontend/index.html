@@ -5,26 +5,40 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>ChemSSH Launcher</title>
+    <script>
+      if (window.parent !== window) {
+        document.documentElement.classList.add('is-embedded-frame');
+        try {
+          if (!window.__TAURI_INTERNALS__ && window.parent.__TAURI_INTERNALS__) {
+            window.__TAURI_INTERNALS__ = window.parent.__TAURI_INTERNALS__;
+            window.isTauri = true;
+          }
+          if (
+            !window.__TAURI_EVENT_PLUGIN_INTERNALS__ &&
+            window.parent.__TAURI_EVENT_PLUGIN_INTERNALS__
+          ) {
+            window.__TAURI_EVENT_PLUGIN_INTERNALS__ =
+              window.parent.__TAURI_EVENT_PLUGIN_INTERNALS__;
+          }
+        } catch (e) {}
+      }
+    </script>
     <style>
-      /* Splash screen — shown before Vue mounts and removed as soon as
-         <App> replaces the contents of #app. It uses the same light surface
-         as the app shell so the hand-off does not flash a different colour. */
+      /* Minimal flat splash matching the #f6f6f7 application shell background
+         so startup and tab switches never flash a mismatched gradient or card. */
       html,
       body {
         height: 100%;
-      }
-      body {
         margin: 0;
+        background: #f6f6f7;
         color: #1d1d1f;
-        background:
-          radial-gradient(1100px 720px at 16% 8%, #c8d9f4 0%, transparent 58%),
-          radial-gradient(980px 640px at 86% 18%, #e6d3e4 0%, transparent 60%),
-          radial-gradient(900px 700px at 50% 105%, #cfe4dd 0%, transparent 62%),
-          linear-gradient(155deg, #eef2fa 0%, #e4e9f3 46%, #dde5ee 100%);
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
           "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
         -webkit-font-smoothing: antialiased;
         text-rendering: optimizeLegibility;
+      }
+      html.is-embedded-frame #app-splash {
+        display: none !important;
       }
       #app-splash {
         position: fixed;
@@ -33,151 +47,51 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 24px;
+        background: #f6f6f7;
       }
-      .splash-card {
-        width: min(320px, 88vw);
-        padding: 30px 32px 26px;
-        border: 0.5px solid rgba(255, 255, 255, 0.7);
-        border-radius: 14px;
-        background: rgba(255, 255, 255, 0.86);
-        box-shadow:
-          0 28px 70px rgba(31, 45, 74, 0.22),
-          0 2px 6px rgba(31, 45, 74, 0.1);
-        display: flex;
-        flex-direction: column;
+      .splash-minimal {
+        display: inline-flex;
         align-items: center;
-        text-align: center;
+        gap: 10px;
+        user-select: none;
       }
-      .splash-logo {
-        width: 58px;
-        height: 58px;
-        margin-bottom: 16px;
-        filter: drop-shadow(0 6px 14px rgba(10, 132, 255, 0.28));
+      .splash-spinner {
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        border: 1.5px solid rgba(29, 29, 31, 0.12);
+        border-top-color: #6e6e73;
+        animation: splash-spin 0.75s linear infinite;
       }
-      .splash-ring {
-        transform-origin: 50% 50%;
-        animation: splash-spin 2.4s linear infinite;
-      }
-      .splash-title {
-        margin: 0 0 5px 0;
-        font-size: 16px;
-        font-weight: 600;
-        color: #1d1d1f;
-        letter-spacing: -0.2px;
-      }
-      .splash-subtitle {
-        margin: 0;
-        font-size: 11.5px;
+      .splash-label {
+        font-size: 12.5px;
+        font-weight: 500;
         color: #86868b;
         letter-spacing: 0.1px;
-        white-space: nowrap;
-      }
-      .splash-dot {
-        display: inline-block;
-        width: 3px;
-        height: 3px;
-        margin: 0 1px;
-        border-radius: 50%;
-        background: #86868b;
-        vertical-align: middle;
-        opacity: 0.3;
-        animation: splash-fade 1.4s linear infinite;
-      }
-      .splash-dot:nth-of-type(2) {
-        animation-delay: 0.2s;
-      }
-      .splash-dot:nth-of-type(3) {
-        animation-delay: 0.4s;
       }
       @keyframes splash-spin {
         to {
           transform: rotate(360deg);
         }
       }
-      @keyframes splash-fade {
-        0%,
-        80%,
-        100% {
-          opacity: 0.3;
-        }
-        40% {
-          opacity: 1;
-        }
-      }
       @media (prefers-reduced-motion: reduce) {
-        .splash-ring,
-        .splash-dot {
+        .splash-spinner {
           animation: none !important;
-        }
-        .splash-ring {
-          opacity: 0.6;
-        }
-        .splash-dot {
-          opacity: 1;
-        }
-      }
-      @media (prefers-contrast: more) {
-        .splash-card {
-          border-color: rgba(0, 0, 0, 0.35);
+          border-color: rgba(29, 29, 31, 0.28);
         }
       }
     </style>
   </head>
   <body>
     <div id="app">
-      <div id="app-splash">
-        <div class="splash-card" role="status" aria-live="polite">
-          <svg
-            class="splash-logo"
-            viewBox="0 0 56 56"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-            aria-hidden="true"
-          >
-            <rect x="2" y="2" width="52" height="52" rx="13" fill="url(#splash-tile)" />
-            <path
-              d="M 33 21 A 9 9 0 1 0 33 35"
-              stroke="#ffffff"
-              stroke-width="2.6"
-              stroke-linecap="round"
-            />
-            <g class="splash-ring">
-              <circle
-                cx="28"
-                cy="28"
-                r="20"
-                stroke="#ffffff"
-                stroke-width="1.4"
-                stroke-dasharray="3 5"
-                opacity="0.5"
-              />
-              <circle cx="28" cy="8" r="2.4" fill="#ffffff" />
-              <circle cx="10.7" cy="37.3" r="2.4" fill="#ffffff" />
-              <circle cx="45.3" cy="37.3" r="2.4" fill="#ffffff" />
-            </g>
-            <defs>
-              <linearGradient id="splash-tile" x1="8" y1="4" x2="48" y2="52" gradientUnits="userSpaceOnUse">
-                <stop stop-color="#4CA8FF" />
-                <stop offset="1" stop-color="#0a6fe0" />
-              </linearGradient>
-            </defs>
-          </svg>
-          <h2 class="splash-title">ChemSSH Launcher</h2>
-          <p class="splash-subtitle">
-            正在准备安全会话<span class="splash-dot"></span><span
-              class="splash-dot"
-            ></span
-            ><span class="splash-dot"></span>
-          </p>
+      <div id="app-splash" role="status" aria-live="polite">
+        <div class="splash-minimal">
+          <span class="splash-spinner" aria-hidden="true"></span>
+          <span class="splash-label">ChemSSH</span>
         </div>
       </div>
     </div>
     <script>
-      // Reveal the native WebView2 window as soon as this loading page is parsed.
-      // The bridge is injected by the host before body scripts run; this call is
-      // synchronous so it works even while the window is still hidden (where
-      // requestAnimationFrame may be paused). The host ignores extra calls.
       (function () {
         function reveal() {
           try {

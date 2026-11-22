@@ -426,6 +426,7 @@ import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowRight, CaretRight, Check, Clock, Close, CloseBold, Connection, Cpu, Delete, DocumentCopy, Download, FolderOpened, Lock, Monitor, MoreFilled, Plus, Refresh, Search, Setting, SwitchButton, WarningFilled } from '@element-plus/icons-vue'
 import { api, defaultX11Config, postJSON, putJSON, type LocalProxy, type Profile } from '../api'
+import { isTauriRuntime, subscribeTauriSessionLogs } from '../tauriBridge'
 import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import { t } from '../i18n'
@@ -1157,8 +1158,9 @@ watch(passwordInput, value => syncActionFromInput(value, passwordAction))
 watch(passphraseInput, value => syncActionFromInput(value, passphraseAction))
 watch(securityTokenInput, value => syncActionFromInput(value, securityTokenAction))
 
-// SSE for real-time log streaming
+// SSE / Tauri Channel for real-time log streaming
 let logEventSource: EventSource | null = null
+let logStreamGen = 0
 let replayLines: string[] | null = null
 
 function appendLogLine(line: string) {
@@ -1170,6 +1172,8 @@ function appendLogLine(line: string) {
 }
 
 function connectLogStream() {
+  logStreamGen += 1
+  const currentGen = logStreamGen
   if (logEventSource) {
     logEventSource.close()
     logEventSource = null
@@ -1178,6 +1182,22 @@ function connectLogStream() {
   if (!current.id) {
     replayLines = null
     logs.value = []
+    return
+  }
+
+  if (isTauriRuntime()) {
+    const profileId = current.id
+    void subscribeTauriSessionLogs(profileId, (batch, isInitialReplay) => {
+      if (logStreamGen !== currentGen || current.id !== profileId) return
+      if (isInitialReplay) {
+        logs.value = batch.slice(-500)
+      } else {
+        for (const line of batch) appendLogLine(line)
+      }
+      nextTick(() => {
+        logScroller.scrollToBottom(false)
+      })
+    }).catch(() => undefined)
     return
   }
 
@@ -1225,6 +1245,7 @@ function connectLogStream() {
 }
 
 function disconnectLogStream() {
+  logStreamGen += 1
   if (logEventSource) {
     logEventSource.close()
     logEventSource = null

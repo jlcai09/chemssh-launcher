@@ -87,6 +87,7 @@ import SftpView from './views/SftpView.vue'
 import ShellView from './views/ShellView.vue'
 import TerminalView from './views/TerminalView.vue'
 import { api, postJSON, withLauncherToken } from './api'
+import { isTauriRuntime } from './tauriBridge'
 import { locale, t } from './i18n'
 
 type RouteName = 'launcher' | 'sftp' | 'backend' | 'shell' | 'terminal'
@@ -119,6 +120,9 @@ function initialRoute(): RouteName {
   if (location.pathname === '/sftp') return 'sftp'
   if (location.pathname === '/terminal') return 'terminal'
   if (location.pathname === '/launcher-logs') return 'backend'
+  if (window.parent === window && isTauriRuntime()) {
+    return 'shell'
+  }
   return 'launcher'
 }
 
@@ -272,6 +276,7 @@ async function sendHeartbeat() {
 }
 
 function notifyBrowserClientClosed() {
+  if (isTauriRuntime()) return
   const path = `/api/browser-client/close?id=${encodeURIComponent(browserClientID)}`
   fetch(path, { method: 'POST', keepalive: true, headers: withLauncherToken() }).catch(() => undefined)
 }

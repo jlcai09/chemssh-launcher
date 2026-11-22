@@ -5,6 +5,10 @@ use core_transfer::{
     local_create_file, local_delete, local_home, local_mkdir, local_rename, run_local_step,
     ArchiveTools, FsEntry,
 };
+use tauri::State;
+
+use crate::commands::backend::open_path_in_system;
+use crate::state::AppState;
 
 #[tauri::command]
 pub fn get_local_home() -> Result<String, String> {
@@ -39,8 +43,38 @@ pub fn local_delete_cmd(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn local_copy_cmd(src: String, dst: String) -> Result<(), String> {
-    local_copy(&PathBuf::from(src), &PathBuf::from(dst)).map_err(|e| e.to_string())
+pub fn local_copy_cmd(
+    state: State<'_, AppState>,
+    src: String,
+    dst: String,
+    transfer_id: Option<String>,
+) -> Result<(), String> {
+    let src_path = PathBuf::from(&src);
+    let dst_path = PathBuf::from(&dst);
+    let tid = transfer_id.unwrap_or_default();
+    let total = std::fs::metadata(&src_path).map(|m| m.len()).unwrap_or(0);
+    if !tid.is_empty() {
+        let _ = state.transfers.begin(&tid, total, false);
+    }
+    match local_copy(&src_path, &dst_path) {
+        Ok(()) => {
+            if !tid.is_empty() {
+                state.transfers.finish(&tid, None);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if !tid.is_empty() {
+                state.transfers.finish(&tid, Some(err.to_string()));
+            }
+            Err(err.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+pub fn local_open_cmd(path: String) -> Result<(), String> {
+    open_path_in_system(&PathBuf::from(path))
 }
 
 #[tauri::command]
