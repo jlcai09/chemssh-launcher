@@ -143,6 +143,9 @@ impl SshConnection {
         config.inactivity_timeout = Some(Duration::from_secs(300));
         config.keepalive_interval = Some(Duration::from_secs(20));
         config.keepalive_max = 3;
+        if let Some(preferred_keys) = verifier.preferred_key_algorithms() {
+            config.preferred.key = std::borrow::Cow::Owned(preferred_keys);
+        }
 
         let last_hostkey_err = Arc::new(Mutex::new(None));
         let reverse_proxy_target = Arc::new(Mutex::new(None));

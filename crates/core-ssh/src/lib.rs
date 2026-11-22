@@ -139,4 +139,24 @@ mod tests {
         replace.verify(&key2).unwrap();
         strict.verify(&key2).unwrap();
     }
+
+    #[test]
+    fn known_hosts_prioritizes_existing_host_key_algorithm() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            "example.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBF9d\n",
+        )
+        .unwrap();
+
+        let verifier = KnownHostsVerifier::new(&path, "example.com", 22, HostKeyPolicy::Strict);
+        let algos = verifier.preferred_key_algorithms().unwrap();
+        assert_eq!(
+            algos.first(),
+            Some(&russh::keys::Algorithm::Ecdsa {
+                curve: russh::keys::EcdsaCurve::NistP256,
+            })
+        );
+    }
 }

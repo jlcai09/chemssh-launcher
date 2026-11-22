@@ -5,7 +5,8 @@ use std::sync::Mutex;
 
 use base64::engine::general_purpose::STANDARD_NO_PAD as BASE64_NO_PAD;
 use base64::Engine;
-use russh::keys::PublicKey;
+use russh::keys::{Algorithm, EcdsaCurve, HashAlg, PublicKey};
+use russh::Preferred;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -98,6 +99,68 @@ impl KnownHostsVerifier {
         }
     }
 
+    /// Returns a host-key algorithm preference list that prioritizes key types
+    /// already recorded for this host in `known_hosts`. This prevents false
+    /// "host key changed" warnings when switching between SSH implementations
+    /// with different default algorithm orders (e.g. Go's `x/crypto/ssh`
+    /// negotiating `ecdsa-sha2-nistp256` vs `russh` defaulting to `ssh-ed25519`).
+    pub fn preferred_key_algorithms(&self) -> Option<Vec<Algorithm>> {
+        let content = fs::read_to_string(&self.path).ok()?;
+        let address = normalize_host_address(&self.host, self.port);
+        let mut known_types = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = trimmed.split_whitespace().collect();
+            if fields.len() < 3 {
+                continue;
+            }
+            if host_matches(fields[0], &address) && !known_types.contains(&fields[1]) {
+                known_types.push(fields[1]);
+            }
+        }
+        if known_types.is_empty() {
+            return None;
+        }
+
+        let mut prioritized = Vec::new();
+        for kt in known_types {
+            match kt {
+                "ssh-ed25519" => prioritized.push(Algorithm::Ed25519),
+                "ecdsa-sha2-nistp256" => prioritized.push(Algorithm::Ecdsa {
+                    curve: EcdsaCurve::NistP256,
+                }),
+                "ecdsa-sha2-nistp384" => prioritized.push(Algorithm::Ecdsa {
+                    curve: EcdsaCurve::NistP384,
+                }),
+                "ecdsa-sha2-nistp521" => prioritized.push(Algorithm::Ecdsa {
+                    curve: EcdsaCurve::NistP521,
+                }),
+                "ssh-rsa" | "rsa-sha2-256" | "rsa-sha2-512" => {
+                    prioritized.push(Algorithm::Rsa {
+                        hash: Some(HashAlg::Sha512),
+                    });
+                    prioritized.push(Algorithm::Rsa {
+                        hash: Some(HashAlg::Sha256),
+                    });
+                    prioritized.push(Algorithm::Rsa { hash: None });
+                }
+                _ => {}
+            }
+        }
+        if prioritized.is_empty() {
+            return None;
+        }
+        for default_alg in Preferred::DEFAULT.key.iter() {
+            if !prioritized.contains(default_alg) {
+                prioritized.push(default_alg.clone());
+            }
+        }
+        Some(prioritized)
+    }
+
     pub fn verify(&self, key: &PublicKey) -> Result<(), SshError> {
         let _guard = KNOWN_HOSTS_LOCK
             .lock()
@@ -169,7 +232,7 @@ impl KnownHostsVerifier {
             }
             HostKeyPolicy::ReplaceChanged => {
                 if mismatch {
-                    replace_known_host(&self.path, &address, &target_key_body)
+                    replace_known_host(&self.path, &address, key_parts[0], &target_key_body)
                 } else {
                     append_known_host(&self.path, &address, &target_key_body)
                 }
@@ -203,15 +266,26 @@ fn append_known_host(path: &Path, address: &str, key_body: &str) -> Result<(), S
     Ok(())
 }
 
-fn replace_known_host(path: &Path, address: &str, key_body: &str) -> Result<(), SshError> {
+fn replace_known_host(
+    path: &Path,
+    address: &str,
+    key_type: &str,
+    key_body: &str,
+) -> Result<(), SshError> {
     let content = fs::read_to_string(path).unwrap_or_default();
     let mut kept = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
         let mut drop_line = false;
         if !trimmed.is_empty() && !trimmed.starts_with('#') {
-            if let Some(first) = trimmed.split_whitespace().next() {
-                if host_matches(first, address) {
+            let fields: Vec<&str> = trimmed.split_whitespace().collect();
+            if fields.len() >= 2 && host_matches(fields[0], address) {
+                // If an entry of the same key type exists, replace that key type;
+                // also drop mismatched entries for this address when replacing.
+                if fields[1] == key_type || !content.lines().any(|l| {
+                    let f: Vec<&str> = l.split_whitespace().collect();
+                    f.len() >= 2 && host_matches(f[0], address) && f[1] == key_type
+                }) {
                     drop_line = true;
                 }
             }
