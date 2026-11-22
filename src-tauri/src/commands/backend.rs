@@ -57,7 +57,13 @@ pub(crate) fn open_path_in_system(path: &Path) -> Result<(), String> {
         }
     }
     #[cfg(target_os = "windows")]
-    let status = Command::new("explorer").arg(path).spawn();
+    let status = {
+        use std::os::windows::process::CommandExt;
+        Command::new("explorer")
+            .arg(path)
+            .creation_flags(0x0800_0000)
+            .spawn()
+    };
     #[cfg(target_os = "macos")]
     let status = Command::new("open").arg(path).spawn();
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]

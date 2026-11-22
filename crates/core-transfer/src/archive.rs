@@ -150,27 +150,50 @@ pub fn build_extract_step(archive_name: &str, dest_dir: &str) -> Result<ArchiveS
 }
 
 pub async fn detect_local_tools() -> ArchiveTools {
-    let mut tools = ArchiveTools::default();
-    tools.tar = command_exists_local("tar").await;
-    tools.zstd = command_exists_local("zstd").await;
-    tools.gzip = command_exists_local("gzip").await;
-    tools.xz = command_exists_local("xz").await;
-    tools.zip = command_exists_local("zip").await;
-    tools.unzip = command_exists_local("unzip").await;
-    tools.seven_zip = command_exists_local("7z").await;
-    tools
+    ArchiveTools {
+        tar: command_exists_local("tar"),
+        zstd: command_exists_local("zstd"),
+        gzip: command_exists_local("gzip"),
+        xz: command_exists_local("xz"),
+        zip: command_exists_local("zip"),
+        unzip: command_exists_local("unzip"),
+        seven_zip: command_exists_local("7z"),
+    }
 }
 
-async fn command_exists_local(bin: &str) -> bool {
+fn command_exists_local(bin: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
     #[cfg(target_os = "windows")]
-    let probe = Command::new("where").arg(bin).output().await;
-    #[cfg(not(target_os = "windows"))]
-    let probe = Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {}", shell_quote(bin)))
-        .output()
-        .await;
-    probe.map(|o| o.status.success()).unwrap_or(false)
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    for dir in std::env::split_paths(&path_var) {
+        #[cfg(target_os = "windows")]
+        {
+            if dir.join(bin).is_file() {
+                return true;
+            }
+            for ext in &exts {
+                if dir.join(format!("{bin}{ext}")).is_file() {
+                    return true;
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let candidate = dir.join(bin);
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub async fn run_local_step(cwd: &Path, step: &ArchiveStep) -> Result<(), TransferError> {
@@ -178,11 +201,15 @@ pub async fn run_local_step(cwd: &Path, step: &ArchiveStep) -> Result<(), Transf
         .argv
         .split_first()
         .ok_or_else(|| TransferError::InvalidInput("empty archive command".into()))?;
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .await?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(cwd);
+    #[cfg(target_os = "windows")]
+    {
+        // CREATE_NO_WINDOW = 0x08000000: prevent spawning a visible console window
+        // when running from a GUI subsystem application on Windows.
+        cmd.creation_flags(0x0800_0000);
+    }
+    let output = cmd.output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(TransferError::Archive(format!(

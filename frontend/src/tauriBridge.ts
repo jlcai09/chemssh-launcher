@@ -808,11 +808,21 @@ export async function subscribeTauriSessionLogs(
   onBatch: (lines: string[], isInitialReplay: boolean) => void,
 ): Promise<void> {
   let first = true
-  const channel = new Channel<string[]>()
-  channel.onmessage = lines => {
-    const isInitial = first
+  const channel = new Channel<
+    string[] | { profile_id?: string; lines?: string[]; is_replay?: boolean }
+  >()
+  channel.onmessage = payload => {
+    const isInitial =
+      typeof payload === 'object' && payload !== null && !Array.isArray(payload) && typeof payload.is_replay === 'boolean'
+        ? payload.is_replay
+        : first
     first = false
-    onBatch(Array.isArray(lines) ? lines : [], isInitial)
+    const lines = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.lines)
+        ? payload.lines
+        : []
+    onBatch(lines, isInitial)
   }
   await invoke('stream_session_logs', { profileId, onEvent: channel })
 }
