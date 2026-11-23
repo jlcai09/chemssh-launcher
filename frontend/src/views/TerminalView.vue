@@ -516,6 +516,7 @@ interface TerminalRuntime {
   lastRows: number
   controlBuffer: string
   zmodemProbe: string
+  altScreen: boolean
   zmodemIntercepted: boolean
   sftpSessionID: string
   sftpProfileID: string
@@ -1282,7 +1283,7 @@ function filterZmodem(tab: TerminalTab, text: string) {
 // xterm would honour both, dropping text this tab is supposed to keep, so the
 // visible rows are moved into the scrollback first and a scrollback wipe is
 // ignored. `CSI J` alone is left alone: readline emits it while editing a line.
-const ERASE_DISPLAY = /\x1b\[(?:2J|3J)/g
+const ERASE_DISPLAY = /\x1b\[(?:2J|3J)|\x1b\[\?(?:1049|1047|47)[hl]/g
 
 function preserveHistory(tab: TerminalTab, text: string) {
   if (!text.includes('\x1b[')) return text
@@ -1291,16 +1292,28 @@ function preserveHistory(tab: TerminalTab, text: string) {
   let out = ''
   let index = 0
   let touched = false
+  // The buffer type is only updated after write() runs, so the alternate-screen
+  // state is tracked across chunks here; vim sends "?1049h" and "2J" together.
+  let alt = runtime.altScreen
   for (const match of text.matchAll(ERASE_DISPLAY)) {
     touched = true
     const at = match.index ?? 0
     out += text.slice(index, at)
     index = at + match[0].length
+    if (match[0].includes('?')) {
+      alt = match[0].endsWith('h')
+      out += match[0]
+      continue
+    }
     // No remote program may throw away this tab's scrollback.
-    if (match[0].endsWith('3J')) continue
-    out += screenIntoScrollback(runtime.term)
+    if (match[0].endsWith('3J')) {
+      if (alt) out += match[0]
+      continue
+    }
+    if (!alt) out += screenIntoScrollback(runtime.term)
     out += match[0]
   }
+  runtime.altScreen = alt
   return touched ? out + text.slice(index) : text
 }
 
@@ -1535,6 +1548,71 @@ async function refreshProfiles() {
   }
 }
 
+// xterm 6 smooth-scrolls its own scrollbar on wheel input, which fights the
+// alternate screen (vim, less): the viewport has nothing to scroll there, so
+// the wheel is turned into cursor keys instead and never reaches xterm.
+function installAltScreenWheel(term: Terminal, host: HTMLElement) {
+  let accum = 0
+  host.addEventListener('wheel', event => {
+    if (term.buffer.active.type !== 'alternate') return
+    if (host.querySelector('.xterm.enable-mouse-events')) return
+    event.preventDefault()
+    event.stopPropagation()
+    const unit = event.deltaMode === 1 ? 1 : event.deltaMode === 2 ? term.rows : 40
+    accum += (event.deltaY / unit) * (event.deltaMode === 0 ? 1 : 1)
+    const steps = Math.trunc(accum)
+    if (steps === 0) return
+    accum -= steps
+    const app = term.modes.applicationCursorKeysMode
+    const key = steps < 0 ? (app ? '\x1bOA' : '\x1b[A') : (app ? '\x1bOB' : '\x1b[B')
+    term.input(key.repeat(Math.min(Math.abs(steps), 10)), true)
+  }, { capture: true, passive: false })
+}
+
+async function copyTextToClipboard(text: string) {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    return
+  } catch {
+    // Fall back to the legacy command below when the async API is denied.
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  area.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    area.remove()
+  }
+}
+
+// Ctrl+Shift+C copies and Ctrl+Shift+V pastes, as in the Go launcher; returning
+// false keeps xterm from sending ^C / ^V to the shell.
+function handleTerminalClipboardKey(term: Terminal, event: KeyboardEvent) {
+  if (event.type !== 'keydown') return true
+  if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey) return true
+  const key = event.key.toLowerCase()
+  if (key === 'c' || event.code === 'KeyC') {
+    event.preventDefault()
+    event.stopPropagation()
+    void copyTextToClipboard(term.getSelection() || String(window.getSelection() || ''))
+    return false
+  }
+  if (key === 'v' || event.code === 'KeyV') {
+    event.preventDefault()
+    event.stopPropagation()
+    navigator.clipboard.readText().then(text => {
+      if (text) term.paste(text)
+    }).catch(() => undefined)
+    return false
+  }
+  return true
+}
+
 async function ensureRuntime(tab: TerminalTab) {
   const existing = runtimeFor(tab)
   if (existing) return existing
@@ -1578,6 +1656,7 @@ async function ensureRuntime(tab: TerminalTab) {
     lastRows: 0,
     controlBuffer: '',
     zmodemProbe: '',
+    altScreen: false,
     zmodemIntercepted: false,
     sftpSessionID: '',
     sftpProfileID: '',
@@ -1597,6 +1676,14 @@ async function ensureRuntime(tab: TerminalTab) {
     void flushInput(tab)
   })
   term.onResize(() => scheduleResize(tab))
+  term.buffer.onBufferChange(buffer => {
+    const alt = buffer.type === 'alternate'
+    runtime.altScreen = alt
+    host.classList.toggle('is-alt-screen', alt)
+    if (!alt) term.scrollToBottom()
+  })
+  installAltScreenWheel(term, host)
+  term.attachCustomKeyEventHandler(event => handleTerminalClipboardKey(term, event))
   searchAddon.onDidChangeResults(result => {
     if (tab.id !== activeTabID.value) return
     searchResultCount.value = result.resultCount

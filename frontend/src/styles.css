@@ -3758,8 +3758,17 @@ body,
   background-color: #0b1218;
 }
 
+/* xterm 6 scrolls through .xterm-scrollable-element, but xterm.css still gives the
+   legacy viewport overflow-y: scroll, which paints a second native scrollbar. */
 .terminal-host .xterm .xterm-viewport {
-  scrollbar-color: rgba(125, 211, 252, 0.35) transparent;
+  overflow-y: hidden !important;
+}
+
+/* The alternate screen has no scrollback; hiding the overlay scrollbar stops it
+   flashing and fighting the wheel while vim or less is running. */
+.terminal-host.is-alt-screen .xterm .xterm-scrollable-element > .scrollbar {
+  display: none !important;
+  pointer-events: none !important;
 }
 
 .terminal-placeholder {

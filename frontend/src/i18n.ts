@@ -7,6 +7,11 @@ export type LanguagePreference = 'system' | 'zh' | 'en'
 const LOCALE_CHANNEL = 'chemssh-launcher:locale'
 
 const en = {
+  'wait.starting': 'Starting ChemSSH…',
+  'wait.failedTitle': 'ChemSSH failed to start',
+  'wait.failedUnknown': 'The session stopped before ChemSSH became ready.',
+  'wait.retry': 'Retry',
+  'wait.backToLauncher': 'Back to launcher',
   'app.backend': 'Backend',
   'app.launcher': 'Launcher',
   'app.terminal': 'Terminal',
@@ -516,6 +521,11 @@ const en = {
 } as const
 
 const zh: Record<keyof typeof en, string> = {
+  'wait.starting': '正在启动 ChemSSH…',
+  'wait.failedTitle': 'ChemSSH 启动失败',
+  'wait.failedUnknown': '会话在 ChemSSH 就绪前已停止。',
+  'wait.retry': '重试',
+  'wait.backToLauncher': '返回启动器',
   'app.backend': '后台',
   'app.launcher': '启动器',
   'app.terminal': '终端',

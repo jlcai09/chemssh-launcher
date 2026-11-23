@@ -68,6 +68,8 @@ type PageTitleKey = 'app.launcher' | 'app.terminal' | 'app.sftp' | 'app.backend'
 
 interface BrowserTab {
   id: string
+  // Server name that keeps labelling a ChemSSH tab after its page changes.
+  sessionName?: string
   title: string
   titleKey: PageTitleKey | ''
   url: string
@@ -236,6 +238,7 @@ function titleForURL(url: string): TabTitle {
       if (parsed.pathname === '/terminal') return { title: '', titleKey: 'app.terminal' }
       if (parsed.pathname === '/sftp') return { title: '', titleKey: 'app.sftp' }
       if (parsed.pathname === '/launcher-logs') return { title: '', titleKey: 'app.backend' }
+      if (parsed.pathname === '/chemssh-wait') return { title: parsed.searchParams.get('name') || 'ChemSSH', titleKey: '' }
       const parts = parsed.pathname.split('/').filter(Boolean)
       if (parts.length >= 2 && parts[1] === 'chemssh') return { title: decodeURIComponent(parts[0]), titleKey: '' }
     }
@@ -252,7 +255,7 @@ function tabLabel(tab: BrowserTab) {
 function applyTabTitle(tab: BrowserTab, preferredTitle = '') {
   const meta = titleForURL(tab.url)
   tab.titleKey = meta.titleKey
-  tab.title = meta.titleKey ? '' : (preferredTitle || meta.title)
+  tab.title = meta.titleKey ? '' : (preferredTitle || tab.sessionName || meta.title)
 }
 
 function createTab(title: string, url: string, pinned = false, focus = true) {
@@ -403,8 +406,59 @@ function findTabByURL(url: string) {
   return tabs.find(tab => tab.url === finalURL)
 }
 
+// A waiting tab stands in for the ChemSSH page it is about to hand over to.
+function sessionTargetOf(url: string) {
+  try {
+    const parsed = new URL(url, window.location.origin)
+    if (parsed.origin === window.location.origin && parsed.pathname === '/chemssh-wait') {
+      return absoluteURL(parsed.searchParams.get('target') || '')
+    }
+  } catch {
+    // Fall through to the address as typed.
+  }
+  return absoluteURL(url)
+}
+
+function waitURLFor(status: { profile_id?: string; name?: string; open_seq?: number }, target: string) {
+  const wait = new URL('/chemssh-wait', window.location.origin)
+  wait.searchParams.set('profile_id', String(status.profile_id || ''))
+  wait.searchParams.set('name', String(status.name || 'ChemSSH'))
+  wait.searchParams.set('target', target)
+  wait.searchParams.set('open_seq', String(status.open_seq || 0))
+  return wait.href
+}
+
+function openSessionTab(name: string, target: string, tabURL: string) {
+  const finalTarget = absoluteURL(target)
+  const existing = tabs.find(tab => sessionTargetOf(tab.url) === finalTarget)
+  if (existing) {
+    activate(existing.id)
+    return
+  }
+  const id = createTab(name, tabURL)
+  const tab = tabs.find(item => item.id === id)
+  if (tab) {
+    tab.sessionName = name
+    applyTabTitle(tab)
+  }
+}
+
+function finishWaitingTab(source: Window | null, target: string, name: string) {
+  const tab = tabs.find(item => tabFrames.get(item.id)?.contentWindow === source)
+  if (!tab || !target) return
+  const finalURL = absoluteURL(target)
+  tab.sessionName = name || tab.sessionName
+  tab.history[tab.historyIndex] = finalURL
+  navigateTab(tab.id, finalURL, false)
+}
+
+function focusLauncherTab() {
+  const pinned = tabs.find(tab => tab.pinned)
+  if (pinned) activate(pinned.id)
+}
+
 function rememberClosedSessionTab(url: string) {
-  const finalURL = absoluteURL(url)
+  const finalURL = sessionTargetOf(url)
   if (!currentSessionURL.value || finalURL !== currentSessionURL.value) return
   dismissedSessionURL.value = currentSessionURL.value
   dismissedSessionOpenSeq.value = currentSessionOpenSeq.value
@@ -461,7 +515,8 @@ async function pollSession() {
   try {
     const status = await api<any>('/api/session/status')
     if (disposed) return
-    const url = status.forwarding && status.url ? status.url : ''
+    const starting = status.phase === 'starting'
+    const url = (status.forwarding || starting) && status.url ? status.url : ''
     const openSeq = Number(status.open_seq || 0)
     currentSessionURL.value = url
     currentSessionOpenSeq.value = openSeq
@@ -488,7 +543,8 @@ async function pollSession() {
     if (url && status.open_browser !== false && shouldOpen && !isDismissedSession(url, openSeq)) {
       lastSessionURL.value = url
       lastSessionOpenSeq.value = openSeq
-      openOrFocus(status.name || 'ChemSSH', url)
+      const tabURL = status.phase === 'ready' ? url : waitURLFor(status, url)
+      openSessionTab(status.name || 'ChemSSH', url, tabURL)
     }
     if (openSeq > maxSeenOpenSeq) maxSeenOpenSeq = openSeq
     if (!url) {
@@ -514,6 +570,11 @@ function handleWindowMessage(event: MessageEvent) {
   if (data.type === 'chemssh-launcher:open-sftp' && data.profile) {
     openSftpProfile(String(data.profile), String(data.name || ''), String(data.path || ''), data.forceNew === true)
   }
+  if (data.type === 'chemssh-launcher:wait-ready' && data.target) {
+    finishWaitingTab(event.source as Window | null, String(data.target), String(data.name || ''))
+  }
+  if (data.type === 'chemssh-launcher:session-updated') void pollSession()
+  if (data.type === 'chemssh-launcher:focus-launcher') focusLauncherTab()
   if (data.type === 'chemssh-launcher:close-downloads') closeDownloadsPanel()
   if (data.type === 'chemssh-launcher:suppress-auto-open') suppressAutoOpenUntil = Date.now() + 10000
 }

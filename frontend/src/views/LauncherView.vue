@@ -503,7 +503,14 @@ const filteredProfiles = computed(() => {
   )
 })
 const currentStatus = computed<SessionStatus | null>(() => (current.id ? statusByProfile.value[current.id] || null : null))
-const currentPhase = computed<SessionPhase>(() => currentStatus.value?.phase || 'stopped')
+// Profiles whose Start request is still in flight: gives instant feedback on
+// click, before the first status poll can report the "starting" phase.
+const startingProfileIds = ref<Set<string>>(new Set())
+const currentPhase = computed<SessionPhase>(() => {
+  const phase = currentStatus.value?.phase || 'stopped'
+  if (current.id && startingProfileIds.value.has(current.id) && phase !== 'ready') return 'starting'
+  return phase
+})
 const phaseStarting = computed(() => currentPhase.value === 'starting')
 const phaseLabel = computed(() => {
   switch (currentPhase.value) {
@@ -1020,16 +1027,33 @@ function openTerminal() {
   window.open(url, '_blank')
 }
 
+function notifySessionUpdated() {
+  window.parent?.postMessage({ type: 'chemssh-launcher:session-updated' }, window.location.origin)
+}
+
+function setProfileStarting(id: string, starting: boolean) {
+  const next = new Set(startingProfileIds.value)
+  if (starting) next.add(id)
+  else next.delete(id)
+  startingProfileIds.value = next
+}
+
 async function startSession() {
   if (!current.id) return ElMessage.warning(t('launcher.warnSaveFirst'))
+  const id = current.id
+  if (startingProfileIds.value.has(id)) return
+  setProfileStarting(id, true)
   try {
-    await withHostKey('/api/session/start', { id: current.id })
+    await withHostKey('/api/session/start', { id })
+    notifySessionUpdated()
     await refreshStatus()
     ElMessage.success(t('launcher.requestedStart'))
   } catch (error) {
     // ElMessageBox rejects with 'cancel'/'close' when the host key dialog is dismissed
     if (error === 'cancel' || error === 'close') return
     ElMessage.error((error as Error).message)
+  } finally {
+    setProfileStarting(id, false)
   }
 }
 

@@ -3,7 +3,9 @@ use std::process::Command;
 
 use core_config::{load_ui_settings_file, save_ui_settings_file, Profile, UISettings};
 use serde::Serialize;
-use tauri::State;
+#[cfg(target_os = "windows")]
+use tauri::Manager;
+use tauri::{AppHandle, State};
 
 use crate::commands::APP_VERSION;
 use crate::state::AppState;
@@ -193,4 +195,82 @@ pub fn import_profiles(
         .profiles
         .import_json(&raw_json)
         .map_err(|e| e.to_string())
+}
+
+fn downloads_folder() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(std::path::PathBuf::from(home).join("Downloads"))
+}
+
+fn open_downloads_folder() -> Result<String, String> {
+    let dir = downloads_folder().ok_or_else(|| "downloads folder is unknown".to_string())?;
+    open_path_in_system(&dir)?;
+    Ok("folder".into())
+}
+
+/// Drives the WebView2 download list: `Some(true)` opens or toggles it,
+/// `Some(false)` closes it. Returns false when the native dialog is unavailable.
+#[cfg(target_os = "windows")]
+async fn webview_download_dialog(app: &AppHandle, open: bool) -> bool {
+    let Some(window) = app
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next())
+    else {
+        return false;
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    let queued = window.with_webview(move |webview| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_9;
+        use windows_core::Interface;
+        let ok = unsafe {
+            webview
+                .controller()
+                .CoreWebView2()
+                .ok()
+                .and_then(|core| core.cast::<ICoreWebView2_9>().ok())
+                .map(|core| {
+                    let mut shown = windows_core::BOOL(0);
+                    let _ = core.IsDefaultDownloadDialogOpen(&mut shown);
+                    if shown.as_bool() || !open {
+                        core.CloseDefaultDownloadDialog().is_ok()
+                    } else {
+                        core.OpenDefaultDownloadDialog().is_ok()
+                    }
+                })
+                .unwrap_or(false)
+        };
+        let _ = tx.send(ok);
+    });
+    if queued.is_err() {
+        return false;
+    }
+    tokio::task::spawn_blocking(move || {
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Opens (or toggles) the WebView2 download list; falls back to the Downloads
+/// folder where the native dialog is unavailable. Returns "dialog" or "folder".
+#[tauri::command]
+pub async fn open_downloads_panel(app: AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    if webview_download_dialog(&app, true).await {
+        return Ok("dialog".into());
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = &app;
+    open_downloads_folder()
+}
+
+#[tauri::command]
+pub async fn close_downloads_panel(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = webview_download_dialog(&app, false).await;
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = &app;
+    Ok(())
 }

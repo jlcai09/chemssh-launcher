@@ -1,6 +1,7 @@
 <template>
   <el-config-provider :locale="elementLocale" :message="messageConfig">
     <ShellView v-if="route === 'shell'" />
+    <ChemSshWaitView v-else-if="route === 'wait'" />
     <div v-else class="lumen-desktop" :class="{ 'is-embedded': embedded }">
       <div class="lumen-window">
         <header v-if="!embedded" class="lumen-titlebar">
@@ -82,6 +83,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import en from 'element-plus/es/locale/lang/en'
 import { Connection, Folder, FolderOpened, House, Lock, Search, Setting } from '@element-plus/icons-vue'
 import BackendView from './views/BackendView.vue'
+import ChemSshWaitView from './views/ChemSshWaitView.vue'
 import LauncherView from './views/LauncherView.vue'
 import SftpView from './views/SftpView.vue'
 import ShellView from './views/ShellView.vue'
@@ -90,7 +92,7 @@ import { api, postJSON, withLauncherToken } from './api'
 import { isTauriRuntime } from './tauriBridge'
 import { locale, t } from './i18n'
 
-type RouteName = 'launcher' | 'sftp' | 'backend' | 'shell' | 'terminal'
+type RouteName = 'launcher' | 'sftp' | 'backend' | 'shell' | 'terminal' | 'wait'
 
 interface PaletteCommand {
   id: string
@@ -117,6 +119,7 @@ function initialRoute(): RouteName {
     }
     return 'shell'
   }
+  if (location.pathname === '/chemssh-wait') return 'wait'
   if (location.pathname === '/sftp') return 'sftp'
   if (location.pathname === '/terminal') return 'terminal'
   if (location.pathname === '/launcher-logs') return 'backend'
@@ -224,8 +227,19 @@ function handlePaletteKeydown(event: KeyboardEvent) {
 }
 
 function handleAppShortcut(event: KeyboardEvent) {
-  if (route === 'shell') return
   const mod = event.ctrlKey || event.metaKey
+  // Ctrl+Shift+C copies the selection instead of opening the WebView inspector;
+  // the terminal handles its own copy through xterm.
+  if (mod && event.shiftKey && !event.altKey && event.key.toLowerCase() === 'c') {
+    const source = event.target
+    if (!(source instanceof HTMLElement && source.closest('.xterm'))) {
+      event.preventDefault()
+      const text = String(window.getSelection() || '')
+      if (text) void navigator.clipboard?.writeText(text).catch(() => undefined)
+      return
+    }
+  }
+  if (route === 'shell') return
   if (paletteOpen.value) {
     if (event.key === 'Escape') {
       event.preventDefault()

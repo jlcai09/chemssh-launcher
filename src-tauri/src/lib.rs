@@ -113,6 +113,8 @@ pub fn run() {
             commands::backend::get_backend_info,
             commands::backend::get_launcher_logs,
             commands::backend::open_config_dir,
+            commands::backend::open_downloads_panel,
+            commands::backend::close_downloads_panel,
             commands::backend::open_sftp_cache_dir,
             commands::backend::clear_cache,
             commands::backend::export_profiles,

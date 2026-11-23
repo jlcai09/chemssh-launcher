@@ -390,8 +390,13 @@ pub async fn start_session(
         .cloned();
 
     if let Some(session) = existing {
-        let is_running = session.status.lock().await.running;
-        if is_running {
+        let snapshot = session.status.lock().await.clone();
+        // A start that is still bringing the tunnel up must not be raced by a second one.
+        if snapshot.running && snapshot.phase == "starting" {
+            state.sessions.activate(&profile.id).await;
+            return Ok(snapshot);
+        }
+        if snapshot.running {
             return resume_or_reuse_session(&state, &profile, session).await;
         }
     }
@@ -799,165 +804,26 @@ async fn start_remote_session(
             .map_err(format_ssh_error)?,
     );
 
-    // Optional local network proxy: failure must degrade with warning, never fail the session.
-    let mut proxy_env = Vec::new();
-    let mut reverse_proxy: Option<ReverseProxyChannel> = None;
-    let mut proxy_bridge_path: Option<String> = None;
-    let mut local_proxy_status = LocalProxyStatus {
-        enabled: profile.proxy_active(),
-        ..Default::default()
-    };
-
-    if profile.proxy_active() {
-        let lp = profile.local_proxy.normalized();
-        match connection.start_reverse_proxy(lp.address()).await {
-            Ok(channel) => {
-                let proxy_url = channel.proxy_url.clone();
-                proxy_env = proxy_env_pairs(&proxy_url, &lp.no_proxy);
-                local_proxy_status.active = true;
-                local_proxy_status.proxy_url = Some(proxy_url.clone());
-
-                match connection.open_sftp().await {
-                    Ok(sftp) => {
-                        match write_proxy_bridge(
-                            &sftp,
-                            profile.remote_port,
-                            &proxy_url,
-                            &lp.no_proxy,
-                        )
-                        .await
-                        {
-                            Ok(path) => {
-                                local_proxy_status.bridge = true;
-                                local_proxy_status.bridge_path = Some(path.clone());
-                                proxy_bridge_path = Some(path);
-                            }
-                            Err(err) => {
-                                let msg = format!("proxy bridge write failed (degraded): {err}");
-                                warnings.push(msg.clone());
-                                local_proxy_status.error = Some(msg);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let msg = format!("proxy bridge sftp open failed (degraded): {err}");
-                        warnings.push(msg.clone());
-                        local_proxy_status.error = Some(msg);
-                    }
-                }
-                reverse_proxy = Some(channel);
-            }
-            Err(err) => {
-                let msg = format!("reverse proxy channel failed (degraded): {err}");
-                warnings.push(msg.clone());
-                local_proxy_status.error = Some(msg);
-            }
-        }
-    }
-
-    // Probe remote port with `--check-port` before starting a new remote ChemSSH instance.
-    let mut reusable_remote = false;
-    match connection.run_check_port_command(&profile, &proxy_env).await {
-        Ok(check) if check.reusable => {
-            reusable_remote = true;
-            state
-                .sessions
-                .push_log(
-                    &profile.id,
-                    &profile.name,
-                    &state.launcher_logs,
-                    "remote ChemSSH is reusable; starting tunnel without launching another server",
-                )
-                .await;
-        }
-        Ok(check) if !check.output.is_empty() => {
-            state
-                .sessions
-                .push_log(
-                    &profile.id,
-                    &profile.name,
-                    &state.launcher_logs,
-                    format!("[check-port] {}", check.output),
-                )
-                .await;
-        }
-        Err(err) => {
-            state
-                .sessions
-                .push_log(
-                    &profile.id,
-                    &profile.name,
-                    &state.launcher_logs,
-                    format!("[check-port] skipped: {err}"),
-                )
-                .await;
-        }
-        _ => {}
-    }
-
-    let tunnel = match connection
-        .start_local_tunnel(
-            &profile.local_host,
-            profile.local_port,
-            profile.remote_host.clone(),
-            profile.remote_port,
-        )
-        .await
-    {
-        Ok(t) => t,
-        Err(err) => {
-            if let Some(mut rp) = reverse_proxy.take() {
-                rp.close().await;
-            }
-            if let Some(bp) = proxy_bridge_path.take() {
-                if let Ok(sftp) = connection.open_sftp().await {
-                    let _ = remove_proxy_bridge(&sftp, &bp).await;
-                }
-            }
-            connection.disconnect().await;
-            return Err(err.to_string());
-        }
-    };
-
-    let mut remote_proc_handle: Option<RemoteProcessHandle> = None;
-    let mut remote_streams = None;
-    if !reusable_remote {
-        match connection.start_remote_chemssh(&profile, &proxy_env).await {
-            Ok((handle, out_rx, exit_rx)) => {
-                remote_proc_handle = Some(handle);
-                remote_streams = Some((out_rx, exit_rx));
-            }
-            Err(err) => {
-                tunnel.stop();
-                if let Some(mut rp) = reverse_proxy.take() {
-                    rp.close().await;
-                }
-                if let Some(bp) = proxy_bridge_path.take() {
-                    if let Ok(sftp) = connection.open_sftp().await {
-                        let _ = remove_proxy_bridge(&sftp, &bp).await;
-                    }
-                }
-                connection.disconnect().await;
-                return Err(err.to_string());
-            }
-        }
-    }
-
+    // Everything past the SSH handshake runs in the background so the UI gets an
+    // immediate "starting" status; the host-key prompt above stays synchronous.
     let browser_url = profile.browser_url();
     let open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
     let initial_status = SessionStatus {
         profile_id: profile.id.clone(),
         name: profile.name.clone(),
         running: true,
-        forwarding: true,
-        forwarding_active: true,
+        forwarding: false,
+        forwarding_active: false,
         open_seq,
         open_browser: profile.open_browser,
         phase: "starting".into(),
         url: browser_url.clone(),
         local_url: browser_url,
         warnings: warnings.clone(),
-        local_proxy: local_proxy_status,
+        local_proxy: LocalProxyStatus {
+            enabled: profile.proxy_active(),
+            ..Default::default()
+        },
         last_error: None,
     };
 
@@ -968,10 +834,10 @@ async fn start_remote_session(
         backend: SessionBackend::Remote {
             profile: profile.clone(),
             connection: Arc::clone(&connection),
-            tunnel: Mutex::new(Some(tunnel)),
-            reverse_proxy: Mutex::new(reverse_proxy),
-            proxy_bridge_path: Mutex::new(proxy_bridge_path),
-            remote_process: Mutex::new(remote_proc_handle),
+            tunnel: Mutex::new(None),
+            reverse_proxy: Mutex::new(None),
+            proxy_bridge_path: Mutex::new(None),
+            remote_process: Mutex::new(None),
             security_token: security_token.clone(),
         },
         stop_requested: AtomicBool::new(false),
@@ -992,83 +858,241 @@ async fn start_remote_session(
         .insert(profile.id.clone(), Arc::clone(&active));
     state.sessions.activate(&profile.id).await;
 
-    if let Some((mut out_rx, exit_rx)) = remote_streams {
-        let log_mgr = Arc::clone(&state.sessions);
-        let launcher_logs = Arc::clone(&state.launcher_logs);
-        let pid_copy = profile.id.clone();
-        let pname_copy = profile.name.clone();
-        tokio::spawn(async move {
-            while let Some(chunk) = out_rx.recv().await {
-                for line in chunk.lines() {
-                    log_mgr
-                        .push_log(&pid_copy, &pname_copy, &launcher_logs, line.to_string())
-                        .await;
-                }
-            }
-        });
-
-        let watch_session = Arc::clone(&active);
-        let watch_mgr = Arc::clone(&state.sessions);
-        let watch_logs = Arc::clone(&state.launcher_logs);
-        tokio::spawn(async move {
-            let exit_res = exit_rx.await;
-            if watch_session.stop_requested.load(Ordering::SeqCst) {
-                return;
-            }
-            match exit_res {
-                Ok(Ok(Some(0))) | Ok(Ok(None)) => {
-                    // Clean exit (for example backgrounded/reused remote service): keep tunnel & session alive.
-                    watch_mgr
-                        .push_log(
-                            &watch_session.profile_id,
-                            &watch_session.profile_name,
-                            &watch_logs,
-                            "[session] remote launcher command exited cleanly; keeping SSH tunnel open",
-                        )
-                        .await;
-                }
-                other => {
-                    let msg = match other {
-                        Ok(Ok(Some(code))) => format!("remote command exited with status {code}"),
-                        Ok(Err(reason)) => format!("remote command terminated: {reason}"),
-                        Err(_) => "remote command monitor dropped".to_string(),
-                        Ok(Ok(None)) => unreachable!(),
-                    };
-                    watch_mgr
-                        .push_log(
-                            &watch_session.profile_id,
-                            &watch_session.profile_name,
-                            &watch_logs,
-                            format!("[session] {msg}"),
-                        )
-                        .await;
-                    let already_ready = watch_session.status.lock().await.phase == "ready";
-                    if !already_ready {
-                        watch_mgr
-                            .set_failure(&watch_session.profile_id, msg.clone())
-                            .await;
-                        cleanup_remote_backend(&watch_session).await;
-                        let mut st = watch_session.status.lock().await;
-                        st.running = false;
-                        st.forwarding = false;
-                        st.forwarding_active = false;
-                        st.phase = "stopped".into();
-                        st.last_error = Some(msg);
-                    }
-                }
-            }
-        });
-    }
-
-    spawn_health_check_task(
+    tokio::spawn(finish_remote_startup(
         Arc::clone(&active),
         Arc::clone(&state.sessions),
         Arc::clone(&state.launcher_logs),
         profile,
         security_token,
-    );
+    ));
 
     Ok(initial_status)
+}
+
+async fn fail_remote_startup(
+    active: &Arc<ActiveSession>,
+    sessions: &Arc<SessionManager>,
+    logs: &Arc<LauncherLogStore>,
+    msg: String,
+) {
+    if active.stop_requested.load(Ordering::SeqCst) {
+        return;
+    }
+    sessions.set_failure(&active.profile_id, msg.clone()).await;
+    sessions
+        .push_log(&active.profile_id, &active.profile_name, logs, format!("[error] {msg}"))
+        .await;
+    cleanup_remote_backend(active).await;
+    let mut st = active.status.lock().await;
+    st.running = false;
+    st.forwarding = false;
+    st.forwarding_active = false;
+    st.phase = "failed".into();
+    st.last_error = Some(msg);
+}
+
+async fn finish_remote_startup(
+    active: Arc<ActiveSession>,
+    sessions: Arc<SessionManager>,
+    logs: Arc<LauncherLogStore>,
+    profile: Profile,
+    security_token: Option<String>,
+) {
+    let SessionBackend::Remote {
+        connection,
+        tunnel,
+        reverse_proxy,
+        proxy_bridge_path,
+        remote_process,
+        ..
+    } = &active.backend
+    else {
+        return;
+    };
+
+    // Optional local network proxy: failure must degrade with warning, never fail the session.
+    let mut proxy_env = Vec::new();
+    if profile.proxy_active() {
+        let lp = profile.local_proxy.normalized();
+        let mut local_proxy_status = LocalProxyStatus {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut new_warnings: Vec<String> = Vec::new();
+        match connection.start_reverse_proxy(lp.address()).await {
+            Ok(channel) => {
+                let proxy_url = channel.proxy_url.clone();
+                proxy_env = proxy_env_pairs(&proxy_url, &lp.no_proxy);
+                local_proxy_status.active = true;
+                local_proxy_status.proxy_url = Some(proxy_url.clone());
+                match connection.open_sftp().await {
+                    Ok(sftp) => {
+                        match write_proxy_bridge(&sftp, profile.remote_port, &proxy_url, &lp.no_proxy)
+                            .await
+                        {
+                            Ok(path) => {
+                                local_proxy_status.bridge = true;
+                                local_proxy_status.bridge_path = Some(path.clone());
+                                *proxy_bridge_path.lock().await = Some(path);
+                            }
+                            Err(err) => {
+                                let msg = format!("proxy bridge write failed (degraded): {err}");
+                                new_warnings.push(msg.clone());
+                                local_proxy_status.error = Some(msg);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let msg = format!("proxy bridge sftp open failed (degraded): {err}");
+                        new_warnings.push(msg.clone());
+                        local_proxy_status.error = Some(msg);
+                    }
+                }
+                *reverse_proxy.lock().await = Some(channel);
+            }
+            Err(err) => {
+                let msg = format!("reverse proxy channel failed (degraded): {err}");
+                new_warnings.push(msg.clone());
+                local_proxy_status.error = Some(msg);
+            }
+        }
+        for w in &new_warnings {
+            sessions
+                .push_log(&profile.id, &profile.name, &logs, format!("[warn] {w}"))
+                .await;
+        }
+        let mut st = active.status.lock().await;
+        st.warnings.extend(new_warnings);
+        st.local_proxy = local_proxy_status;
+    }
+    if active.stop_requested.load(Ordering::SeqCst) {
+        return;
+    }
+
+    // Probe remote port with `--check-port` before starting a new remote ChemSSH instance.
+    let mut reusable_remote = false;
+    match connection.run_check_port_command(&profile, &proxy_env).await {
+        Ok(check) if check.reusable => {
+            reusable_remote = true;
+            sessions
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &logs,
+                    "remote ChemSSH is reusable; starting tunnel without launching another server",
+                )
+                .await;
+        }
+        Ok(check) if !check.output.is_empty() => {
+            sessions
+                .push_log(&profile.id, &profile.name, &logs, format!("[check-port] {}", check.output))
+                .await;
+        }
+        Err(err) => {
+            sessions
+                .push_log(&profile.id, &profile.name, &logs, format!("[check-port] skipped: {err}"))
+                .await;
+        }
+        _ => {}
+    }
+    if active.stop_requested.load(Ordering::SeqCst) {
+        return;
+    }
+
+    match connection
+        .start_local_tunnel(
+            &profile.local_host,
+            profile.local_port,
+            profile.remote_host.clone(),
+            profile.remote_port,
+        )
+        .await
+    {
+        Ok(t) => {
+            *tunnel.lock().await = Some(t);
+            let mut st = active.status.lock().await;
+            st.forwarding = true;
+            st.forwarding_active = true;
+        }
+        Err(err) => {
+            fail_remote_startup(&active, &sessions, &logs, err.to_string()).await;
+            return;
+        }
+    }
+
+    if !reusable_remote {
+        match connection.start_remote_chemssh(&profile, &proxy_env).await {
+            Ok((handle, mut out_rx, exit_rx)) => {
+                *remote_process.lock().await = Some(handle);
+
+                let log_mgr = Arc::clone(&sessions);
+                let launcher_logs = Arc::clone(&logs);
+                let pid_copy = profile.id.clone();
+                let pname_copy = profile.name.clone();
+                tokio::spawn(async move {
+                    while let Some(chunk) = out_rx.recv().await {
+                        for line in chunk.lines() {
+                            log_mgr
+                                .push_log(&pid_copy, &pname_copy, &launcher_logs, line.to_string())
+                                .await;
+                        }
+                    }
+                });
+
+                let watch_session = Arc::clone(&active);
+                let watch_mgr = Arc::clone(&sessions);
+                let watch_logs = Arc::clone(&logs);
+                tokio::spawn(async move {
+                    let exit_res = exit_rx.await;
+                    if watch_session.stop_requested.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    match exit_res {
+                        Ok(Ok(Some(0))) | Ok(Ok(None)) => {
+                            // Clean exit (for example backgrounded/reused remote service): keep tunnel & session alive.
+                            watch_mgr
+                                .push_log(
+                                    &watch_session.profile_id,
+                                    &watch_session.profile_name,
+                                    &watch_logs,
+                                    "[session] remote launcher command exited cleanly; keeping SSH tunnel open",
+                                )
+                                .await;
+                        }
+                        other => {
+                            let msg = match other {
+                                Ok(Ok(Some(code))) => format!("remote command exited with status {code}"),
+                                Ok(Err(reason)) => format!("remote command terminated: {reason}"),
+                                Err(_) => "remote command monitor dropped".to_string(),
+                                Ok(Ok(None)) => unreachable!(),
+                            };
+                            watch_mgr
+                                .push_log(
+                                    &watch_session.profile_id,
+                                    &watch_session.profile_name,
+                                    &watch_logs,
+                                    format!("[session] {msg}"),
+                                )
+                                .await;
+                            let already_ready = watch_session.status.lock().await.phase == "ready";
+                            if !already_ready {
+                                fail_remote_startup(&watch_session, &watch_mgr, &watch_logs, msg).await;
+                            }
+                        }
+                    }
+                });
+            }
+            Err(err) => {
+                fail_remote_startup(&active, &sessions, &logs, err.to_string()).await;
+                return;
+            }
+        }
+    }
+    if active.stop_requested.load(Ordering::SeqCst) {
+        return;
+    }
+
+    spawn_health_check_task(Arc::clone(&active), sessions, logs, profile, security_token);
 }
 
 fn spawn_health_check_task(
@@ -1111,6 +1135,7 @@ fn spawn_health_check_task(
                 let msg = err.to_string();
                 let mut st = session.status.lock().await;
                 if st.running {
+                    st.phase = "failed".into();
                     st.last_error = Some(msg.clone());
                 }
                 drop(st);

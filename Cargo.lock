@@ -543,7 +543,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "webview2-com",
  "win-native",
+ "windows-core 0.62.2",
 ]
 
 [[package]]

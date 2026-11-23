@@ -948,6 +948,13 @@ export async function listenCloseRequested(
  */
 export function installTauriNativeDragBridge(): void {
   if (!isTauriRuntime()) return
+  // Opens the WebView2 download list, or the Downloads folder where it is unavailable.
+  window.chemsshOpenDownloads = async () => {
+    await invoke('open_downloads_panel')
+  }
+  window.chemsshCloseDownloads = async () => {
+    await invoke('close_downloads_panel')
+  }
   window.chemsshNativeDragJobs = () => invoke<NativeDragJob[]>('list_native_drag_jobs')
   window.chemsshControlNativeDragJob = async (id: string, action: NativeDragAction) => {
     try {
