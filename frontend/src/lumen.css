@@ -2510,10 +2510,23 @@ body {
   transform: none;
 }
 
+.lumen-window .terminal-x11-status {
+  padding: 3px 10px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.06);
+  background: #1e1e20;
+  color: rgba(216, 216, 220, 0.68);
+  font-size: calc(11px * var(--lumen-ui-scale));
+  line-height: 1.35;
+}
+
+.lumen-window .terminal-x11-status.is-warning {
+  color: var(--el-color-warning);
+}
+
 .lumen-window .terminal-stage {
   min-width: 0;
   min-height: 0;
-  padding: 8px;
+  padding: 4px 6px 2px;
   background: #1e1e20;
 }
 

@@ -3,6 +3,7 @@ pub mod chemssh_proxy;
 pub mod client_identity;
 pub mod commands;
 pub mod state;
+pub mod terminal_ws;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;

@@ -191,20 +191,48 @@ function encodeBase64Bytes(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
+type QueuedTerminalFrame =
+  | { kind: 'output'; bytes: Uint8Array }
+  | { kind: 'exit' }
+
 interface TerminalStreamBuffer {
   sink: TerminalSink | null
-  queued: TauriTerminalEvent[]
+  queued: QueuedTerminalFrame[]
   exited: boolean
   lastSeq: number
   channelDelivered: boolean
+  ws: WebSocket | null
 }
 
 const terminalStreams = new Map<string, TerminalStreamBuffer>()
 let terminalPollTimer: number | null = null
 let terminalPollInFlight = false
+const sharedTextEncoder = new TextEncoder()
+
+export interface TerminalWsDecodedFrame {
+  kind: 'output' | 'exit'
+  seq: number
+  bytes?: Uint8Array
+}
+
+export function decodeTerminalWsFrame(data: ArrayBuffer): TerminalWsDecodedFrame | null {
+  if (!(data instanceof ArrayBuffer) || data.byteLength < 9) return null
+  const view = new Uint8Array(data)
+  const dv = new DataView(data)
+  const tag = view[0]
+  const seq = Number(dv.getBigUint64(1, false))
+  if (tag === 0) {
+    return { kind: 'output', seq, bytes: view.subarray(9) }
+  }
+  if (tag === 1) {
+    return { kind: 'exit', seq }
+  }
+  return null
+}
 
 export interface TerminalInputQueue {
   enqueue(sessionId: string, text: string): void
+  hasInFlight(sessionId: string): boolean
   clear(sessionId: string): void
 }
 
@@ -244,6 +272,9 @@ export function createTerminalInputQueue(
       pending.set(sessionId, (pending.get(sessionId) ?? '') + text)
       pump(sessionId)
     },
+    hasInFlight(sessionId: string) {
+      return Boolean(sessionId && inFlight.has(sessionId))
+    },
     clear(sessionId: string) {
       if (!sessionId) return
       pending.delete(sessionId)
@@ -256,6 +287,16 @@ const terminalInputQueue = createTerminalInputQueue((sessionId, data) =>
 )
 
 export function sendTauriTerminalText(sessionId: string, text: string): void {
+  if (!sessionId || !text) return
+  const buf = terminalStreams.get(sessionId)
+  if (
+    buf?.ws &&
+    buf.ws.readyState === WebSocket.OPEN &&
+    !terminalInputQueue.hasInFlight(sessionId)
+  ) {
+    buf.ws.send(sharedTextEncoder.encode(text))
+    return
+  }
   terminalInputQueue.enqueue(sessionId, text)
 }
 
@@ -270,31 +311,76 @@ function stopPollTimerIfIdle(): void {
   terminalPollTimer = null
 }
 
+function deliverTerminalFrame(
+  buf: TerminalStreamBuffer,
+  kind: 'output' | 'exit',
+  seq: number | undefined,
+  getBytes: () => Uint8Array,
+  fromPush = false,
+): void {
+  if (fromPush) {
+    const firstDelivery = !buf.channelDelivered
+    buf.channelDelivered = true
+    if (firstDelivery) {
+      stopPollTimerIfIdle()
+    }
+  }
+  if (typeof seq === 'number') {
+    if (seq <= buf.lastSeq) return
+    buf.lastSeq = seq
+  }
+  if (!buf.sink) {
+    buf.queued.push(kind === 'exit' ? { kind: 'exit' } : { kind: 'output', bytes: getBytes() })
+    return
+  }
+  if (kind === 'output') {
+    const bytes = getBytes()
+    if (bytes.byteLength > 0) buf.sink.onData(bytes)
+  } else {
+    buf.exited = true
+    buf.sink.onExit()
+  }
+}
+
 function dispatchTerminalEvent(
   buf: TerminalStreamBuffer,
   ev: TauriTerminalEvent,
   fromChannel = false,
 ) {
-  if (fromChannel) {
-    const firstChannelDelivery = !buf.channelDelivered
-    buf.channelDelivered = true
-    if (firstChannelDelivery) {
-      stopPollTimerIfIdle()
+  if (ev.kind === 'output' && ev.data_b64) {
+    const b64 = ev.data_b64
+    deliverTerminalFrame(buf, 'output', ev.seq, () => decodeBase64Bytes(b64), fromChannel)
+  } else if (ev.kind === 'exit') {
+    deliverTerminalFrame(buf, 'exit', ev.seq, () => new Uint8Array(0), fromChannel)
+  }
+}
+
+function attachTerminalWebSocket(
+  sessionId: string,
+  buf: TerminalStreamBuffer,
+  wsUrl: string,
+): void {
+  if (typeof WebSocket === 'undefined' || !wsUrl) return
+  const sep = wsUrl.includes('?') ? '&' : '?'
+  const ws = new WebSocket(`${wsUrl}${sep}since=${buf.lastSeq}`)
+  ws.binaryType = 'arraybuffer'
+  buf.ws = ws
+  ws.onmessage = event => {
+    if (!(event.data instanceof ArrayBuffer)) return
+    const decoded = decodeTerminalWsFrame(event.data)
+    if (!decoded) return
+    if (decoded.kind === 'output') {
+      const bytes = decoded.bytes ?? new Uint8Array(0)
+      deliverTerminalFrame(buf, 'output', decoded.seq, () => bytes, true)
+    } else {
+      deliverTerminalFrame(buf, 'exit', decoded.seq, () => new Uint8Array(0), true)
     }
   }
-  if (typeof ev.seq === 'number') {
-    if (ev.seq <= buf.lastSeq) return
-    buf.lastSeq = ev.seq
+  ws.onclose = () => {
+    if (buf.ws === ws) buf.ws = null
   }
-  if (!buf.sink) {
-    buf.queued.push(ev)
-    return
-  }
-  if (ev.kind === 'output' && ev.data_b64) {
-    buf.sink.onData(decodeBase64Bytes(ev.data_b64))
-  } else if (ev.kind === 'exit') {
-    buf.exited = true
-    buf.sink.onExit()
+  ws.onerror = () => {
+    if (buf.ws === ws) buf.ws = null
   }
 }
 
@@ -345,13 +431,18 @@ function ensureTerminalPollLoop(): void {
 export function attachTauriTerminalSink(sessionId: string, sink: TerminalSink): () => void {
   let buf = terminalStreams.get(sessionId)
   if (!buf) {
-    buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false }
+    buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false, ws: null }
     terminalStreams.set(sessionId, buf)
   }
   buf.sink = sink
   const pending = buf.queued.splice(0, buf.queued.length)
-  for (const ev of pending) {
-    dispatchTerminalEvent(buf, ev, false)
+  for (const item of pending) {
+    if (item.kind === 'output') {
+      if (item.bytes.byteLength > 0) sink.onData(item.bytes)
+    } else {
+      buf.exited = true
+      sink.onExit()
+    }
   }
   if (!buf.exited && !buf.channelDelivered) {
     ensureTerminalPollLoop()
@@ -867,6 +958,7 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
       proxy_error?: string
       x11_enabled: boolean
       x11_error: string
+      ws_url?: string
     }>('open_terminal', {
       profileId: body.profile_id ?? body.id ?? '',
       cols: body.cols ?? 120,
@@ -876,20 +968,45 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
     })
     let buf = terminalStreams.get(res.id)
     if (!buf) {
-      buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false }
+      buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false, ws: null }
       terminalStreams.set(res.id, buf)
     }
     boundBuf = buf
     for (const ev of earlyQueue) {
       dispatchTerminalEvent(buf, ev, true)
     }
+    if (res.ws_url) {
+      attachTerminalWebSocket(res.id, buf, res.ws_url)
+    }
     ensureTerminalPollLoop()
     return res as unknown as T
+  }
+
+  if (pathname === '/api/session/shell/resize' && verb === 'POST') {
+    const sessionId = String(body.session ?? body.id ?? '')
+    const cols = Number(body.cols ?? 120)
+    const rows = Number(body.rows ?? 32)
+    const buf = terminalStreams.get(sessionId)
+    if (buf?.ws && buf.ws.readyState === WebSocket.OPEN) {
+      buf.ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+      return { ok: true } as unknown as T
+    }
+    await invoke('resize_terminal', { sessionId, cols, rows })
+    return { ok: true } as unknown as T
   }
 
   if (pathname === '/api/session/shell/close' && verb === 'POST') {
     const sessionId = body.session ?? body.id ?? ''
     terminalInputQueue.clear(sessionId)
+    const existing = terminalStreams.get(sessionId)
+    if (existing?.ws) {
+      try {
+        existing.ws.close()
+      } catch {
+        // ignore close errors
+      }
+      existing.ws = null
+    }
     terminalStreams.delete(sessionId)
     await invoke('close_terminal', { sessionId })
     return { ok: true } as unknown as T

@@ -40,7 +40,7 @@ const MAX_BRIDGE_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_PROXIED_HTML_BYTES: usize = 16 * 1024 * 1024;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type ProxyBody = BoxBody<Bytes, BoxError>;
+pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
 
 // Self-healing guard copied from the Go proxy: a transient dynamic-import failure
 // while ChemSSH finishes booting reloads the iframe once automatically.
@@ -111,6 +111,7 @@ pub async fn serve_proxy_listener(
             .accept()
             .await
             .map_err(|e| format!("accept proxy connection: {e}"))?;
+        let _ = stream.set_nodelay(true);
         let conn_state = Arc::clone(&state);
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
@@ -131,6 +132,7 @@ async fn handle_request(req: Request<Incoming>, state: Arc<AppState>) -> Respons
     let path = req.uri().path().to_string();
     match path.as_str() {
         "/api/file-icon" => handle_file_icon(&req, &state),
+        "/api/terminal-ws" => crate::terminal_ws::handle_terminal_ws(req, &state).await,
         "/api/chemssh-bridge/capabilities" => handle_bridge_capabilities(&req, &state).await,
         "/api/chemssh-bridge/client-identity" => handle_bridge_client_identity(&req, &state),
         "/api/chemssh-bridge/open" => handle_bridge_open(req, &state, false).await,
@@ -142,7 +144,7 @@ async fn handle_request(req: Request<Incoming>, state: Arc<AppState>) -> Respons
     }
 }
 
-fn empty_body() -> ProxyBody {
+pub(crate) fn empty_body() -> ProxyBody {
     Empty::<Bytes>::new()
         .map_err(|never| match never {})
         .boxed()
@@ -171,7 +173,7 @@ fn json_response<T: Serialize>(
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
-fn json_error(status: u16, message: impl Into<String>, cookie_token: Option<&str>) -> Response<ProxyBody> {
+pub(crate) fn json_error(status: u16, message: impl Into<String>, cookie_token: Option<&str>) -> Response<ProxyBody> {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let payload = serde_json::json!({ "error": message.into() });
     let mut resp = json_response(code, &payload, cookie_token);
@@ -192,7 +194,7 @@ fn set_no_store(headers: &mut HeaderMap) {
     headers.insert(HeaderName::from_static("expires"), HeaderValue::from_static("0"));
 }
 
-fn query_param(uri: &Uri, key: &str) -> Option<String> {
+pub(crate) fn query_param(uri: &Uri, key: &str) -> Option<String> {
     let query = uri.query()?;
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         if k == key {
@@ -202,7 +204,7 @@ fn query_param(uri: &Uri, key: &str) -> Option<String> {
     None
 }
 
-fn header_str<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str> {
+pub(crate) fn header_str<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 

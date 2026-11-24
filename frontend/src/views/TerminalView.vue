@@ -210,7 +210,7 @@
           <el-button class="terminal-add-tab" :icon="Plus" circle @click="createTab()" />
         </el-tooltip>
       </div>
-      <div v-if="connected" class="terminal-x11-status" role="status" :style="{ padding: '6px 12px', color: activeTab?.x11Error ? 'var(--el-color-warning)' : 'var(--el-text-color-secondary)', fontSize: '12px' }">
+      <div v-if="connected" class="terminal-x11-status" :class="{ 'is-warning': Boolean(activeTab?.x11Error) }" role="status">
         {{ activeTab?.x11Error ? t('terminal.x11Degraded', { error: activeTab.x11Error }) : activeTab?.x11Enabled ? t('terminal.x11Ready') : t('terminal.x11Disabled') }}
       </div>
       <div
@@ -1362,6 +1362,12 @@ function screenIntoScrollback(term: Terminal) {
 function consumeTerminalOutput(tab: TerminalTab, data: string) {
   const runtime = runtimeFor(tab)
   if (!runtime) return
+  if (!runtime.controlBuffer && !data.includes('\x1b]') && !data.endsWith('\x1b')) {
+    if (!data) return
+    const filtered = filterZmodem(tab, data)
+    if (filtered) runtime.term.write(preserveHistory(tab, filtered))
+    return
+  }
   const text = runtime.controlBuffer + data
   runtime.controlBuffer = ''
   let visible = ''
@@ -1636,8 +1642,47 @@ function handleTerminalClipboardKey(term: Terminal, event: KeyboardEvent) {
   return true
 }
 
-function attachWebglRenderer(runtime: TerminalRuntime) {
+let hardwareWebglChecked: boolean | null = null
+
+function isHardwareWebglAvailable(): boolean {
+  if (hardwareWebglChecked !== null) return hardwareWebglChecked
+  if (typeof document === 'undefined') {
+    hardwareWebglChecked = false
+    return false
+  }
+  try {
+    const canvas = document.createElement('canvas')
+    const gl = canvas.getContext('webgl2') as WebGL2RenderingContext | null
+    if (!gl) {
+      hardwareWebglChecked = false
+      return false
+    }
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info')
+    const renderer = String(
+      debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    ).toLowerCase()
+    const isSoftware =
+      renderer.includes('swiftshader') ||
+      renderer.includes('microsoft basic render') ||
+      renderer.includes('llvmpipe') ||
+      renderer.includes('software')
+    hardwareWebglChecked = !isSoftware
+  } catch {
+    hardwareWebglChecked = false
+  }
+  return hardwareWebglChecked
+}
+
+function resolveTerminalThemeBackground(host: HTMLElement): string {
+  return host.closest('.lumen-window') ? '#1e1e20' : '#0b1218'
+}
+
+function attachWebglRenderer(runtime: TerminalRuntime, tab?: TerminalTab) {
   if (runtime.webglAddon || runtime.webglUnavailable || runtime.disposed) return
+  if (!isHardwareWebglAvailable()) {
+    runtime.webglUnavailable = true
+    return
+  }
   try {
     const addon = new WebglAddon()
     addon.onContextLoss(() => {
@@ -1650,6 +1695,7 @@ function attachWebglRenderer(runtime: TerminalRuntime) {
     })
     runtime.term.loadAddon(addon)
     runtime.webglAddon = addon
+    window.requestAnimationFrame(() => fitTerminal(tab ?? activeTab.value))
   } catch {
     runtime.webglUnavailable = true
   }
@@ -1661,6 +1707,7 @@ async function ensureRuntime(tab: TerminalTab) {
   await nextTick()
   const host = hosts.get(tab.id)
   if (!host) return null
+  const themeBg = resolveTerminalThemeBackground(host)
   const term = new Terminal({
     allowProposedApi: true,
     cursorBlink: true,
@@ -1669,10 +1716,10 @@ async function ensureRuntime(tab: TerminalTab) {
     lineHeight: 1.2,
     scrollback: displaySettings.scrollback,
     theme: {
-      background: '#0b1218',
+      background: themeBg,
       foreground: '#d7e6ee',
       cursor: '#7dd3fc',
-      cursorAccent: '#0b1218',
+      cursorAccent: themeBg,
       selectionBackground: 'rgba(125, 211, 252, 0.28)',
       black: '#0f1a22',
       brightBlack: '#5a7382'
@@ -1733,7 +1780,7 @@ async function ensureRuntime(tab: TerminalTab) {
     searchResultCount.value = result.resultCount
     searchResultIndex.value = result.resultIndex
   })
-  attachWebglRenderer(runtime)
+  attachWebglRenderer(runtime, tab)
   writeNotice(tab, t('terminal.welcome'))
   fitTerminal(tab)
   return runtime
@@ -1780,7 +1827,7 @@ async function activateTab(id: string) {
   dropActive.value = false
   await nextTick()
   const activeRuntime = runtimeFor(activeTab.value)
-  if (activeRuntime) attachWebglRenderer(activeRuntime)
+  if (activeRuntime) attachWebglRenderer(activeRuntime, activeTab.value ?? undefined)
   fitTerminal(activeTab.value)
   if (tab?.sftp.open && !tab.sftp.entries.length && tab.status === 'connected' && !tab.sftp.loading) {
     void loadSftpPanel(tab, tab.sftp.path || tab.cwd || '.')
@@ -2513,6 +2560,7 @@ async function connect(tab: TerminalTab, cdPath = '', options: { resume?: boolea
     tab.wasConnected = true
     tab.x11Enabled = opened.x11Enabled
     tab.x11Error = opened.x11Error
+    void nextTick().then(() => fitTerminal(tab))
     if (opened.x11Error) writeNotice(tab, t('terminal.x11Degraded', { error: opened.x11Error }))
     else if (opened.x11Enabled) writeNotice(tab, t('terminal.x11Ready'))
     if (opened.proxyError) writeNotice(tab, t('terminal.proxyDegraded', { error: opened.proxyError }))
@@ -2692,7 +2740,7 @@ watch(() => props.active, async active => {
   await loadProfiles()
   await nextTick()
   const activeRuntime = runtimeFor(activeTab.value)
-  if (activeRuntime) attachWebglRenderer(activeRuntime)
+  if (activeRuntime) attachWebglRenderer(activeRuntime, activeTab.value ?? undefined)
   fitTerminal(activeTab.value)
   activateCurrentTerminal()
 })

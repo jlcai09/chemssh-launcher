@@ -3520,6 +3520,14 @@ body,
 
 .terminal-x11-status {
   grid-row: 2;
+  padding: 3px 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.terminal-x11-status.is-warning {
+  color: var(--el-color-warning);
 }
 
 .terminal-stage {
@@ -3731,7 +3739,7 @@ body,
   position: relative;
   min-width: 0;
   min-height: 0;
-  padding: 10px;
+  padding: 4px 6px 2px;
   background: #0b1218;
   contain: layout paint;
   isolation: isolate;

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   createTerminalInputQueue,
+  decodeTerminalWsFrame,
   parseTauriInvokeError,
   resolveTauriCommand,
   tauriFileIconURL,
@@ -200,6 +201,7 @@ test('createTerminalInputQueue dispatches first key immediately and coalesces wh
 
   // First key dispatches synchronously with zero timer delay.
   queue.enqueue('s1', 'a')
+  assert.equal(queue.hasInFlight('s1'), true)
   assert.deepEqual(sent, [{ sessionId: 's1', data: 'a' }])
 
   // Keys typed while first IPC is in flight coalesce into a single ordered follow-up call.
@@ -218,4 +220,32 @@ test('createTerminalInputQueue dispatches first key immediately and coalesces wh
   ])
 
   resolvers.shift()()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(queue.hasInFlight('s1'), false)
+})
+
+test('decodeTerminalWsFrame decodes output and exit binary frames and rejects invalid frames', () => {
+  const outBuf = new ArrayBuffer(9 + 5)
+  const outView = new Uint8Array(outBuf)
+  const outDv = new DataView(outBuf)
+  outView[0] = 0
+  outDv.setBigUint64(1, 42n, false)
+  outView.set(new TextEncoder().encode('hello'), 9)
+  const outDecoded = decodeTerminalWsFrame(outBuf)
+  assert.equal(outDecoded?.kind, 'output')
+  assert.equal(outDecoded?.seq, 42)
+  assert.equal(new TextDecoder().decode(outDecoded?.bytes), 'hello')
+
+  const exitBuf = new ArrayBuffer(9)
+  const exitView = new Uint8Array(exitBuf)
+  const exitDv = new DataView(exitBuf)
+  exitView[0] = 1
+  exitDv.setBigUint64(1, 99n, false)
+  assert.deepEqual(decodeTerminalWsFrame(exitBuf), { kind: 'exit', seq: 99 })
+
+  assert.equal(decodeTerminalWsFrame(new ArrayBuffer(4)), null)
+  const unknownBuf = new ArrayBuffer(9)
+  new Uint8Array(unknownBuf)[0] = 9
+  assert.equal(decodeTerminalWsFrame(unknownBuf), null)
 })

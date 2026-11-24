@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -13,7 +14,7 @@ use core_ssh::{
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::commands::sessions::{format_ssh_error, load_ssh_credentials};
 use crate::state::AppState;
@@ -44,6 +45,8 @@ pub struct ShellOpenResponse {
     pub proxy_error: Option<String>,
     pub x11_enabled: bool,
     pub x11_error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,99 +54,288 @@ pub struct TerminalCwdResponse {
     pub path: String,
 }
 
-struct TerminalEventBuffer {
-    events: VecDeque<WireTerminalEvent>,
-    next_seq: u64,
-    total_b64_bytes: usize,
+#[derive(Debug, Clone)]
+pub(crate) enum RawTerminalEvent {
+    Output {
+        seq: u64,
+        data: Vec<u8>,
+    },
+    Exit {
+        seq: u64,
+        status: Option<u32>,
+        reason: String,
+    },
 }
 
-impl Default for TerminalEventBuffer {
-    fn default() -> Self {
-        Self {
-            events: VecDeque::new(),
-            next_seq: 1,
-            total_b64_bytes: 0,
+impl RawTerminalEvent {
+    pub(crate) fn seq(&self) -> u64 {
+        match self {
+            Self::Output { seq, .. } | Self::Exit { seq, .. } => *seq,
+        }
+    }
+
+    fn payload_len(&self) -> usize {
+        match self {
+            Self::Output { data, .. } => data.len(),
+            Self::Exit { reason, .. } => reason.len(),
+        }
+    }
+
+    fn to_wire(&self) -> WireTerminalEvent {
+        match self {
+            Self::Output { seq, data } => WireTerminalEvent {
+                kind: "output",
+                seq: *seq,
+                data_b64: Some(BASE64.encode(data)),
+                exit_code: None,
+                reason: None,
+            },
+            Self::Exit {
+                seq,
+                status,
+                reason,
+            } => WireTerminalEvent {
+                kind: "exit",
+                seq: *seq,
+                data_b64: None,
+                exit_code: *status,
+                reason: Some(reason.clone()),
+            },
         }
     }
 }
 
-impl TerminalEventBuffer {
-    fn push(
-        &mut self,
-        kind: &'static str,
-        data_b64: Option<String>,
-        exit_code: Option<u32>,
-        reason: Option<String>,
-    ) -> WireTerminalEvent {
-        let added_bytes = data_b64.as_ref().map(|s| s.len()).unwrap_or(0);
-        let ev = WireTerminalEvent {
-            kind,
-            seq: self.next_seq,
-            data_b64,
-            exit_code,
-            reason,
-        };
+struct RawTerminalHub {
+    events: VecDeque<RawTerminalEvent>,
+    next_seq: u64,
+    total_bytes: usize,
+    next_sub_id: u64,
+    subscriber: Option<(u64, mpsc::UnboundedSender<RawTerminalEvent>)>,
+}
+
+impl Default for RawTerminalHub {
+    fn default() -> Self {
+        Self {
+            events: VecDeque::new(),
+            next_seq: 1,
+            total_bytes: 0,
+            next_sub_id: 1,
+            subscriber: None,
+        }
+    }
+}
+
+impl RawTerminalHub {
+    fn push_event(&mut self, ev: RawTerminalEvent) -> RawTerminalEvent {
         self.next_seq = self.next_seq.saturating_add(1);
-        self.total_b64_bytes = self.total_b64_bytes.saturating_add(added_bytes);
+        self.total_bytes = self.total_bytes.saturating_add(ev.payload_len());
         self.events.push_back(ev.clone());
 
         while self.events.len() > MAX_TERMINAL_EVENTS
-            || self.total_b64_bytes > MAX_TERMINAL_BUFFER_BYTES
+            || self.total_bytes > MAX_TERMINAL_BUFFER_BYTES
         {
             if self.events.len() <= 1 {
                 break;
             }
             if let Some(evicted) = self.events.pop_front() {
-                let sz = evicted.data_b64.as_ref().map(|s| s.len()).unwrap_or(0);
-                self.total_b64_bytes = self.total_b64_bytes.saturating_sub(sz);
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.payload_len());
+            }
+        }
+
+        if let Some((_, ref tx)) = self.subscriber {
+            if tx.send(ev.clone()).is_err() {
+                self.subscriber = None;
             }
         }
         ev
     }
 
-    fn events_after(&self, cursor: u64) -> Vec<WireTerminalEvent> {
+    fn push_output(&mut self, data: Vec<u8>) -> RawTerminalEvent {
+        let seq = self.next_seq;
+        self.push_event(RawTerminalEvent::Output { seq, data })
+    }
+
+    fn push_exit(&mut self, status: Option<u32>, reason: String) -> RawTerminalEvent {
+        let seq = self.next_seq;
+        self.push_event(RawTerminalEvent::Exit {
+            seq,
+            status,
+            reason,
+        })
+    }
+
+    fn events_after(&self, cursor: u64) -> Vec<RawTerminalEvent> {
         self.events
             .iter()
-            .filter(|ev| ev.seq > cursor)
+            .filter(|ev| ev.seq() > cursor)
             .cloned()
             .collect()
     }
+
+    fn attach(&mut self, since: u64) -> (u64, Vec<RawTerminalEvent>, mpsc::UnboundedReceiver<RawTerminalEvent>) {
+        let sub_id = self.next_sub_id;
+        self.next_sub_id = self.next_sub_id.saturating_add(1);
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.subscriber = Some((sub_id, tx));
+        let backlog = self.events_after(since);
+        (sub_id, backlog, rx)
+    }
+
+    fn detach(&mut self, sub_id: u64) -> bool {
+        if let Some((cur_id, _)) = self.subscriber {
+            if cur_id == sub_id {
+                self.subscriber = None;
+                return true;
+            }
+        }
+        false
+    }
 }
 
-struct ActiveTerminal {
-    connection: Arc<SshConnection>,
-    shell: PtyShellSession,
-    integration: Option<ShellIntegration>,
-    reverse_proxy: Mutex<Option<ReverseProxyChannel>>,
-    events: Mutex<TerminalEventBuffer>,
+enum TerminalEndpoint {
+    Pty {
+        connection: Arc<SshConnection>,
+        shell: PtyShellSession,
+        integration: Option<ShellIntegration>,
+        reverse_proxy: Mutex<Option<ReverseProxyChannel>>,
+    },
+    #[allow(dead_code)]
+    Mock {
+        input_tx: mpsc::UnboundedSender<Vec<u8>>,
+        resize_tx: mpsc::UnboundedSender<(u32, u32)>,
+    },
+}
+
+pub(crate) struct ActiveTerminal {
+    endpoint: TerminalEndpoint,
+    ws_active: AtomicBool,
+    hub: StdMutex<RawTerminalHub>,
+}
+
+pub(crate) struct WsDetachGuard {
+    active: Arc<ActiveTerminal>,
+    sub_id: u64,
+}
+
+impl Drop for WsDetachGuard {
+    fn drop(&mut self) {
+        self.active.detach_ws(self.sub_id);
+    }
 }
 
 impl ActiveTerminal {
-    async fn push_wire_event(
-        &self,
-        kind: &'static str,
-        data_b64: Option<String>,
-        exit_code: Option<u32>,
-        reason: Option<String>,
-    ) -> WireTerminalEvent {
-        let mut guard = self.events.lock().await;
-        guard.push(kind, data_b64, exit_code, reason)
+    fn push_output(&self, data: Vec<u8>) -> RawTerminalEvent {
+        let mut guard = self.hub.lock().expect("terminal hub lock poisoned");
+        guard.push_output(data)
     }
 
-    async fn events_after(&self, cursor: u64) -> Vec<WireTerminalEvent> {
-        let guard = self.events.lock().await;
-        guard.events_after(cursor)
+    fn push_exit(&self, status: Option<u32>, reason: String) -> RawTerminalEvent {
+        let mut guard = self.hub.lock().expect("terminal hub lock poisoned");
+        guard.push_exit(status, reason)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_raw_output(&self, data: Vec<u8>) {
+        self.push_output(data);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_raw_exit(&self, status: Option<u32>, reason: String) {
+        self.push_exit(status, reason);
+    }
+
+    fn wire_events_after(&self, cursor: u64) -> Vec<WireTerminalEvent> {
+        let guard = self.hub.lock().expect("terminal hub lock poisoned");
+        guard
+            .events_after(cursor)
+            .into_iter()
+            .map(|ev| ev.to_wire())
+            .collect()
+    }
+
+    pub(crate) fn is_ws_active(&self) -> bool {
+        self.ws_active.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn attach_ws(
+        self: &Arc<Self>,
+        since: u64,
+    ) -> (
+        Vec<RawTerminalEvent>,
+        mpsc::UnboundedReceiver<RawTerminalEvent>,
+        WsDetachGuard,
+    ) {
+        let mut guard = self.hub.lock().expect("terminal hub lock poisoned");
+        self.ws_active.store(true, Ordering::SeqCst);
+        let (sub_id, backlog, rx) = guard.attach(since);
+        (
+            backlog,
+            rx,
+            WsDetachGuard {
+                active: Arc::clone(self),
+                sub_id,
+            },
+        )
+    }
+
+    fn detach_ws(&self, sub_id: u64) {
+        let mut guard = self.hub.lock().expect("terminal hub lock poisoned");
+        if guard.detach(sub_id) {
+            self.ws_active.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn send_input(&self, data: Vec<u8>) -> SendInputResult {
+        match &self.endpoint {
+            TerminalEndpoint::Pty { shell, .. } => shell.send_input(data),
+            TerminalEndpoint::Mock { input_tx, .. } => {
+                if input_tx.send(data).is_ok() {
+                    SendInputResult::Sent
+                } else {
+                    SendInputResult::Closed
+                }
+            }
+        }
+    }
+
+    pub(crate) fn resize(&self, cols: u32, rows: u32) -> Result<(), String> {
+        match &self.endpoint {
+            TerminalEndpoint::Pty { shell, .. } => shell.resize(cols, rows).map_err(|e| e.to_string()),
+            TerminalEndpoint::Mock { resize_tx, .. } => resize_tx
+                .send((cols, rows))
+                .map_err(|_| "mock terminal closed".to_string()),
+        }
+    }
+
+    async fn cleanup_pty_aux(&self) {
+        if let TerminalEndpoint::Pty {
+            connection,
+            integration,
+            reverse_proxy,
+            ..
+        } = &self.endpoint
+        {
+            if let Some(ref integ) = integration {
+                connection.cleanup_shell_integration(integ).await;
+            }
+            if let Some(mut rp) = reverse_proxy.lock().await.take() {
+                rp.close().await;
+            }
+        }
+    }
+
+    async fn disconnect_connection(&self) {
+        if let TerminalEndpoint::Pty { connection, .. } = &self.endpoint {
+            connection.disconnect().await;
+        }
     }
 
     async fn cleanup_resources(&self) {
-        self.shell.close();
-        if let Some(ref integ) = self.integration {
-            self.connection.cleanup_shell_integration(integ).await;
+        if let TerminalEndpoint::Pty { shell, .. } = &self.endpoint {
+            shell.close();
         }
-        if let Some(mut rp) = self.reverse_proxy.lock().await.take() {
-            rp.close().await;
-        }
-        self.connection.disconnect().await;
+        self.cleanup_pty_aux().await;
+        self.disconnect_connection().await;
     }
 }
 
@@ -153,7 +345,7 @@ pub struct TerminalManager {
 }
 
 impl TerminalManager {
-    fn get(&self, id: &str) -> Option<Arc<ActiveTerminal>> {
+    pub(crate) fn get(&self, id: &str) -> Option<Arc<ActiveTerminal>> {
         self.terminals
             .read()
             .ok()
@@ -164,6 +356,29 @@ impl TerminalManager {
         if let Ok(mut g) = self.terminals.write() {
             g.insert(id, active);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_mock(
+        &self,
+        id: String,
+    ) -> (
+        Arc<ActiveTerminal>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+        mpsc::UnboundedReceiver<(u32, u32)>,
+    ) {
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, resize_rx) = mpsc::unbounded_channel();
+        let active = Arc::new(ActiveTerminal {
+            endpoint: TerminalEndpoint::Mock {
+                input_tx,
+                resize_tx,
+            },
+            ws_active: AtomicBool::new(false),
+            hub: StdMutex::new(RawTerminalHub::default()),
+        });
+        self.insert(id, Arc::clone(&active));
+        (active, input_rx, resize_rx)
     }
 
     fn remove(&self, id: &str) -> Option<Arc<ActiveTerminal>> {
@@ -340,12 +555,29 @@ pub async fn open_terminal(
     let x11_enabled = shell.x11_active();
 
     let session_id = new_id();
+    let ws_url = if state.proxy_base_url.is_empty() {
+        None
+    } else {
+        let base = state.proxy_base_url.trim_end_matches('/');
+        let ws_base = base
+            .strip_prefix("http://")
+            .map(|rest| format!("ws://{rest}"))
+            .unwrap_or_else(|| base.replacen("https://", "wss://", 1));
+        Some(format!(
+            "{ws_base}/api/terminal-ws?session={session_id}&token={}",
+            state.api_token
+        ))
+    };
+
     let active = Arc::new(ActiveTerminal {
-        connection: Arc::clone(&connection),
-        shell,
-        integration,
-        reverse_proxy: Mutex::new(reverse_proxy),
-        events: Mutex::new(TerminalEventBuffer::default()),
+        endpoint: TerminalEndpoint::Pty {
+            connection: Arc::clone(&connection),
+            shell,
+            integration,
+            reverse_proxy: Mutex::new(reverse_proxy),
+        },
+        ws_active: AtomicBool::new(false),
+        hub: StdMutex::new(RawTerminalHub::default()),
     });
     state
         .terminals
@@ -361,7 +593,7 @@ pub async fn open_terminal(
 
     tokio::spawn(async move {
         while let Some(ev) = event_rx.recv().await {
-            let (is_exit, wire, pending_exit) = match ev {
+            let (is_exit, raw_ev, pending_exit) = match ev {
                 TerminalEvent::Output(mut bytes) => {
                     let mut deferred_exit = None;
                     while bytes.len() < OUTPUT_COALESCE_CAP {
@@ -374,26 +606,23 @@ pub async fn open_terminal(
                             Err(_) => break,
                         }
                     }
-                    let wire = active_for_task
-                        .push_wire_event("output", Some(BASE64.encode(&bytes)), None, None)
-                        .await;
-                    (false, wire, deferred_exit)
+                    let raw_ev = active_for_task.push_output(bytes);
+                    (false, raw_ev, deferred_exit)
                 }
                 TerminalEvent::Exit { status, reason } => {
-                    let wire = active_for_task
-                        .push_wire_event("exit", None, status, Some(reason))
-                        .await;
-                    (true, wire, None)
+                    let raw_ev = active_for_task.push_exit(status, reason);
+                    (true, raw_ev, None)
                 }
             };
-            // Never kill the SSH shell if Tauri Channel delivery transiently fails;
-            // the event stays in `events` so `poll_terminal_events` can drain it.
-            let _ = on_event.send(wire);
+            // Skip Base64 + WebView eval completely when the direct binary WebSocket is attached.
+            if !active_for_task.is_ws_active() {
+                let _ = on_event.send(raw_ev.to_wire());
+            }
             if let Some(TerminalEvent::Exit { status, reason }) = pending_exit {
-                let wire = active_for_task
-                    .push_wire_event("exit", None, status, Some(reason))
-                    .await;
-                let _ = on_event.send(wire);
+                let exit_ev = active_for_task.push_exit(status, reason);
+                if !active_for_task.is_ws_active() {
+                    let _ = on_event.send(exit_ev.to_wire());
+                }
                 break;
             }
             if is_exit {
@@ -403,19 +632,11 @@ pub async fn open_terminal(
 
         // Release remote shell integration and reverse proxy cleanly, then retain
         // the exit event briefly so late pollers observe EOF before cleanup.
-        if let Some(ref integ) = active_for_task.integration {
-            active_for_task
-                .connection
-                .cleanup_shell_integration(integ)
-                .await;
-        }
-        if let Some(mut rp) = active_for_task.reverse_proxy.lock().await.take() {
-            rp.close().await;
-        }
+        active_for_task.cleanup_pty_aux().await;
 
         tokio::time::sleep(EXITED_SESSION_GRACE).await;
         if let Some(removed) = terminals_ref.remove(&sid_for_task) {
-            removed.connection.disconnect().await;
+            removed.disconnect_connection().await;
         }
     });
 
@@ -425,6 +646,7 @@ pub async fn open_terminal(
         proxy_error,
         x11_enabled,
         x11_error,
+        ws_url,
     })
 }
 
@@ -437,7 +659,7 @@ pub async fn poll_terminal_events(
 
     let mut out = HashMap::with_capacity(entries.len());
     for (sid, cursor, active) in entries {
-        let evs = active.events_after(cursor).await;
+        let evs = active.wire_events_after(cursor);
         if !evs.is_empty() {
             out.insert(sid, evs);
         }
@@ -455,13 +677,22 @@ pub async fn get_terminal_cwd(
         .get(&session_id)
         .ok_or_else(|| format!("terminal session not found: {session_id}"))?;
 
-    if let Some(ref integ) = active.integration {
-        if let Some(live_cwd) = active.connection.query_shell_directory(integ).await {
+    let TerminalEndpoint::Pty {
+        connection,
+        integration,
+        ..
+    } = &active.endpoint
+    else {
+        return Ok(TerminalCwdResponse { path: "/".into() });
+    };
+
+    if let Some(ref integ) = integration {
+        if let Some(live_cwd) = connection.query_shell_directory(integ).await {
             return Ok(TerminalCwdResponse { path: live_cwd });
         }
     }
 
-    let home = match active.connection.open_sftp().await {
+    let home = match connection.open_sftp().await {
         Ok(sftp) => sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into()),
         Err(_) => "/".into(),
     };
@@ -488,7 +719,7 @@ pub fn send_terminal_input(
         .terminals
         .get(&session_id)
         .ok_or_else(|| format!("terminal session not found: {session_id}"))?;
-    Ok(active.shell.send_input(bytes))
+    Ok(active.send_input(bytes))
 }
 
 #[tauri::command]
@@ -502,7 +733,7 @@ pub fn resize_terminal(
         .terminals
         .get(&session_id)
         .ok_or_else(|| format!("terminal session not found: {session_id}"))?;
-    active.shell.resize(cols, rows).map_err(|e| e.to_string())
+    active.resize(cols, rows)
 }
 
 #[tauri::command]
