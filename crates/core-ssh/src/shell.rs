@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use russh::{Channel, ChannelMsg, ChannelReadHalf, Pty, Sig, client};
+use russh::{Channel, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Pty, Sig, client};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -63,69 +63,99 @@ pub struct PtyShellSession {
     x11_active: bool,
 }
 
-impl PtyShellSession {
-    pub async fn open_on_channel(
-        channel: Channel<client::Msg>,
-        options: ShellOpenOptions,
-        integration: Option<ShellIntegration>,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<TerminalEvent>), SshError> {
-        let (mut read_half, write_half) = channel.split();
-        let cols = options.cols.max(20);
-        let rows = options.rows.max(5);
-        let term = if options.term.trim().is_empty() {
-            "xterm-256color"
-        } else {
-            options.term.trim()
-        };
+pub struct PreparedPtyChannel {
+    read_half: ChannelReadHalf,
+    write_half: ChannelWriteHalf<client::Msg>,
+    early_output: Vec<u8>,
+    x11_active: bool,
+}
 
-        let mut early_output = Vec::new();
-        let pty_modes = [
-            (Pty::ECHO, 1),
-            (Pty::TTY_OP_ISPEED, 14400),
-            (Pty::TTY_OP_OSPEED, 14400),
-        ];
+pub async fn prepare_pty_channel(
+    channel: Channel<client::Msg>,
+    cols: u32,
+    rows: u32,
+    term: &str,
+    x11: Option<&PreparedX11>,
+) -> Result<PreparedPtyChannel, SshError> {
+    let (mut read_half, write_half) = channel.split();
+    let cols = cols.max(20);
+    let rows = rows.max(5);
+    let term = if term.trim().is_empty() {
+        "xterm-256color"
+    } else {
+        term.trim()
+    };
 
+    let mut early_output = Vec::new();
+    let pty_modes = [
+        (Pty::ECHO, 1),
+        (Pty::TTY_OP_ISPEED, 14400),
+        (Pty::TTY_OP_OSPEED, 14400),
+    ];
+
+    write_half
+        .request_pty(true, term, cols, rows, 0, 0, &pty_modes)
+        .await
+        .map_err(|err| SshError::Shell(format!("failed to request PTY: {err}")))?;
+    wait_channel_reply(&mut read_half, &mut early_output, SHELL_REQUEST_TIMEOUT, false).await?;
+
+    let mut x11_active = false;
+    if let Some(x11) = x11 {
         write_half
-            .request_pty(true, term, cols, rows, 0, 0, &pty_modes)
+            .request_x11(
+                true,
+                false,
+                "MIT-MAGIC-COOKIE-1",
+                &x11.fake_cookie_hex,
+                x11.display.screen_num,
+            )
             .await
-            .map_err(|err| SshError::Shell(format!("failed to request PTY: {err}")))?;
-        wait_channel_reply(&mut read_half, &mut early_output, SHELL_REQUEST_TIMEOUT, false).await?;
+            .map_err(|err| SshError::Shell(format!("failed to request X11 forwarding: {err}")))?;
+        wait_channel_reply(&mut read_half, &mut early_output, X11_REQUEST_TIMEOUT, true).await?;
+        x11_active = true;
+    }
 
-        let mut x11_active = false;
-        if let Some(ref x11) = options.x11 {
-            write_half
-                .request_x11(
-                    true,
-                    false,
-                    "MIT-MAGIC-COOKIE-1",
-                    &x11.fake_cookie_hex,
-                    x11.display.screen_num,
-                )
-                .await
-                .map_err(|err| SshError::Shell(format!("failed to request X11 forwarding: {err}")))?;
-            wait_channel_reply(&mut read_half, &mut early_output, X11_REQUEST_TIMEOUT, true).await?;
-            x11_active = true;
-        }
+    Ok(PreparedPtyChannel {
+        read_half,
+        write_half,
+        early_output,
+        x11_active,
+    })
+}
 
-        if let Some(ref cmd) = options.startup_command {
-            write_half
+impl PreparedPtyChannel {
+    pub async fn start(
+        mut self,
+        startup_command: Option<&str>,
+        integration: Option<ShellIntegration>,
+    ) -> Result<(PtyShellSession, mpsc::UnboundedReceiver<TerminalEvent>), SshError> {
+        if let Some(cmd) = startup_command {
+            self.write_half
                 .exec(true, cmd.as_bytes().to_vec())
                 .await
                 .map_err(|err| SshError::Shell(format!("failed to start shell command: {err}")))?;
         } else {
-            write_half
+            self.write_half
                 .request_shell(true)
                 .await
                 .map_err(|err| SshError::Shell(format!("failed to start interactive shell: {err}")))?;
         }
-        wait_channel_reply(&mut read_half, &mut early_output, SHELL_REQUEST_TIMEOUT, false).await?;
+        wait_channel_reply(
+            &mut self.read_half,
+            &mut self.early_output,
+            SHELL_REQUEST_TIMEOUT,
+            false,
+        )
+        .await?;
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        if !early_output.is_empty() {
-            let _ = event_tx.send(TerminalEvent::Output(early_output));
+        if !self.early_output.is_empty() {
+            let _ = event_tx.send(TerminalEvent::Output(self.early_output));
         }
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<ShellControl>();
+        let write_half = self.write_half;
+        let mut read_half = self.read_half;
 
         tokio::spawn(async move {
             while let Some(ctrl) = control_rx.recv().await {
@@ -200,13 +230,33 @@ impl PtyShellSession {
         });
 
         Ok((
-            Self {
+            PtyShellSession {
                 control_tx,
                 integration: integration.map(Arc::new),
-                x11_active,
+                x11_active: self.x11_active,
             },
             event_rx,
         ))
+    }
+}
+
+impl PtyShellSession {
+    pub async fn open_on_channel(
+        channel: Channel<client::Msg>,
+        options: ShellOpenOptions,
+        integration: Option<ShellIntegration>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<TerminalEvent>), SshError> {
+        let prepared = prepare_pty_channel(
+            channel,
+            options.cols,
+            options.rows,
+            &options.term,
+            options.x11.as_ref(),
+        )
+        .await?;
+        prepared
+            .start(options.startup_command.as_deref(), integration)
+            .await
     }
 
     pub fn integration(&self) -> Option<&ShellIntegration> {

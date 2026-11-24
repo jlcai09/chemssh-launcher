@@ -1,13 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use core_config::{new_id, proxy_env_pairs, ProfileStore};
 use core_ssh::{
-    prepare_local_x_server, HostKeyPolicy, KnownHostsVerifier, PtyShellSession,
-    ReverseProxyChannel, SendInputResult, ShellIntegration, ShellOpenOptions, SshConnection,
+    prepare_local_x_server, proxy_login_shell_command, HostKeyPolicy, KnownHostsVerifier,
+    PtyShellSession, ReverseProxyChannel, SendInputResult, ShellIntegration, SshConnection,
     TerminalEvent,
 };
 use serde::Serialize;
@@ -180,6 +180,7 @@ pub async fn open_terminal(
         return Err("local profiles do not support SSH terminals".into());
     }
 
+    let t_start = Instant::now();
     let creds = load_ssh_credentials(&state, &profile)?;
     let verifier = KnownHostsVerifier::new(
         &state.known_hosts_path,
@@ -187,62 +188,83 @@ pub async fn open_terminal(
         profile.ssh_port,
         host_key_policy.unwrap_or(HostKeyPolicy::Strict),
     );
-    let connection = Arc::new(
-        SshConnection::connect(&profile, &creds, verifier)
-            .await
-            .map_err(format_ssh_error)?,
-    );
 
-    let mut proxy_url = None;
-    let mut proxy_error = None;
-    let mut proxy_env = Vec::new();
-    let mut reverse_proxy = None;
-    if profile.proxy_active() {
-        let lp = profile.local_proxy.normalized();
-        match connection.start_reverse_proxy(lp.address()).await {
-            Ok(ch) => {
-                proxy_env = proxy_env_pairs(&ch.proxy_url, &lp.no_proxy);
-                proxy_url = Some(ch.proxy_url.clone());
-                reverse_proxy = Some(ch);
-            }
-            Err(err) => {
-                let msg = err.to_string();
-                state
-                    .launcher_logs
-                    .push(format!("[terminal:{}] reverse proxy warn: {msg}", profile.name));
-                proxy_error = Some(msg);
-            }
-        }
-    }
-
-    let mut x11_error = String::new();
-    let prepared_x11 = if profile.x11_active() {
-        match prepare_local_x_server(&profile.x11).await {
-            Ok(prep) => Some(prep),
-            Err(err) => {
-                let msg = err.to_string();
-                state
-                    .launcher_logs
-                    .push(format!("[terminal:{}] X11 warn: {msg}", profile.name));
-                x11_error = msg;
+    // Run local X11 verification concurrently with the SSH TCP/KEX/auth handshake.
+    let (connect_res, x11_res) = tokio::join!(
+        SshConnection::connect(&profile, &creds, verifier),
+        async {
+            if profile.x11_active() {
+                Some(prepare_local_x_server(&profile.x11).await)
+            } else {
                 None
             }
         }
-    } else {
-        None
+    );
+    let connection = Arc::new(connect_res.map_err(format_ssh_error)?);
+    let ssh_ms = t_start.elapsed().as_millis();
+
+    let mut x11_error = String::new();
+    let prepared_x11 = match x11_res {
+        Some(Ok(prep)) => Some(prep),
+        Some(Err(err)) => {
+            let msg = err.to_string();
+            state
+                .launcher_logs
+                .push(format!("[terminal:{}] X11 warn: {msg}", profile.name));
+            x11_error = msg;
+            None
+        }
+        None => None,
     };
 
-    let open_opts = ShellOpenOptions {
-        cols: cols.unwrap_or(120),
-        rows: rows.unwrap_or(32),
-        term: "xterm-256color".to_string(),
-        startup_command: None,
-        x11: prepared_x11,
+    let t_prep = Instant::now();
+    let cols_norm = cols.unwrap_or(120);
+    let rows_norm = rows.unwrap_or(32);
+
+    // Overlap reverse-proxy + shell-integration script upload with PTY+X11 channel opening.
+    let setup_branch = async {
+        let mut proxy_url = None;
+        let mut proxy_error = None;
+        let mut proxy_env = Vec::new();
+        let mut reverse_proxy = None;
+        if profile.proxy_active() {
+            let lp = profile.local_proxy.normalized();
+            match connection.start_reverse_proxy(lp.address()).await {
+                Ok(ch) => {
+                    proxy_env = proxy_env_pairs(&ch.proxy_url, &lp.no_proxy);
+                    proxy_url = Some(ch.proxy_url.clone());
+                    reverse_proxy = Some(ch);
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    state
+                        .launcher_logs
+                        .push(format!("[terminal:{}] reverse proxy warn: {msg}", profile.name));
+                    proxy_error = Some(msg);
+                }
+            }
+        }
+        let integration = connection.setup_shell_integration(&proxy_env).await;
+        (proxy_url, proxy_error, proxy_env, reverse_proxy, integration)
     };
 
-    let opened = match connection.open_pty_shell(open_opts, &proxy_env, true).await {
+    let pty_branch = connection.prepare_pty_channel_with_x11_fallback(
+        cols_norm,
+        rows_norm,
+        "xterm-256color",
+        prepared_x11.as_ref(),
+    );
+
+    let ((proxy_url, proxy_error, proxy_env, mut reverse_proxy, integration), pty_res) =
+        tokio::join!(setup_branch, pty_branch);
+    let prep_ms = t_prep.elapsed().as_millis();
+
+    let (prepared, prep_x11_warn) = match pty_res {
         Ok(ok) => ok,
         Err(err) => {
+            if let Some(ref integ) = integration {
+                connection.cleanup_shell_integration(integ).await;
+            }
             if let Some(mut rp) = reverse_proxy.take() {
                 rp.close().await;
             }
@@ -251,8 +273,7 @@ pub async fn open_terminal(
         }
     };
 
-    let x11_enabled = opened.shell.x11_active();
-    if let Some(warn) = opened.x11_warning {
+    if let Some(warn) = prep_x11_warn {
         state
             .launcher_logs
             .push(format!("[terminal:{}] X11 warn: {warn}", profile.name));
@@ -261,11 +282,40 @@ pub async fn open_terminal(
         }
     }
 
+    let startup_command = if let Some(ref integ) = integration {
+        Some(integ.interactive_command(&proxy_env))
+    } else if !proxy_env.is_empty() {
+        Some(proxy_login_shell_command("/bin/sh", &proxy_env))
+    } else {
+        None
+    };
+
+    let t_exec = Instant::now();
+    let (shell, mut event_rx) = match prepared
+        .start(startup_command.as_deref(), integration.clone())
+        .await
+    {
+        Ok(ok) => ok,
+        Err(err) => {
+            if let Some(ref integ) = integration {
+                connection.cleanup_shell_integration(integ).await;
+            }
+            if let Some(mut rp) = reverse_proxy.take() {
+                rp.close().await;
+            }
+            connection.disconnect().await;
+            return Err(err.to_string());
+        }
+    };
+    let exec_ms = t_exec.elapsed().as_millis();
+    let total_ms = t_start.elapsed().as_millis();
+    let x11_enabled = shell.x11_active();
+
     let session_id = new_id();
     let active = Arc::new(ActiveTerminal {
         connection: Arc::clone(&connection),
-        shell: opened.shell,
-        integration: opened.integration,
+        shell,
+        integration,
         reverse_proxy: Mutex::new(reverse_proxy),
         events: Mutex::new(TerminalEventBuffer::default()),
     });
@@ -277,11 +327,9 @@ pub async fn open_terminal(
         .insert(session_id.clone(), Arc::clone(&active));
 
     state.launcher_logs.push(format!(
-        "[terminal:{}] connected (id={session_id}, x11={x11_enabled})",
+        "[terminal:{}] connected in {total_ms}ms (ssh={ssh_ms}ms, prep={prep_ms}ms, exec={exec_ms}ms, id={session_id}, x11={x11_enabled})",
         profile.name
     ));
-
-    let mut event_rx = opened.events;
     let active_for_task = Arc::clone(&active);
     let terminals_ref = Arc::clone(&state.terminals);
     let sid_for_task = session_id.clone();

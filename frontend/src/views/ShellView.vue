@@ -27,8 +27,9 @@
           type="button"
           draggable="true"
           @click="activate(tab.id)"
-          @dragstart="draggingID = tab.id"
-          @dragover.prevent="moveBefore(tab.id)"
+          @dragstart="startTabDrag(tab.id, $event)"
+          @dragover.prevent="moveBefore(tab.id, $event)"
+          @drop.prevent="draggingID = ''"
           @dragend="draggingID = ''"
         >
           <span>{{ tabLabel(tab) }}</span>
@@ -353,7 +354,16 @@ function goForward() {
   navigateTab(tab.id, tab.history[tab.historyIndex], false)
 }
 
-function moveBefore(targetID: string) {
+function startTabDrag(id: string, event: DragEvent) {
+  draggingID.value = id
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', id)
+  }
+}
+
+function moveBefore(targetID: string, event?: DragEvent) {
+  if (event?.dataTransfer) event.dataTransfer.dropEffect = 'move'
   if (!draggingID.value || draggingID.value === targetID) return
   const from = tabOrder.value.findIndex(id => id === draggingID.value)
   const to = tabOrder.value.findIndex(id => id === targetID)

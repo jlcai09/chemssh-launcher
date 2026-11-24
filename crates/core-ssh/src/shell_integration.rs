@@ -191,7 +191,7 @@ unset _chemssh_launcher_marker _chemssh_launcher_dir
 __CHEMSSH_INIT_EOF__
 {proxy_exports_append}
 chmod 600 "$dir/init.sh" || exit 1
-if ! "$dir/bin/sz" >/dev/null 2>&1; then
+if ! command -v base64 >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1 && ! command -v openssl >/dev/null 2>&1; then
   rm -rf -- "$dir"
   exit 1
 fi

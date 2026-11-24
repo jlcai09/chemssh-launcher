@@ -27,7 +27,10 @@ pub use remote_command::{
     assemble_remote_command, effective_check_port_command, effective_local_start_command,
     effective_start_command, port_warning, shell_quote,
 };
-pub use shell::{PtyShellSession, SendInputResult, ShellOpenOptions, TerminalEvent};
+pub use shell::{
+    prepare_pty_channel, PreparedPtyChannel, PtyShellSession, SendInputResult, ShellOpenOptions,
+    TerminalEvent,
+};
 pub use shell_integration::{
     build_query_cwd_command, build_shell_integration_setup_script,
     cleanup_shell_integration_command, interactive_shell_command, parse_query_cwd_output,
