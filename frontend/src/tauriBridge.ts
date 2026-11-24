@@ -1089,6 +1089,9 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
   if (mapped.command === 'local_compress' || mapped.command === 'sftp_compress') {
     return { archive: mapped.args?.archiveName ?? '' } as unknown as T
   }
+  if (mapped.command === 'get_session_logs') {
+    return (Array.isArray(rawResult) ? { lines: rawResult } : rawResult) as T
+  }
   if (mapped.command === 'control_transfer') {
     return { ok: true, snapshot: rawResult } as unknown as T
   }
@@ -1122,28 +1125,149 @@ export function sendTauriTerminalInput(sessionId: string, dataB64: string) {
   })
 }
 
-export async function subscribeTauriSessionLogs(
+export interface TauriSessionLogPollResponse {
+  profile_id: string
+  lines: string[]
+  last_seq: number
+  reset: boolean
+}
+
+export interface SessionLogCursor {
+  apply(lines: string[], isReplay: boolean, batchLastSeq?: number): boolean
+  lastSeq(): number
+}
+
+/**
+ * Deduplicates session log batches arriving from both Tauri Channel push and
+ * `poll_session_logs` fallback so lines are delivered once and in order.
+ */
+export function createSessionLogCursor(
+  onBatch: (lines: string[], isInitialReplay: boolean) => void,
+): SessionLogCursor {
+  let cursor = 0
+  let initialized = false
+
+  return {
+    apply(lines: string[], isReplay: boolean, batchLastSeq?: number): boolean {
+      if (typeof batchLastSeq === 'number') {
+        if (isReplay) {
+          if (initialized && batchLastSeq <= cursor) {
+            return false
+          }
+          cursor = Math.max(cursor, batchLastSeq)
+          initialized = true
+          onBatch(lines, true)
+          return true
+        }
+        if (batchLastSeq <= cursor) {
+          return false
+        }
+        cursor = batchLastSeq
+        initialized = true
+        if (lines.length > 0) {
+          onBatch(lines, false)
+        }
+        return true
+      }
+
+      if (isReplay) {
+        if (initialized && lines.length === 0) return false
+        initialized = true
+        onBatch(lines, true)
+        return true
+      }
+      if (lines.length === 0) return false
+      initialized = true
+      onBatch(lines, false)
+      return true
+    },
+    lastSeq(): number {
+      return cursor
+    },
+  }
+}
+
+export function subscribeTauriSessionLogs(
   profileId: string,
   onBatch: (lines: string[], isInitialReplay: boolean) => void,
-): Promise<void> {
+): () => void {
+  let disposed = false
   let first = true
+  let channelLive = false
+  let pollInFlight = false
+  let pollTimer: number | null = null
+
+  const cursor = createSessionLogCursor((lines, isReplay) => {
+    if (!disposed) onBatch(lines, isReplay)
+  })
+
+  const pollOnce = async () => {
+    if (disposed || pollInFlight) return
+    pollInFlight = true
+    try {
+      const res = await invoke<TauriSessionLogPollResponse>('poll_session_logs', {
+        profileId,
+        afterSeq: cursor.lastSeq(),
+      })
+      if (disposed || !res) return
+      const lines = Array.isArray(res.lines) ? res.lines : []
+      cursor.apply(lines, Boolean(res.reset), typeof res.last_seq === 'number' ? res.last_seq : undefined)
+    } catch {
+      // Fallback to legacy get_session_logs if poll_session_logs is unavailable.
+      try {
+        const legacy = await invoke<string[]>('get_session_logs', { profileId })
+        if (!disposed && Array.isArray(legacy) && legacy.length > 0) {
+          cursor.apply(legacy, true)
+        }
+      } catch {
+        // Ignore transient IPC errors; next poll tick will retry.
+      }
+    } finally {
+      pollInFlight = false
+    }
+  }
+
+  const schedulePoll = () => {
+    if (disposed) return
+    const delayMs = channelLive ? 2500 : 500
+    pollTimer = window.setTimeout(() => {
+      pollTimer = null
+      void pollOnce().finally(schedulePoll)
+    }, delayMs)
+  }
+
   const channel = new Channel<
-    string[] | { profile_id?: string; lines?: string[]; is_replay?: boolean }
+    string[] | { profile_id?: string; lines?: string[]; is_replay?: boolean; last_seq?: number }
   >()
   channel.onmessage = payload => {
-    const isInitial =
-      typeof payload === 'object' && payload !== null && !Array.isArray(payload) && typeof payload.is_replay === 'boolean'
-        ? payload.is_replay
-        : first
+    if (disposed) return
+    const isObj = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+    const isInitial = isObj && typeof payload.is_replay === 'boolean' ? payload.is_replay : first
     first = false
     const lines = Array.isArray(payload)
       ? payload
       : Array.isArray(payload?.lines)
         ? payload.lines
         : []
-    onBatch(lines, isInitial)
+    const lastSeq = isObj && typeof payload.last_seq === 'number' ? payload.last_seq : undefined
+    if (!isInitial && lines.length > 0) {
+      channelLive = true
+    }
+    cursor.apply(lines, isInitial, lastSeq)
   }
-  await invoke('stream_session_logs', { profileId, onEvent: channel })
+
+  // Always fetch initial snapshot via standard invoke so iframe Channel issues
+  // can never leave the log panel blank, then keep polling as a safety net.
+  void pollOnce().finally(schedulePoll)
+  void invoke('stream_session_logs', { profileId, onEvent: channel }).catch(() => undefined)
+
+  return () => {
+    disposed = true
+    if (pollTimer !== null) {
+      window.clearTimeout(pollTimer)
+      pollTimer = null
+    }
+  }
 }
 
 export type TauriTransferProgressItem = TransferProgressSnapshot & { id: string }

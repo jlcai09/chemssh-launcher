@@ -141,6 +141,7 @@ pub fn run() {
             commands::sessions::get_session_status,
             commands::sessions::list_session_statuses,
             commands::sessions::get_session_logs,
+            commands::sessions::poll_session_logs,
             commands::sessions::stream_session_logs,
             commands::terminal::open_terminal,
             commands::terminal::poll_terminal_events,

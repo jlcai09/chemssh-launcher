@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  createSessionLogCursor,
   createTerminalInputQueue,
   decodeTerminalWsFrame,
   parseTauriInvokeError,
@@ -248,4 +249,40 @@ test('decodeTerminalWsFrame decodes output and exit binary frames and rejects in
   const unknownBuf = new ArrayBuffer(9)
   new Uint8Array(unknownBuf)[0] = 9
   assert.equal(decodeTerminalWsFrame(unknownBuf), null)
+})
+
+test('createSessionLogCursor deduplicates channel push and poll fallback batches cleanly', () => {
+  const received = []
+  const cursor = createSessionLogCursor((lines, isReplay) => {
+    received.push({ lines, isReplay })
+  })
+
+  // Initial poll replay arrives first
+  assert.equal(cursor.apply(['start requested', 'SSH OK'], true, 2), true)
+  assert.equal(cursor.lastSeq(), 2)
+
+  // Stale channel replay with same seq is ignored (does not duplicate or clear)
+  assert.equal(cursor.apply(['start requested', 'SSH OK'], true, 2), false)
+
+  // Live line arrives via channel push
+  assert.equal(cursor.apply(['ready'], false, 3), true)
+  assert.equal(cursor.lastSeq(), 3)
+
+  // Duplicate poll with seq 3 is ignored
+  assert.equal(cursor.apply(['ready'], false, 3), false)
+
+  // Next line arrives via poll fallback
+  assert.equal(cursor.apply(['identity OK'], false, 4), true)
+  assert.equal(cursor.lastSeq(), 4)
+
+  // Ring-buffer reset with newer seq replaces cleanly
+  assert.equal(cursor.apply(['tail-1', 'tail-2'], true, 2500), true)
+  assert.equal(cursor.lastSeq(), 2500)
+
+  assert.deepEqual(received, [
+    { lines: ['start requested', 'SSH OK'], isReplay: true },
+    { lines: ['ready'], isReplay: false },
+    { lines: ['identity OK'], isReplay: false },
+    { lines: ['tail-1', 'tail-2'], isReplay: true },
+  ])
 })

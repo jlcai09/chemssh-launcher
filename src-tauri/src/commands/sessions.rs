@@ -86,6 +86,15 @@ pub struct LogBatchEvent {
     pub profile_id: String,
     pub lines: Vec<String>,
     pub is_replay: bool,
+    pub last_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LogPollResponse {
+    pub profile_id: String,
+    pub lines: Vec<String>,
+    pub last_seq: u64,
+    pub reset: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -241,20 +250,72 @@ impl ActiveSession {
 }
 
 #[derive(Default)]
+struct ProfileLogBuffer {
+    /// 1-based sequence number of the oldest retained line minus 1.
+    /// Equal to the number of evicted lines; `base_seq + lines.len()` is `last_seq`.
+    base_seq: u64,
+    lines: VecDeque<String>,
+}
+
+impl ProfileLogBuffer {
+    fn push(&mut self, line: String) -> u64 {
+        while self.lines.len() >= MAX_LOG_LINES {
+            self.lines.pop_front();
+            self.base_seq += 1;
+        }
+        self.lines.push_back(line);
+        self.last_seq()
+    }
+
+    fn last_seq(&self) -> u64 {
+        self.base_seq + self.lines.len() as u64
+    }
+
+    fn all_lines(&self) -> Vec<String> {
+        self.lines.iter().cloned().collect()
+    }
+
+    fn slice_since(&self, after_seq: u64) -> (Vec<String>, u64, bool) {
+        let last_seq = self.last_seq();
+        if after_seq == 0 || after_seq < self.base_seq {
+            return (self.all_lines(), last_seq, true);
+        }
+        if after_seq >= last_seq {
+            return (Vec::new(), last_seq, false);
+        }
+        let skip = (after_seq - self.base_seq) as usize;
+        let lines = self.lines.iter().skip(skip).cloned().collect();
+        (lines, last_seq, false)
+    }
+}
+
+#[derive(Default)]
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<ActiveSession>>>,
     active_profile_id: Mutex<Option<String>>,
-    profile_logs: Mutex<HashMap<String, VecDeque<String>>>,
-    log_txs: Mutex<HashMap<String, broadcast::Sender<String>>>,
+    profile_logs: Mutex<HashMap<String, ProfileLogBuffer>>,
+    log_txs: Mutex<HashMap<String, broadcast::Sender<(u64, String)>>>,
+    log_stream_gens: Mutex<HashMap<String, Arc<AtomicU64>>>,
     last_failures: Mutex<HashMap<String, String>>,
 }
 
 impl SessionManager {
-    async fn ensure_log_tx(&self, profile_id: &str) -> broadcast::Sender<String> {
+    async fn ensure_log_tx(&self, profile_id: &str) -> broadcast::Sender<(u64, String)> {
         let mut txs = self.log_txs.lock().await;
         txs.entry(profile_id.to_string())
             .or_insert_with(|| broadcast::channel(512).0)
             .clone()
+    }
+
+    async fn next_log_stream_gen(&self, profile_id: &str) -> (Arc<AtomicU64>, u64) {
+        let counter = {
+            let mut gens = self.log_stream_gens.lock().await;
+            gens.entry(profile_id.to_string())
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .clone()
+        };
+        let gen = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        (counter, gen)
     }
 
     pub async fn push_log(
@@ -269,18 +330,18 @@ impl SessionManager {
         if trimmed.is_empty() {
             return;
         }
-        {
+        let seq = {
             let mut logs_map = self.profile_logs.lock().await;
             let buf = logs_map
                 .entry(profile_id.to_string())
-                .or_insert_with(|| VecDeque::with_capacity(256));
-            while buf.len() >= MAX_LOG_LINES {
-                buf.pop_front();
-            }
-            buf.push_back(trimmed.clone());
-        }
+                .or_insert_with(|| ProfileLogBuffer {
+                    base_seq: 0,
+                    lines: VecDeque::with_capacity(256),
+                });
+            buf.push(trimmed.clone())
+        };
         let tx = self.ensure_log_tx(profile_id).await;
-        let _ = tx.send(trimmed.clone());
+        let _ = tx.send((seq, trimmed.clone()));
         launcher_logs.push(format!("[{profile_name}] {trimmed}"));
     }
 
@@ -414,12 +475,48 @@ impl SessionManager {
             .lock()
             .await
             .get(profile_id)
-            .map(|q| q.iter().cloned().collect())
+            .map(ProfileLogBuffer::all_lines)
             .unwrap_or_default()
     }
 
-    pub async fn subscribe_logs(&self, profile_id: &str) -> broadcast::Receiver<String> {
+    pub async fn logs_since(&self, profile_id: &str, after_seq: u64) -> LogPollResponse {
+        let guard = self.profile_logs.lock().await;
+        match guard.get(profile_id) {
+            Some(buf) => {
+                let (lines, last_seq, reset) = buf.slice_since(after_seq);
+                LogPollResponse {
+                    profile_id: profile_id.to_string(),
+                    lines,
+                    last_seq,
+                    reset,
+                }
+            }
+            None => LogPollResponse {
+                profile_id: profile_id.to_string(),
+                lines: Vec::new(),
+                last_seq: 0,
+                reset: after_seq == 0,
+            },
+        }
+    }
+
+    pub async fn subscribe_logs(&self, profile_id: &str) -> broadcast::Receiver<(u64, String)> {
         self.ensure_log_tx(profile_id).await.subscribe()
+    }
+
+    /// Subscribes to the live broadcast channel *before* taking the snapshot so
+    /// no lines pushed concurrently are missed between replay and live delivery.
+    pub async fn logs_snapshot_and_subscribe(
+        &self,
+        profile_id: &str,
+    ) -> (Vec<String>, u64, broadcast::Receiver<(u64, String)>) {
+        let rx = self.subscribe_logs(profile_id).await;
+        let guard = self.profile_logs.lock().await;
+        let (lines, last_seq) = guard
+            .get(profile_id)
+            .map(|buf| (buf.all_lines(), buf.last_seq()))
+            .unwrap_or_else(|| (Vec::new(), 0));
+        (lines, last_seq, rx)
     }
 
     /// Stops launcher-owned tunnels, reverse proxies, bridge files, SSH connections, and local
@@ -786,6 +883,16 @@ async fn start_local_session(
         warnings.push(pw);
     }
 
+    state
+        .sessions
+        .push_log(
+            &profile.id,
+            &profile.name,
+            &state.launcher_logs,
+            format!("start requested for {}", profile.name),
+        )
+        .await;
+
     // Probe first for 700ms so an already-running local ChemSSH server is reused cleanly.
     if probe_once(&health_url, LOCAL_PROBE_TIMEOUT, &health_opts)
         .await
@@ -850,6 +957,15 @@ async fn start_local_session(
     if let Err(err) = check_port_available(&profile.local_host, profile.local_port) {
         let suggestions = suggest_free_ports(&profile.local_host, profile.local_port, 3);
         let msg = format!("{err}; suggested free ports: {suggestions:?}");
+        state
+            .sessions
+            .push_log(
+                &profile.id,
+                &profile.name,
+                &state.launcher_logs,
+                format!("[error] {msg}"),
+            )
+            .await;
         state.sessions.set_failure(&profile.id, msg.clone()).await;
         return Err(msg);
     }
@@ -857,9 +973,31 @@ async fn start_local_session(
     let local_cmd = assemble_local_command(&profile);
     let mut cmd = build_local_shell_command(&local_cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch local ChemSSH command: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let msg = format!("failed to launch local ChemSSH command: {e}");
+            state
+                .sessions
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &state.launcher_logs,
+                    format!("[error] {msg}"),
+                )
+                .await;
+            return Err(msg);
+        }
+    };
+    state
+        .sessions
+        .push_log(
+            &profile.id,
+            &profile.name,
+            &state.launcher_logs,
+            format!("starting {} at {browser_url}", profile.name),
+        )
+        .await;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -1013,9 +1151,27 @@ async fn start_remote_session(
         .chemssh_bridge
         .close_for_profile(&profile.id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
         .await;
+    state
+        .sessions
+        .push_log(
+            &profile.id,
+            &profile.name,
+            &state.launcher_logs,
+            format!("start requested for {}", profile.name),
+        )
+        .await;
     if let Err(err) = check_port_available(&profile.local_host, profile.local_port) {
         let suggestions = suggest_free_ports(&profile.local_host, profile.local_port, 3);
         let msg = format!("{err}; suggested free ports: {suggestions:?}");
+        state
+            .sessions
+            .push_log(
+                &profile.id,
+                &profile.name,
+                &state.launcher_logs,
+                format!("[error] {msg}"),
+            )
+            .await;
         state.sessions.set_failure(&profile.id, msg.clone()).await;
         return Err(msg);
     }
@@ -1025,7 +1181,21 @@ async fn start_remote_session(
         warnings.push(pw);
     }
 
-    let creds = load_ssh_credentials(state, &profile)?;
+    let creds = match load_ssh_credentials(state, &profile) {
+        Ok(creds) => creds,
+        Err(err) => {
+            state
+                .sessions
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &state.launcher_logs,
+                    format!("[error] {err}"),
+                )
+                .await;
+            return Err(err);
+        }
+    };
     let verifier = KnownHostsVerifier::new(
         &state.known_hosts_path,
         &profile.ssh_host,
@@ -1033,11 +1203,30 @@ async fn start_remote_session(
         host_key_policy.unwrap_or(HostKeyPolicy::Strict),
     );
 
-    let connection = Arc::new(
-        SshConnection::connect(&profile, &creds, verifier)
-            .await
-            .map_err(format_ssh_error)?,
-    );
+    let connection = match SshConnection::connect(&profile, &creds, verifier).await {
+        Ok(conn) => Arc::new(conn),
+        Err(err) => {
+            state
+                .sessions
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &state.launcher_logs,
+                    format!("SSH connection failed for {}: {err}", profile.name),
+                )
+                .await;
+            return Err(format_ssh_error(err));
+        }
+    };
+    state
+        .sessions
+        .push_log(
+            &profile.id,
+            &profile.name,
+            &state.launcher_logs,
+            format!("SSH connection OK for {}", profile.name),
+        )
+        .await;
 
     // Everything past the SSH handshake runs in the background so the UI gets an
     // immediate "starting" status; the host-key prompt above stays synchronous.
@@ -1173,6 +1362,14 @@ async fn finish_remote_startup(
                 proxy_env = proxy_env_pairs(&proxy_url, &lp.no_proxy);
                 local_proxy_status.active = true;
                 local_proxy_status.proxy_url = Some(proxy_url.clone());
+                sessions
+                    .push_log(
+                        &profile.id,
+                        &profile.name,
+                        &logs,
+                        format!("local proxy active at {proxy_url}"),
+                    )
+                    .await;
                 match connection.open_sftp().await {
                     Ok(sftp) => {
                         match write_proxy_bridge(&sftp, profile.remote_port, &proxy_url, &lp.no_proxy)
@@ -1236,12 +1433,21 @@ async fn finish_remote_startup(
                 .push_log(&profile.id, &profile.name, &logs, format!("[check-port] {}", check.output))
                 .await;
         }
+        Ok(_) => {
+            sessions
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &logs,
+                    "remote ChemSSH port is available; starting configured command",
+                )
+                .await;
+        }
         Err(err) => {
             sessions
                 .push_log(&profile.id, &profile.name, &logs, format!("[check-port] skipped: {err}"))
                 .await;
         }
-        _ => {}
     }
     if active.stop_requested.load(Ordering::SeqCst) {
         return;
@@ -1261,6 +1467,15 @@ async fn finish_remote_startup(
             let mut st = active.status.lock().await;
             st.forwarding = true;
             st.forwarding_active = true;
+            drop(st);
+            sessions
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &logs,
+                    format!("starting {} at {}", profile.name, profile.browser_url()),
+                )
+                .await;
         }
         Err(err) => {
             fail_remote_startup(&active, &state, err.to_string()).await;
@@ -1745,36 +1960,64 @@ pub async fn get_session_logs(
 }
 
 #[tauri::command]
+pub async fn poll_session_logs(
+    state: State<'_, AppState>,
+    profile_id: String,
+    after_seq: Option<u64>,
+) -> Result<LogPollResponse, String> {
+    Ok(state
+        .sessions
+        .logs_since(&profile_id, after_seq.unwrap_or(0))
+        .await)
+}
+
+#[tauri::command]
 pub async fn stream_session_logs(
     state: State<'_, AppState>,
     profile_id: String,
     on_event: Channel<LogBatchEvent>,
 ) -> Result<(), String> {
-    let snapshot = state.sessions.logs(&profile_id).await;
+    let (gen_counter, my_gen) = state.sessions.next_log_stream_gen(&profile_id).await;
+    let (snapshot, mut last_sent_seq, mut rx) = state
+        .sessions
+        .logs_snapshot_and_subscribe(&profile_id)
+        .await;
     let _ = on_event.send(LogBatchEvent {
         profile_id: profile_id.clone(),
         lines: snapshot,
         is_replay: true,
+        last_seq: last_sent_seq,
     });
-    let mut rx = state.sessions.subscribe_logs(&profile_id).await;
     tokio::spawn(async move {
         let mut batch = Vec::new();
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         loop {
+            if gen_counter.load(Ordering::SeqCst) != my_gen {
+                break;
+            }
             tokio::select! {
                 res = rx.recv() => {
                     match res {
-                        Ok(line) => batch.push(line),
+                        Ok((seq, line)) => {
+                            if seq > last_sent_seq {
+                                last_sent_seq = seq;
+                                batch.push(line);
+                            }
+                        }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
                 _ = tick.tick(), if !batch.is_empty() => {
+                    if gen_counter.load(Ordering::SeqCst) != my_gen {
+                        break;
+                    }
                     let lines = std::mem::take(&mut batch);
                     if on_event.send(LogBatchEvent {
                         profile_id: profile_id.clone(),
                         lines,
                         is_replay: false,
+                        last_seq: last_sent_seq,
                     }).is_err() {
                         break;
                     }
@@ -1783,4 +2026,81 @@ pub async fn stream_session_logs(
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_logs_poll_initial_incremental_and_caught_up() {
+        let mgr = SessionManager::default();
+        let launcher_logs = LauncherLogStore::default();
+
+        let empty = mgr.logs_since("p1", 0).await;
+        assert!(empty.lines.is_empty());
+        assert_eq!(empty.last_seq, 0);
+        assert!(empty.reset);
+
+        mgr.push_log("p1", "example-server", &launcher_logs, "line-1")
+            .await;
+        mgr.push_log("p1", "example-server", &launcher_logs, "line-2")
+            .await;
+
+        let initial = mgr.logs_since("p1", 0).await;
+        assert_eq!(initial.lines, vec!["line-1", "line-2"]);
+        assert_eq!(initial.last_seq, 2);
+        assert!(initial.reset);
+
+        let caught_up = mgr.logs_since("p1", 2).await;
+        assert!(caught_up.lines.is_empty());
+        assert_eq!(caught_up.last_seq, 2);
+        assert!(!caught_up.reset);
+
+        mgr.push_log("p1", "example-server", &launcher_logs, "line-3")
+            .await;
+        let delta = mgr.logs_since("p1", 2).await;
+        assert_eq!(delta.lines, vec!["line-3"]);
+        assert_eq!(delta.last_seq, 3);
+        assert!(!delta.reset);
+    }
+
+    #[tokio::test]
+    async fn session_logs_snapshot_and_subscribe_has_no_gap() {
+        let mgr = SessionManager::default();
+        let launcher_logs = LauncherLogStore::default();
+
+        mgr.push_log("p2", "example-server", &launcher_logs, "before")
+            .await;
+        let (snapshot, last_seq, mut rx) = mgr.logs_snapshot_and_subscribe("p2").await;
+        assert_eq!(snapshot, vec!["before"]);
+        assert_eq!(last_seq, 1);
+
+        mgr.push_log("p2", "example-server", &launcher_logs, "after")
+            .await;
+        let (seq, line) = rx.recv().await.expect("live line received");
+        assert_eq!(seq, 2);
+        assert_eq!(line, "after");
+    }
+
+    #[test]
+    fn profile_log_buffer_resets_cursor_after_ring_eviction() {
+        let mut buf = ProfileLogBuffer::default();
+        for i in 1..=(MAX_LOG_LINES + 5) {
+            buf.push(format!("line-{i}"));
+        }
+        assert_eq!(buf.base_seq, 5);
+        assert_eq!(buf.last_seq(), (MAX_LOG_LINES + 5) as u64);
+
+        let (lines, last_seq, reset) = buf.slice_since(2);
+        assert!(reset);
+        assert_eq!(lines.len(), MAX_LOG_LINES);
+        assert_eq!(lines.first().map(String::as_str), Some("line-6"));
+        assert_eq!(last_seq, (MAX_LOG_LINES + 5) as u64);
+
+        let (delta, delta_seq, delta_reset) = buf.slice_since((MAX_LOG_LINES + 3) as u64);
+        assert!(!delta_reset);
+        assert_eq!(delta, vec![format!("line-{}", MAX_LOG_LINES + 4), format!("line-{}", MAX_LOG_LINES + 5)]);
+        assert_eq!(delta_seq, (MAX_LOG_LINES + 5) as u64);
+    }
 }

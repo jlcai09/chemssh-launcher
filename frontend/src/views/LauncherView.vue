@@ -1182,8 +1182,9 @@ watch(passwordInput, value => syncActionFromInput(value, passwordAction))
 watch(passphraseInput, value => syncActionFromInput(value, passphraseAction))
 watch(securityTokenInput, value => syncActionFromInput(value, securityTokenAction))
 
-// SSE / Tauri Channel for real-time log streaming
+// SSE / Tauri Channel + poll fallback for real-time log streaming
 let logEventSource: EventSource | null = null
+let unsubscribeTauriLogs: (() => void) | null = null
 let logStreamGen = 0
 let replayLines: string[] | null = null
 
@@ -1202,6 +1203,10 @@ function connectLogStream() {
     logEventSource.close()
     logEventSource = null
   }
+  if (unsubscribeTauriLogs) {
+    unsubscribeTauriLogs()
+    unsubscribeTauriLogs = null
+  }
 
   if (!current.id) {
     replayLines = null
@@ -1211,7 +1216,7 @@ function connectLogStream() {
 
   if (isTauriRuntime()) {
     const profileId = current.id
-    void subscribeTauriSessionLogs(profileId, (batch, isInitialReplay) => {
+    unsubscribeTauriLogs = subscribeTauriSessionLogs(profileId, (batch, isInitialReplay) => {
       if (logStreamGen !== currentGen || current.id !== profileId) return
       if (isInitialReplay) {
         logs.value = batch.slice(-500)
@@ -1221,7 +1226,7 @@ function connectLogStream() {
       nextTick(() => {
         logScroller.scrollToBottom(false)
       })
-    }).catch(() => undefined)
+    })
     return
   }
 
@@ -1273,6 +1278,10 @@ function disconnectLogStream() {
   if (logEventSource) {
     logEventSource.close()
     logEventSource = null
+  }
+  if (unsubscribeTauriLogs) {
+    unsubscribeTauriLogs()
+    unsubscribeTauriLogs = null
   }
 }
 
@@ -1331,7 +1340,7 @@ onMounted(async () => {
 
   // 启动状态轮询和日志流
   pollStatus()
-  if (current.id) connectLogStream()
+  if (current.id && !unsubscribeTauriLogs && !logEventSource) connectLogStream()
 
   // 监听页面可见性变化
   document.addEventListener('visibilitychange', handleVisibilityChange)
