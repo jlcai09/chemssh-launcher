@@ -420,6 +420,7 @@ import {
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { api, APIError, formatBytes, joinPath, parentPath, postJSON, withLauncherToken, type FileEntry, type Profile, type ShellOpenResponse } from '../api'
 import { appEvents } from '../appEvents'
@@ -505,6 +506,8 @@ interface TerminalRuntime {
   term: Terminal
   fitAddon: FitAddon
   searchAddon: SearchAddon
+  webglAddon: WebglAddon | null
+  webglUnavailable: boolean
   sessionID: string
   outputStop: (() => void) | null
   pendingInput: string
@@ -1268,6 +1271,17 @@ function handleOsc(tab: TerminalTab, body: string) {
 function filterZmodem(tab: TerminalTab, text: string) {
   const runtime = runtimeFor(tab)
   if (!runtime || runtime.zmodemIntercepted) return text
+  if (
+    text.length > 256 &&
+    !text.includes('**') &&
+    !text.includes('rz') &&
+    !text.includes('RZ') &&
+    !runtime.zmodemProbe.includes('**') &&
+    !runtime.zmodemProbe.includes('rz')
+  ) {
+    runtime.zmodemProbe = text.slice(-96).toLowerCase()
+    return text
+  }
   const probe = (runtime.zmodemProbe + text).toLowerCase()
   runtime.zmodemProbe = probe.slice(-96)
   const signature = ZMODEM_SIGNATURES.find(item => probe.includes(item))
@@ -1286,7 +1300,16 @@ function filterZmodem(tab: TerminalTab, text: string) {
 const ERASE_DISPLAY = /\x1b\[(?:2J|3J)|\x1b\[\?(?:1049|1047|47)[hl]/g
 
 function preserveHistory(tab: TerminalTab, text: string) {
-  if (!text.includes('\x1b[')) return text
+  if (
+    !text.includes('\x1b[') ||
+    (!text.includes('2J') &&
+      !text.includes('3J') &&
+      !text.includes('1049') &&
+      !text.includes('1047') &&
+      !text.includes('47'))
+  ) {
+    return text
+  }
   const runtime = runtimeFor(tab)
   if (!runtime) return text
   let out = ''
@@ -1613,6 +1636,25 @@ function handleTerminalClipboardKey(term: Terminal, event: KeyboardEvent) {
   return true
 }
 
+function attachWebglRenderer(runtime: TerminalRuntime) {
+  if (runtime.webglAddon || runtime.webglUnavailable || runtime.disposed) return
+  try {
+    const addon = new WebglAddon()
+    addon.onContextLoss(() => {
+      try {
+        addon.dispose()
+      } catch {
+        // ignore context-loss disposal errors
+      }
+      if (runtime.webglAddon === addon) runtime.webglAddon = null
+    })
+    runtime.term.loadAddon(addon)
+    runtime.webglAddon = addon
+  } catch {
+    runtime.webglUnavailable = true
+  }
+}
+
 async function ensureRuntime(tab: TerminalTab) {
   const existing = runtimeFor(tab)
   if (existing) return existing
@@ -1645,6 +1687,8 @@ async function ensureRuntime(tab: TerminalTab) {
     term,
     fitAddon,
     searchAddon,
+    webglAddon: null,
+    webglUnavailable: false,
     sessionID: '',
     outputStop: null,
     pendingInput: '',
@@ -1689,6 +1733,7 @@ async function ensureRuntime(tab: TerminalTab) {
     searchResultCount.value = result.resultCount
     searchResultIndex.value = result.resultIndex
   })
+  attachWebglRenderer(runtime)
   writeNotice(tab, t('terminal.welcome'))
   fitTerminal(tab)
   return runtime
@@ -1734,11 +1779,13 @@ async function activateTab(id: string) {
   tabMenu.visible = false
   dropActive.value = false
   await nextTick()
+  const activeRuntime = runtimeFor(activeTab.value)
+  if (activeRuntime) attachWebglRenderer(activeRuntime)
   fitTerminal(activeTab.value)
   if (tab?.sftp.open && !tab.sftp.entries.length && tab.status === 'connected' && !tab.sftp.loading) {
     void loadSftpPanel(tab, tab.sftp.path || tab.cwd || '.')
   }
-  runtimeFor(activeTab.value)?.term.focus()
+  activeRuntime?.term.focus()
 }
 
 async function shutdownTab(tab: TerminalTab) {
@@ -1751,6 +1798,12 @@ async function shutdownTab(tab: TerminalTab) {
   if (sftpID) await postJSON('/api/sftp/disconnect', { session: sftpID }).catch(() => undefined)
   runtime.disposed = true
   if (runtime.resizeTimer !== null) window.clearTimeout(runtime.resizeTimer)
+  try {
+    runtime.webglAddon?.dispose()
+  } catch {
+    // ignore WebGL disposal errors on torn-down view
+  }
+  runtime.webglAddon = null
   runtime.term.dispose()
   runtimes.delete(tab.id)
   hosts.delete(tab.id)
@@ -2638,6 +2691,8 @@ watch(() => props.active, async active => {
   if (!active) return
   await loadProfiles()
   await nextTick()
+  const activeRuntime = runtimeFor(activeTab.value)
+  if (activeRuntime) attachWebglRenderer(activeRuntime)
   fitTerminal(activeTab.value)
   activateCurrentTerminal()
 })

@@ -850,6 +850,20 @@ impl SshConnection {
         }
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
+    /// Probes the underlying SSH transport using a keepalive ping.
+    /// Re-checks `is_closed()` because `russh::client::Handle::send_ping` ignores channel closure errors.
+    pub async fn probe_alive(&self, timeout_dur: Duration) -> bool {
+        if self.handle.is_closed() {
+            return false;
+        }
+        let res = tokio::time::timeout(timeout_dur, self.handle.send_ping()).await;
+        matches!(res, Ok(Ok(())) if !self.handle.is_closed())
+    }
+
     pub async fn disconnect(&self) {
         let _ = self
             .handle
@@ -1653,5 +1667,59 @@ mod tests {
             .await
             .unwrap();
         conn.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn connection_liveness_and_probe_reflect_disconnect() {
+        let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let cfg = Arc::new(server::Config {
+            keys: vec![host_key],
+            auth_rejection_time: Duration::from_millis(10),
+            auth_rejection_time_initial: Some(Duration::from_millis(10)),
+            ..Default::default()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut srv = AuthFallbackServer {
+            expected_password: Some("dummy-pw".into()),
+            expected_rsa_pub: None,
+            reject_legacy_sha1: false,
+        };
+        tokio::spawn(async move {
+            let _ = russh::server::Server::run_on_socket(&mut srv, cfg, &listener).await;
+        });
+
+        let kh_dir = tempfile::tempdir().unwrap();
+        let verifier = KnownHostsVerifier::new(
+            kh_dir.path().join("kh"),
+            "127.0.0.1",
+            addr.port(),
+            crate::HostKeyPolicy::AcceptNew,
+        );
+        let mut profile = Profile::remote_defaults();
+        profile.ssh_host = "127.0.0.1".into();
+        profile.ssh_port = addr.port();
+        profile.ssh_user = "user".into();
+        profile.auth_method = AUTH_PASSWORD.into();
+        let creds = SshCredentials {
+            password: Some("dummy-pw".into()),
+            private_key_passphrase: None,
+        };
+        let conn = SshConnection::connect(&profile, &creds, verifier)
+            .await
+            .unwrap();
+
+        assert!(!conn.is_closed());
+        assert!(conn.probe_alive(Duration::from_secs(2)).await);
+
+        conn.disconnect().await;
+        for _ in 0..25 {
+            if conn.is_closed() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(conn.is_closed());
+        assert!(!conn.probe_alive(Duration::from_millis(500)).await);
     }
 }

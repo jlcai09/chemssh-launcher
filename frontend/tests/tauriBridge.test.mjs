@@ -1,7 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveTauriCommand, tauriFileIconURL } from '../src/tauriBridge.ts'
+import {
+  createTerminalInputQueue,
+  parseTauriInvokeError,
+  resolveTauriCommand,
+  tauriFileIconURL,
+} from '../src/tauriBridge.ts'
 
 test('maps profile CRUD and secret-safe routes to Tauri commands', () => {
   assert.deepEqual(resolveTauriCommand('/api/profiles', 'GET'), {
@@ -164,4 +169,53 @@ test('tauriFileIconURL encodes name, is_dir, and size parameters', () => {
   assert.match(url, /\/icon\?name=script\.py&is_dir=0&size=16$/)
   const dirUrl = tauriFileIconURL('folder', true, 32)
   assert.match(dirUrl, /\/icon\?name=folder&is_dir=1&size=32$/)
+})
+
+test('parseTauriInvokeError extracts transport_lost flag cleanly without breaking non-transport errors', () => {
+  const lost = parseTauriInvokeError(
+    JSON.stringify({ error: 'sftp error: list /home/user: session closed', transport_lost: true }),
+  )
+  assert.equal(lost.message, 'sftp error: list /home/user: session closed')
+  assert.equal(lost.transportLost, true)
+  assert.equal(lost.status, 500)
+
+  const status = parseTauriInvokeError(JSON.stringify({ error: 'permission denied' }))
+  assert.equal(status.message, 'permission denied')
+  assert.equal(status.transportLost, false)
+
+  const plain = parseTauriInvokeError('sftp error: no such file')
+  assert.equal(plain.message, 'sftp error: no such file')
+  assert.equal(plain.transportLost, false)
+})
+
+test('createTerminalInputQueue dispatches first key immediately and coalesces while in flight in FIFO order', async () => {
+  const sent = []
+  const resolvers = []
+  const queue = createTerminalInputQueue((sessionId, data) => {
+    sent.push({ sessionId, data })
+    return new Promise(resolve => {
+      resolvers.push(resolve)
+    })
+  })
+
+  // First key dispatches synchronously with zero timer delay.
+  queue.enqueue('s1', 'a')
+  assert.deepEqual(sent, [{ sessionId: 's1', data: 'a' }])
+
+  // Keys typed while first IPC is in flight coalesce into a single ordered follow-up call.
+  queue.enqueue('s1', 'b')
+  queue.enqueue('s1', 'c')
+  queue.enqueue('s1', '\r')
+  assert.equal(sent.length, 1)
+
+  resolvers.shift()()
+  await Promise.resolve()
+  await Promise.resolve()
+
+  assert.deepEqual(sent, [
+    { sessionId: 's1', data: 'a' },
+    { sessionId: 's1', data: 'bc\r' },
+  ])
+
+  resolvers.shift()()
 })

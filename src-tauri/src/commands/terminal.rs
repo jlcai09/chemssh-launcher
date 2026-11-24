@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -21,6 +21,7 @@ use crate::state::AppState;
 const MAX_TERMINAL_EVENTS: usize = 4096;
 const MAX_TERMINAL_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 const EXITED_SESSION_GRACE: Duration = Duration::from_secs(15);
+const OUTPUT_COALESCE_CAP: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WireTerminalEvent {
@@ -148,14 +149,41 @@ impl ActiveTerminal {
 
 #[derive(Default)]
 pub struct TerminalManager {
-    terminals: Mutex<HashMap<String, Arc<ActiveTerminal>>>,
+    terminals: RwLock<HashMap<String, Arc<ActiveTerminal>>>,
 }
 
 impl TerminalManager {
+    fn get(&self, id: &str) -> Option<Arc<ActiveTerminal>> {
+        self.terminals
+            .read()
+            .ok()
+            .and_then(|g| g.get(id).cloned())
+    }
+
+    fn insert(&self, id: String, active: Arc<ActiveTerminal>) {
+        if let Ok(mut g) = self.terminals.write() {
+            g.insert(id, active);
+        }
+    }
+
+    fn remove(&self, id: &str) -> Option<Arc<ActiveTerminal>> {
+        self.terminals.write().ok().and_then(|mut g| g.remove(id))
+    }
+
+    fn collect_cursors(&self, cursors: HashMap<String, u64>) -> Vec<(String, u64, Arc<ActiveTerminal>)> {
+        let Ok(guard) = self.terminals.read() else {
+            return Vec::new();
+        };
+        cursors
+            .into_iter()
+            .filter_map(|(sid, cursor)| guard.get(&sid).cloned().map(|t| (sid, cursor, t)))
+            .collect()
+    }
+
     pub async fn close_all(&self) {
-        let active_list: Vec<Arc<ActiveTerminal>> = {
-            let mut guard = self.terminals.lock().await;
-            guard.drain().map(|(_, v)| v).collect()
+        let active_list: Vec<Arc<ActiveTerminal>> = match self.terminals.write() {
+            Ok(mut guard) => guard.drain().map(|(_, v)| v).collect(),
+            Err(_) => Vec::new(),
         };
         for active in active_list {
             active.cleanup_resources().await;
@@ -321,9 +349,6 @@ pub async fn open_terminal(
     });
     state
         .terminals
-        .terminals
-        .lock()
-        .await
         .insert(session_id.clone(), Arc::clone(&active));
 
     state.launcher_logs.push(format!(
@@ -336,23 +361,41 @@ pub async fn open_terminal(
 
     tokio::spawn(async move {
         while let Some(ev) = event_rx.recv().await {
-            let (is_exit, wire) = match ev {
-                TerminalEvent::Output(bytes) => {
+            let (is_exit, wire, pending_exit) = match ev {
+                TerminalEvent::Output(mut bytes) => {
+                    let mut deferred_exit = None;
+                    while bytes.len() < OUTPUT_COALESCE_CAP {
+                        match event_rx.try_recv() {
+                            Ok(TerminalEvent::Output(more)) => bytes.extend_from_slice(&more),
+                            Ok(exit @ TerminalEvent::Exit { .. }) => {
+                                deferred_exit = Some(exit);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     let wire = active_for_task
                         .push_wire_event("output", Some(BASE64.encode(&bytes)), None, None)
                         .await;
-                    (false, wire)
+                    (false, wire, deferred_exit)
                 }
                 TerminalEvent::Exit { status, reason } => {
                     let wire = active_for_task
                         .push_wire_event("exit", None, status, Some(reason))
                         .await;
-                    (true, wire)
+                    (true, wire, None)
                 }
             };
             // Never kill the SSH shell if Tauri Channel delivery transiently fails;
             // the event stays in `events` so `poll_terminal_events` can drain it.
             let _ = on_event.send(wire);
+            if let Some(TerminalEvent::Exit { status, reason }) = pending_exit {
+                let wire = active_for_task
+                    .push_wire_event("exit", None, status, Some(reason))
+                    .await;
+                let _ = on_event.send(wire);
+                break;
+            }
             if is_exit {
                 break;
             }
@@ -371,7 +414,7 @@ pub async fn open_terminal(
         }
 
         tokio::time::sleep(EXITED_SESSION_GRACE).await;
-        if let Some(removed) = terminals_ref.terminals.lock().await.remove(&sid_for_task) {
+        if let Some(removed) = terminals_ref.remove(&sid_for_task) {
             removed.connection.disconnect().await;
         }
     });
@@ -390,13 +433,7 @@ pub async fn poll_terminal_events(
     state: State<'_, AppState>,
     cursors: HashMap<String, u64>,
 ) -> Result<HashMap<String, Vec<WireTerminalEvent>>, String> {
-    let entries: Vec<(String, u64, Arc<ActiveTerminal>)> = {
-        let guard = state.terminals.terminals.lock().await;
-        cursors
-            .into_iter()
-            .filter_map(|(sid, cursor)| guard.get(&sid).cloned().map(|t| (sid, cursor, t)))
-            .collect()
-    };
+    let entries = state.terminals.collect_cursors(cursors);
 
     let mut out = HashMap::with_capacity(entries.len());
     for (sid, cursor, active) in entries {
@@ -415,11 +452,7 @@ pub async fn get_terminal_cwd(
 ) -> Result<TerminalCwdResponse, String> {
     let active = state
         .terminals
-        .terminals
-        .lock()
-        .await
         .get(&session_id)
-        .cloned()
         .ok_or_else(|| format!("terminal session not found: {session_id}"))?;
 
     if let Some(ref integ) = active.integration {
@@ -436,27 +469,30 @@ pub async fn get_terminal_cwd(
 }
 
 #[tauri::command]
-pub async fn send_terminal_input(
+pub fn send_terminal_input(
     state: State<'_, AppState>,
     session_id: String,
-    data_b64: String,
+    data: Option<String>,
+    data_b64: Option<String>,
 ) -> Result<SendInputResult, String> {
-    let data = BASE64
-        .decode(data_b64.as_bytes())
-        .map_err(|e| format!("invalid base64 terminal input: {e}"))?;
+    let bytes = if let Some(text) = data {
+        text.into_bytes()
+    } else if let Some(b64) = data_b64 {
+        BASE64
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("invalid base64 terminal input: {e}"))?
+    } else {
+        Vec::new()
+    };
     let active = state
         .terminals
-        .terminals
-        .lock()
-        .await
         .get(&session_id)
-        .cloned()
         .ok_or_else(|| format!("terminal session not found: {session_id}"))?;
-    Ok(active.shell.send_input(data))
+    Ok(active.shell.send_input(bytes))
 }
 
 #[tauri::command]
-pub async fn resize_terminal(
+pub fn resize_terminal(
     state: State<'_, AppState>,
     session_id: String,
     cols: u32,
@@ -464,19 +500,14 @@ pub async fn resize_terminal(
 ) -> Result<(), String> {
     let active = state
         .terminals
-        .terminals
-        .lock()
-        .await
         .get(&session_id)
-        .cloned()
         .ok_or_else(|| format!("terminal session not found: {session_id}"))?;
     active.shell.resize(cols, rows).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn close_terminal(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let active = state.terminals.terminals.lock().await.remove(&session_id);
-    if let Some(active) = active {
+    if let Some(active) = state.terminals.remove(&session_id) {
         active.cleanup_resources().await;
     }
     Ok(())

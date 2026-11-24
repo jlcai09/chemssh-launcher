@@ -11,6 +11,7 @@ use crate::x11::PreparedX11;
 
 const SHELL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const X11_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const INPUT_COALESCE_CAP: usize = 16 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
@@ -158,9 +159,27 @@ impl PreparedPtyChannel {
         let mut read_half = self.read_half;
 
         tokio::spawn(async move {
-            while let Some(ctrl) = control_rx.recv().await {
+            let mut next_ctrl: Option<ShellControl> = None;
+            loop {
+                let ctrl = match next_ctrl.take() {
+                    Some(c) => c,
+                    None => match control_rx.recv().await {
+                        Some(c) => c,
+                        None => break,
+                    },
+                };
                 match ctrl {
-                    ShellControl::Input(bytes) => {
+                    ShellControl::Input(mut bytes) => {
+                        while bytes.len() < INPUT_COALESCE_CAP {
+                            match control_rx.try_recv() {
+                                Ok(ShellControl::Input(more)) => bytes.extend_from_slice(&more),
+                                Ok(other) => {
+                                    next_ctrl = Some(other);
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
                         if !bytes.is_empty() && write_half.data_bytes(bytes).await.is_err() {
                             break;
                         }

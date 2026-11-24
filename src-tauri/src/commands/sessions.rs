@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use core_config::{proxy_env_pairs, Profile, ProfileStore};
-use core_secret::{KEY_PASSWORD, KEY_PRIVATE_PASSPHRASE, KEY_SECURITY_TOKEN};
+use core_secret::{SecretStore, KEY_PASSWORD, KEY_PRIVATE_PASSPHRASE, KEY_SECURITY_TOKEN};
 use core_session::{
     check_port_available, probe_once, suggest_free_ports, wait_for_url_with_options, HealthOptions,
 };
@@ -483,22 +483,27 @@ fn match_session_by_slug(
         .cloned()
 }
 
-pub(crate) fn load_ssh_credentials(
-    state: &AppState,
+pub(crate) fn load_ssh_credentials_from(
+    secrets: &dyn SecretStore,
     profile: &Profile,
 ) -> Result<SshCredentials, String> {
-    let password = state
-        .secrets
+    let password = secrets
         .get(&profile.id, KEY_PASSWORD)
         .map_err(|e| e.to_string())?;
-    let private_key_passphrase = state
-        .secrets
+    let private_key_passphrase = secrets
         .get(&profile.id, KEY_PRIVATE_PASSPHRASE)
         .map_err(|e| e.to_string())?;
     Ok(SshCredentials {
         password,
         private_key_passphrase,
     })
+}
+
+pub(crate) fn load_ssh_credentials(
+    state: &AppState,
+    profile: &Profile,
+) -> Result<SshCredentials, String> {
+    load_ssh_credentials_from(state.secrets.as_ref(), profile)
 }
 
 fn load_security_token(state: &AppState, profile: &Profile) -> Result<Option<String>, String> {

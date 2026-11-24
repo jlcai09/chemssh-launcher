@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{SecondsFormat, Utc};
+use core_transfer::{remote_io_err, sftp_err, TransferError};
 use russh_sftp::protocol::OpenFlags;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -276,7 +277,8 @@ impl SftpOpenSyncManager {
                         .await;
                 }
                 Err(err) => {
-                    let is_disconnected = err.contains("not connected");
+                    let is_disconnected = err.contains("sftp session not connected")
+                        || err.contains("sftp session disconnected");
                     {
                         let mut guard = self.watches.lock().await;
                         if is_disconnected {
@@ -300,35 +302,45 @@ async fn upload_cached_file(
     remote_path: &str,
     local_path: &PathBuf,
 ) -> Result<(), String> {
-    let (_, sftp) = sftp_manager.get_entry(session_id).await?;
-    let mut local_file = tokio::fs::File::open(local_path)
-        .await
-        .map_err(|e| format!("open cache file: {e}"))?;
-    let mut remote_file = sftp
-        .open_with_flags(
-            remote_path,
-            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-        )
-        .await
-        .map_err(|e| format!("open remote file {remote_path}: {e}"))?;
+    let remote_path_owned = remote_path.to_string();
+    let local_path_owned = local_path.clone();
 
-    let mut buf = vec![0u8; CHUNK_SIZE];
-    loop {
-        let n = local_file
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("read cache file: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        remote_file
-            .write_all(&buf[..n])
-            .await
-            .map_err(|e| format!("write remote file: {e}"))?;
-    }
-    remote_file
-        .shutdown()
+    sftp_manager
+        .run_sftp_op(session_id, move |sftp| {
+            let rpath = remote_path_owned.clone();
+            let lpath = local_path_owned.clone();
+            async move {
+                let mut local_file = tokio::fs::File::open(&lpath)
+                    .await
+                    .map_err(TransferError::Io)?;
+                let mut remote_file = sftp
+                    .open_with_flags(
+                        &rpath,
+                        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+                    )
+                    .await
+                    .map_err(|e| sftp_err(format!("open remote file {rpath}"), e))?;
+
+                let mut buf = vec![0u8; CHUNK_SIZE];
+                loop {
+                    let n = local_file
+                        .read(&mut buf)
+                        .await
+                        .map_err(TransferError::Io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    remote_file
+                        .write_all(&buf[..n])
+                        .await
+                        .map_err(|e| remote_io_err(format!("write remote file {rpath}"), e))?;
+                }
+                remote_file
+                    .shutdown()
+                    .await
+                    .map_err(|e| remote_io_err(format!("flush remote file {rpath}"), e))?;
+                Ok(())
+            }
+        })
         .await
-        .map_err(|e| format!("flush remote file: {e}"))?;
-    Ok(())
 }

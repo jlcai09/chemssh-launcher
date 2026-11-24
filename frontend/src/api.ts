@@ -1,4 +1,4 @@
-import { invokeApi, isTauriRuntime } from './tauriBridge'
+import { invokeApi, isTauriRuntime, parseTauriInvokeError } from './tauriBridge'
 
 export interface Profile {
   id: string
@@ -115,25 +115,11 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     try {
       return await invokeApi<T>(path, options)
     } catch (raw) {
-      const rawMsg = raw instanceof Error ? raw.message : String(raw)
-      let parsedData: Record<string, any> = { error: rawMsg }
-      let displayMsg = rawMsg || 'Request failed'
-      if (rawMsg.startsWith('{') && rawMsg.endsWith('}')) {
-        try {
-          const obj = JSON.parse(rawMsg)
-          if (obj && typeof obj === 'object') {
-            parsedData = obj
-            if (typeof obj.error === 'string' && obj.error) {
-              displayMsg = obj.error
-            }
-          }
-        } catch {
-          // keep plain text error
-        }
-      }
-      const err = new APIError(displayMsg)
-      err.status = 500
-      err.data = parsedData
+      const parsed = parseTauriInvokeError(raw)
+      const err = new APIError(parsed.message)
+      err.status = parsed.status
+      err.data = parsed.data
+      err.transportLost = parsed.transportLost
       throw err
     }
   }

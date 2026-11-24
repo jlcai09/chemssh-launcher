@@ -72,10 +72,14 @@ export class AppEvents {
   private transfers = new Map<string, Set<(progress: TransferProgressSnapshot) => void>>()
   private tauriTransferSubscribed = false
   private tauriBridgePromise: Promise<typeof import('./tauriBridge')> | null = null
+  private tauriBridgeModule: typeof import('./tauriBridge') | null = null
 
   private getTauriBridge(): Promise<typeof import('./tauriBridge')> {
     if (!this.tauriBridgePromise) {
-      this.tauriBridgePromise = import('./tauriBridge')
+      this.tauriBridgePromise = import('./tauriBridge').then(mod => {
+        this.tauriBridgeModule = mod
+        return mod
+      })
     }
     return this.tauriBridgePromise
   }
@@ -111,6 +115,18 @@ export class AppEvents {
   /** True only when handed to an open socket; this is not a remote ACK. */
   sendTerminalInput(session: string, text: string): boolean {
     if (!session || !text) return false
+    if (hasTauriInternals()) {
+      if (this.tauriBridgeModule) {
+        this.tauriBridgeModule.sendTauriTerminalText(session, text)
+      } else {
+        void this.getTauriBridge()
+          .then(bridge => bridge.sendTauriTerminalText(session, text))
+          .catch(err => {
+            console.error('[appEvents] sendTauriTerminalText failed:', err)
+          })
+      }
+      return true
+    }
     return this.sendTerminalBytes(session, base64FromText(text))
   }
 

@@ -192,6 +192,35 @@ impl TransferProgressStore {
         }
     }
 
+    /// Releases an in-flight transfer for an automatic reconnect + resume retry without
+    /// marking `done = true` or emitting a terminal error snapshot.
+    pub fn release_for_retry(&self, id: &str) {
+        if id.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.items.lock() {
+            if let Some(entry) = guard.get_mut(id) {
+                entry.active = false;
+                if !entry.progress.cancelled {
+                    entry.progress.done = false;
+                    entry.progress.error.clear();
+                }
+                entry.notify.notify_waiters();
+            }
+        }
+    }
+
+    pub fn is_cancelled(&self, id: &str) -> bool {
+        if id.is_empty() {
+            return false;
+        }
+        self.items
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).map(|e| e.progress.cancelled))
+            .unwrap_or(false)
+    }
+
     /// Awaits while the transfer is paused; immediately errors if cancelled.
     pub async fn wait_if_paused(&self, id: &str) -> Result<(), TransferError> {
         if id.is_empty() {

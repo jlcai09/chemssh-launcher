@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use crate::local_fs::{format_iso_utc, format_unix_mode, FsEntry};
 use crate::progress::TransferProgressStore;
-use crate::TransferError;
+use crate::{remote_io_err, sftp_err, TransferError};
 
 const CHUNK_SIZE: usize = 256 * 1024;
 
@@ -15,7 +15,7 @@ pub async fn list_remote_dir(sftp: &SftpSession, path: &str) -> Result<Vec<FsEnt
     let dir = sftp
         .read_dir(path)
         .await
-        .map_err(|e| TransferError::Sftp(format!("list {path}: {e}")))?;
+        .map_err(|e| sftp_err(format!("list {path}"), e))?;
     let base = path.trim_end_matches('/');
     let mut entries = Vec::new();
     let mut symlink_indices = Vec::new();
@@ -118,19 +118,19 @@ pub async fn delete_remote_path(sftp: &SftpSession, path: &str) -> Result<(), Tr
     let lmeta = sftp
         .symlink_metadata(path)
         .await
-        .map_err(|e| TransferError::Sftp(format!("lstat {path}: {e}")))?;
+        .map_err(|e| sftp_err(format!("lstat {path}"), e))?;
 
     if lmeta.is_symlink() || !lmeta.is_dir() {
         sftp.remove_file(path)
             .await
-            .map_err(|e| TransferError::Sftp(format!("remove {path}: {e}")))?;
+            .map_err(|e| sftp_err(format!("remove {path}"), e))?;
         return Ok(());
     }
 
     let entries = sftp
         .read_dir(path)
         .await
-        .map_err(|e| TransferError::Sftp(format!("read dir {path}: {e}")))?;
+        .map_err(|e| sftp_err(format!("read dir {path}"), e))?;
     let base = path.trim_end_matches('/');
     for entry in entries {
         let name = entry.file_name();
@@ -145,7 +145,7 @@ pub async fn delete_remote_path(sftp: &SftpSession, path: &str) -> Result<(), Tr
         if entry.file_type().is_symlink() || !entry.metadata().is_dir() {
             sftp.remove_file(&child)
                 .await
-                .map_err(|e| TransferError::Sftp(format!("remove {child}: {e}")))?;
+                .map_err(|e| sftp_err(format!("remove {child}"), e))?;
         } else {
             Box::pin(delete_remote_path(sftp, &child)).await?;
         }
@@ -153,11 +153,39 @@ pub async fn delete_remote_path(sftp: &SftpSession, path: &str) -> Result<(), Tr
 
     sftp.remove_dir(path)
         .await
-        .map_err(|e| TransferError::Sftp(format!("rmdir {path}: {e}")))?;
+        .map_err(|e| sftp_err(format!("rmdir {path}"), e))?;
     Ok(())
 }
 
+fn finish_or_release(store: &TransferProgressStore, transfer_id: &str, err: &TransferError) {
+    if err.is_transport_error() {
+        store.release_for_retry(transfer_id);
+    } else {
+        store.finish(transfer_id, Some(err.to_string()));
+    }
+}
+
 pub async fn upload_file_resumable(
+    sftp: &SftpSession,
+    local_path: &Path,
+    remote_path: &str,
+    transfer_id: &str,
+    resume: bool,
+    store: &TransferProgressStore,
+) -> Result<(), TransferError> {
+    if let Err(err) =
+        upload_file_resumable_once(sftp, local_path, remote_path, transfer_id, resume, store).await
+    {
+        if err.is_transport_error() {
+            store.finish(transfer_id, Some(err.to_string()));
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Runs a single upload attempt; releases progress without marking done on recoverable transport errors.
+pub async fn upload_file_resumable_once(
     sftp: &SftpSession,
     local_path: &Path,
     remote_path: &str,
@@ -169,9 +197,20 @@ pub async fn upload_file_resumable(
     let total = meta.len();
     let offset = store.begin(transfer_id, total, resume)?;
 
-    let mut local_file = tokio::fs::File::open(local_path).await?;
+    let mut local_file = match tokio::fs::File::open(local_path).await {
+        Ok(f) => f,
+        Err(err) => {
+            let te: TransferError = err.into();
+            store.finish(transfer_id, Some(te.to_string()));
+            return Err(te);
+        }
+    };
     if offset > 0 {
-        local_file.seek(SeekFrom::Start(offset)).await?;
+        if let Err(err) = local_file.seek(SeekFrom::Start(offset)).await {
+            let te: TransferError = err.into();
+            store.finish(transfer_id, Some(te.to_string()));
+            return Err(te);
+        }
     }
 
     let flags = if resume && offset > 0 {
@@ -179,15 +218,20 @@ pub async fn upload_file_resumable(
     } else {
         OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE
     };
-    let mut remote_file = sftp
-        .open_with_flags(remote_path, flags)
-        .await
-        .map_err(|e| {
-            store.finish(transfer_id, Some(e.to_string()));
-            TransferError::Sftp(format!("open remote {remote_path}: {e}"))
-        })?;
+    let mut remote_file = match sftp.open_with_flags(remote_path, flags).await {
+        Ok(f) => f,
+        Err(err) => {
+            let te = sftp_err(format!("open remote {remote_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
+        }
+    };
     if offset > 0 {
-        remote_file.seek(SeekFrom::Start(offset)).await?;
+        if let Err(err) = remote_file.seek(SeekFrom::Start(offset)).await {
+            let te = remote_io_err(format!("seek remote {remote_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
+        }
     }
 
     let mut buf = vec![0u8; CHUNK_SIZE];
@@ -200,20 +244,23 @@ pub async fn upload_file_resumable(
             Ok(0) => break,
             Ok(n) => n,
             Err(err) => {
-                store.finish(transfer_id, Some(err.to_string()));
-                return Err(err.into());
+                let te: TransferError = err.into();
+                store.finish(transfer_id, Some(te.to_string()));
+                return Err(te);
             }
         };
         if let Err(err) = remote_file.write_all(&buf[..n]).await {
-            store.finish(transfer_id, Some(err.to_string()));
-            return Err(err.into());
+            let te = remote_io_err(format!("write remote {remote_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
         }
         store.add_loaded(transfer_id, n as u64);
     }
 
     if let Err(err) = remote_file.shutdown().await {
-        store.finish(transfer_id, Some(err.to_string()));
-        return Err(err.into());
+        let te = remote_io_err(format!("finalize remote {remote_path}"), err);
+        finish_or_release(store, transfer_id, &te);
+        return Err(te);
     }
     store.finish(transfer_id, None);
     Ok(())
@@ -227,44 +274,86 @@ pub async fn download_file_resumable(
     resume: bool,
     store: &TransferProgressStore,
 ) -> Result<(), TransferError> {
+    if let Err(err) =
+        download_file_resumable_once(sftp, remote_path, local_path, transfer_id, resume, store)
+            .await
+    {
+        if err.is_transport_error() {
+            store.finish(transfer_id, Some(err.to_string()));
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Runs a single download attempt; releases progress without marking done on recoverable transport errors.
+pub async fn download_file_resumable_once(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &Path,
+    transfer_id: &str,
+    resume: bool,
+    store: &TransferProgressStore,
+) -> Result<(), TransferError> {
     let meta = sftp
         .metadata(remote_path)
         .await
-        .map_err(|e| TransferError::Sftp(format!("stat {remote_path}: {e}")))?;
+        .map_err(|e| sftp_err(format!("stat {remote_path}"), e))?;
     let total = meta.size.unwrap_or(0);
     let offset = store.begin(transfer_id, total, resume)?;
 
     if let Some(parent) = local_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            let te: TransferError = err.into();
+            store.finish(transfer_id, Some(te.to_string()));
+            return Err(te);
+        }
     }
 
-    let mut remote_file = sftp
-        .open(remote_path)
-        .await
-        .map_err(|e| {
-            store.finish(transfer_id, Some(e.to_string()));
-            TransferError::Sftp(format!("open remote {remote_path}: {e}"))
-        })?;
+    let mut remote_file = match sftp.open(remote_path).await {
+        Ok(f) => f,
+        Err(err) => {
+            let te = sftp_err(format!("open remote {remote_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
+        }
+    };
     if offset > 0 {
-        remote_file.seek(SeekFrom::Start(offset)).await?;
+        if let Err(err) = remote_file.seek(SeekFrom::Start(offset)).await {
+            let te = remote_io_err(format!("seek remote {remote_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
+        }
     }
 
-    let mut local_file = if resume && offset > 0 {
+    let open_res = if resume && offset > 0 {
         OpenOptions::new()
             .create(true)
             .write(true)
             .open(local_path)
-            .await?
+            .await
     } else {
         OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(local_path)
-            .await?
+            .await
+    };
+    let mut local_file = match open_res {
+        Ok(f) => f,
+        Err(err) => {
+            let te: TransferError = err.into();
+            store.finish(transfer_id, Some(te.to_string()));
+            return Err(te);
+        }
     };
     if offset > 0 {
-        local_file.seek(SeekFrom::Start(offset)).await?;
+        if let Err(err) = local_file.seek(SeekFrom::Start(offset)).await {
+            let te: TransferError = err.into();
+            store.finish(transfer_id, Some(te.to_string()));
+            return Err(te);
+        }
     }
 
     let mut buf = vec![0u8; CHUNK_SIZE];
@@ -277,18 +366,24 @@ pub async fn download_file_resumable(
             Ok(0) => break,
             Ok(n) => n,
             Err(err) => {
-                store.finish(transfer_id, Some(err.to_string()));
-                return Err(err.into());
+                let te = remote_io_err(format!("read remote {remote_path}"), err);
+                finish_or_release(store, transfer_id, &te);
+                return Err(te);
             }
         };
         if let Err(err) = local_file.write_all(&buf[..n]).await {
-            store.finish(transfer_id, Some(err.to_string()));
-            return Err(err.into());
+            let te: TransferError = err.into();
+            store.finish(transfer_id, Some(te.to_string()));
+            return Err(te);
         }
         store.add_loaded(transfer_id, n as u64);
     }
 
-    local_file.flush().await?;
+    if let Err(err) = local_file.flush().await {
+        let te: TransferError = err.into();
+        store.finish(transfer_id, Some(te.to_string()));
+        return Err(te);
+    }
     store.finish(transfer_id, None);
     Ok(())
 }
@@ -302,30 +397,55 @@ pub async fn copy_remote_to_remote(
     transfer_id: &str,
     store: &TransferProgressStore,
 ) -> Result<(), TransferError> {
+    if let Err(err) =
+        copy_remote_to_remote_once(src_sftp, src_path, dst_sftp, dst_path, transfer_id, store).await
+    {
+        if err.is_transport_error() {
+            store.finish(transfer_id, Some(err.to_string()));
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Runs a single remote-to-remote copy attempt; releases progress without marking done on transport errors.
+pub async fn copy_remote_to_remote_once(
+    src_sftp: &SftpSession,
+    src_path: &str,
+    dst_sftp: &SftpSession,
+    dst_path: &str,
+    transfer_id: &str,
+    store: &TransferProgressStore,
+) -> Result<(), TransferError> {
     let meta = src_sftp
         .metadata(src_path)
         .await
-        .map_err(|e| TransferError::Sftp(format!("stat source {src_path}: {e}")))?;
+        .map_err(|e| sftp_err(format!("stat source {src_path}"), e))?;
     let total = meta.size.unwrap_or(0);
     let _ = store.begin(transfer_id, total, false)?;
 
-    let mut src_file = src_sftp
-        .open(src_path)
-        .await
-        .map_err(|e| {
-            store.finish(transfer_id, Some(e.to_string()));
-            TransferError::Sftp(format!("open source {src_path}: {e}"))
-        })?;
-    let mut dst_file = dst_sftp
+    let mut src_file = match src_sftp.open(src_path).await {
+        Ok(f) => f,
+        Err(err) => {
+            let te = sftp_err(format!("open source {src_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
+        }
+    };
+    let mut dst_file = match dst_sftp
         .open_with_flags(
             dst_path,
             OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
         )
         .await
-        .map_err(|e| {
-            store.finish(transfer_id, Some(e.to_string()));
-            TransferError::Sftp(format!("open dest {dst_path}: {e}"))
-        })?;
+    {
+        Ok(f) => f,
+        Err(err) => {
+            let te = sftp_err(format!("open dest {dst_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
+        }
+    };
 
     let mut buf = vec![0u8; CHUNK_SIZE];
     loop {
@@ -337,18 +457,24 @@ pub async fn copy_remote_to_remote(
             Ok(0) => break,
             Ok(n) => n,
             Err(err) => {
-                store.finish(transfer_id, Some(err.to_string()));
-                return Err(err.into());
+                let te = remote_io_err(format!("read source {src_path}"), err);
+                finish_or_release(store, transfer_id, &te);
+                return Err(te);
             }
         };
         if let Err(err) = dst_file.write_all(&buf[..n]).await {
-            store.finish(transfer_id, Some(err.to_string()));
-            return Err(err.into());
+            let te = remote_io_err(format!("write dest {dst_path}"), err);
+            finish_or_release(store, transfer_id, &te);
+            return Err(te);
         }
         store.add_loaded(transfer_id, n as u64);
     }
 
-    dst_file.shutdown().await?;
+    if let Err(err) = dst_file.shutdown().await {
+        let te = remote_io_err(format!("finalize dest {dst_path}"), err);
+        finish_or_release(store, transfer_id, &te);
+        return Err(te);
+    }
     store.finish(transfer_id, None);
     Ok(())
 }

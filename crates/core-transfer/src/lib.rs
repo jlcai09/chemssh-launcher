@@ -16,8 +16,9 @@ pub use local_fs::{
 };
 pub use progress::{TransferProgress, TransferProgressStore};
 pub use sftp_ops::{
-    copy_remote_to_remote, delete_remote_path, download_file_resumable, list_remote_dir,
-    upload_file_resumable,
+    copy_remote_to_remote, copy_remote_to_remote_once, delete_remote_path,
+    download_file_resumable, download_file_resumable_once, list_remote_dir, upload_file_resumable,
+    upload_file_resumable_once,
 };
 
 #[derive(Debug, Error)]
@@ -32,12 +33,72 @@ pub enum TransferError {
     InvalidInput(String),
     #[error("sftp error: {0}")]
     Sftp(String),
+    #[error("sftp error: {0}")]
+    SftpTransport(String),
     #[error("archive error: {0}")]
     Archive(String),
     #[error("internal error: {0}")]
     Internal(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl TransferError {
+    pub fn is_transport_error(&self) -> bool {
+        matches!(self, Self::SftpTransport(_))
+    }
+}
+
+/// Reports whether a `russh-sftp` error reflects a broken/timed-out SSH transport
+/// (recoverable via reconnect) rather than a server-side SFTP status rejection.
+pub fn is_sftp_transport_error(err: &russh_sftp::client::error::Error) -> bool {
+    !matches!(
+        err,
+        russh_sftp::client::error::Error::Status(_) | russh_sftp::client::error::Error::Limited(_)
+    )
+}
+
+pub fn sftp_err(
+    context: impl std::fmt::Display,
+    err: russh_sftp::client::error::Error,
+) -> TransferError {
+    let msg = format!("{context}: {err}");
+    if is_sftp_transport_error(&err) {
+        TransferError::SftpTransport(msg)
+    } else {
+        TransferError::Sftp(msg)
+    }
+}
+
+/// Maps `std::io::Error` from remote `russh-sftp` file operations into transport vs status errors.
+/// Only use on remote `SftpRemoteFile` handles, never on local filesystem handles.
+pub fn remote_io_err(context: impl std::fmt::Display, err: std::io::Error) -> TransferError {
+    if let Some(sftp_err_ref) = err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<russh_sftp::client::error::Error>())
+    {
+        let msg = format!("{context}: {err}");
+        if is_sftp_transport_error(sftp_err_ref) {
+            return TransferError::SftpTransport(msg);
+        }
+        return TransferError::Sftp(msg);
+    }
+
+    let is_transport_kind = matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::TimedOut
+    );
+    let msg = format!("{context}: {err}");
+    if is_transport_kind {
+        TransferError::SftpTransport(msg)
+    } else {
+        TransferError::Sftp(msg)
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +184,56 @@ mod tests {
 
         local_delete(&copy_dst).unwrap();
         assert_eq!(list_local_dir(dir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sftp_error_classification_distinguishes_transport_from_status() {
+        use russh_sftp::client::error::Error as SftpClientErr;
+        use russh_sftp::protocol::{Status, StatusCode};
+
+        let status_err = SftpClientErr::Status(Status {
+            id: 1,
+            status_code: StatusCode::PermissionDenied,
+            error_message: "permission denied".into(),
+            language_tag: String::new(),
+        });
+        assert!(!is_sftp_transport_error(&status_err));
+        assert!(!sftp_err("stat /home/user/a", status_err.clone()).is_transport_error());
+
+        let closed_err = SftpClientErr::UnexpectedBehavior("session closed".into());
+        assert!(is_sftp_transport_error(&closed_err));
+        assert!(sftp_err("list /home/user", closed_err.clone()).is_transport_error());
+
+        assert!(sftp_err("read", SftpClientErr::Timeout).is_transport_error());
+        assert!(!sftp_err("read", SftpClientErr::Limited("too large".into())).is_transport_error());
+
+        let wrapped_closed = std::io::Error::from(closed_err);
+        assert!(remote_io_err("write", wrapped_closed).is_transport_error());
+
+        let status_io = std::io::Error::other("permission denied");
+        assert!(!remote_io_err("write", status_io).is_transport_error());
+
+        let broken_pipe = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+        assert!(remote_io_err("write", broken_pipe).is_transport_error());
+    }
+
+    #[test]
+    fn release_for_retry_preserves_offset_without_marking_done() {
+        let store = TransferProgressStore::new();
+        assert_eq!(store.begin("t-retry", 1000, false).unwrap(), 0);
+        store.add_loaded("t-retry", 350);
+        assert_eq!(store.active_count(), 1);
+
+        store.release_for_retry("t-retry");
+        let snap = store.get("t-retry").unwrap();
+        assert!(!snap.done);
+        assert!(!snap.cancelled);
+        assert!(snap.error.is_empty());
+        assert_eq!(snap.loaded, 350);
+        assert_eq!(store.active_count(), 0);
+
+        // Next resume attempt reclaims from 350.
+        assert_eq!(store.begin("t-retry", 1000, true).unwrap(), 350);
+        assert!(!store.is_cancelled("t-retry"));
     }
 }

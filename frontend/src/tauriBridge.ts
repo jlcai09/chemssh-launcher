@@ -20,6 +20,39 @@ export interface ActiveWorkSummary {
   active_drag_jobs: number
 }
 
+export interface ParsedTauriInvokeError {
+  message: string
+  status: number
+  data: Record<string, any>
+  transportLost: boolean
+}
+
+export function parseTauriInvokeError(raw: unknown): ParsedTauriInvokeError {
+  const rawMsg = raw instanceof Error ? raw.message : String(raw)
+  let parsedData: Record<string, any> = { error: rawMsg }
+  let displayMsg = rawMsg || 'Request failed'
+  const trimmed = rawMsg.trim()
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const obj = JSON.parse(trimmed)
+      if (obj && typeof obj === 'object') {
+        parsedData = obj
+        if (typeof obj.error === 'string' && obj.error) {
+          displayMsg = obj.error
+        }
+      }
+    } catch {
+      // keep plain text error
+    }
+  }
+  return {
+    message: displayMsg,
+    status: 500,
+    data: parsedData,
+    transportLost: Boolean(parsedData.transport_lost),
+  }
+}
+
 export function isTauriRuntime(): boolean {
   try {
     if (typeof window === 'undefined') return false
@@ -170,13 +203,84 @@ const terminalStreams = new Map<string, TerminalStreamBuffer>()
 let terminalPollTimer: number | null = null
 let terminalPollInFlight = false
 
+export interface TerminalInputQueue {
+  enqueue(sessionId: string, text: string): void
+  clear(sessionId: string): void
+}
+
+/**
+ * Serializes terminal input per session cleanly with zero artificial delay:
+ * the first keystroke invokes immediately, while any keys arriving while that
+ * IPC call is still in flight coalesce into one ordered batch.
+ */
+export function createTerminalInputQueue(
+  sender: (sessionId: string, data: string) => Promise<unknown>,
+): TerminalInputQueue {
+  const pending = new Map<string, string>()
+  const inFlight = new Set<string>()
+
+  const pump = (sessionId: string) => {
+    if (inFlight.has(sessionId)) return
+    const batch = pending.get(sessionId)
+    if (!batch) {
+      pending.delete(sessionId)
+      return
+    }
+    pending.delete(sessionId)
+    inFlight.add(sessionId)
+    Promise.resolve(sender(sessionId, batch))
+      .catch(err => {
+        console.error('[tauriBridge] send_terminal_input failed:', err)
+      })
+      .finally(() => {
+        inFlight.delete(sessionId)
+        if (pending.has(sessionId)) pump(sessionId)
+      })
+  }
+
+  return {
+    enqueue(sessionId: string, text: string) {
+      if (!sessionId || !text) return
+      pending.set(sessionId, (pending.get(sessionId) ?? '') + text)
+      pump(sessionId)
+    },
+    clear(sessionId: string) {
+      if (!sessionId) return
+      pending.delete(sessionId)
+    },
+  }
+}
+
+const terminalInputQueue = createTerminalInputQueue((sessionId, data) =>
+  invoke('send_terminal_input', { sessionId, data }),
+)
+
+export function sendTauriTerminalText(sessionId: string, text: string): void {
+  terminalInputQueue.enqueue(sessionId, text)
+}
+
+function stopPollTimerIfIdle(): void {
+  if (terminalPollTimer === null) return
+  for (const buf of terminalStreams.values()) {
+    if (!buf.exited && !buf.channelDelivered) return
+  }
+  if (typeof window !== 'undefined') {
+    window.clearInterval(terminalPollTimer)
+  }
+  terminalPollTimer = null
+}
+
 function dispatchTerminalEvent(
   buf: TerminalStreamBuffer,
   ev: TauriTerminalEvent,
   fromChannel = false,
 ) {
   if (fromChannel) {
+    const firstChannelDelivery = !buf.channelDelivered
     buf.channelDelivered = true
+    if (firstChannelDelivery) {
+      stopPollTimerIfIdle()
+    }
   }
   if (typeof ev.seq === 'number') {
     if (ev.seq <= buf.lastSeq) return
@@ -235,7 +339,7 @@ function ensureTerminalPollLoop(): void {
   if (terminalPollTimer !== null) return
   terminalPollTimer = window.setInterval(() => {
     void pollTerminalEventsOnce()
-  }, 100)
+  }, 25)
 }
 
 export function attachTauriTerminalSink(sessionId: string, sink: TerminalSink): () => void {
@@ -785,6 +889,7 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
 
   if (pathname === '/api/session/shell/close' && verb === 'POST') {
     const sessionId = body.session ?? body.id ?? ''
+    terminalInputQueue.clear(sessionId)
     terminalStreams.delete(sessionId)
     await invoke('close_terminal', { sessionId })
     return { ok: true } as unknown as T

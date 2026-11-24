@@ -225,7 +225,7 @@ pub async fn detect_remote_tools(conn: &SshConnection) -> Result<ArchiveTools, T
     let out = conn
         .exec_command(script)
         .await
-        .map_err(|e| TransferError::Archive(e.to_string()))?;
+        .map_err(|e| map_exec_archive_err(e.to_string()))?;
     let mut tools = ArchiveTools::default();
     for line in out.stdout.lines().map(str::trim) {
         match line {
@@ -252,7 +252,7 @@ pub async fn run_remote_step(
     let out = conn
         .exec_command(&cmd)
         .await
-        .map_err(|e| TransferError::Archive(e.to_string()))?;
+        .map_err(|e| map_exec_archive_err(e.to_string()))?;
     if out.exit_code.unwrap_or(0) != 0 {
         return Err(TransferError::Archive(format!(
             "remote archive command failed (exit {:?}): {}",
@@ -261,4 +261,12 @@ pub async fn run_remote_step(
         )));
     }
     Ok(())
+}
+
+fn map_exec_archive_err(msg: String) -> TransferError {
+    if msg.contains("remote command execution rejected") {
+        TransferError::Archive(msg)
+    } else {
+        TransferError::SftpTransport(msg)
+    }
 }
