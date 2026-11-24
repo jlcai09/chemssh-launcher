@@ -1047,17 +1047,13 @@ mod tests {
 
     #[test]
     fn local_capabilities_keep_open_and_hide_sync_events() {
-        let caps = build_capabilities(
-            true,
-            true,
-            false,
-            "local-1",
-            "/tmp/local-ws/",
-            true,
-        );
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("local-ws");
+        let with_sep = format!("{}{}", root.display(), std::path::MAIN_SEPARATOR);
+        let caps = build_capabilities(true, true, false, "local-1", &with_sep, true);
         assert!(caps.enabled);
         assert_eq!(caps.session_id, "local-1");
-        assert_eq!(caps.workspace_root, "/tmp/local-ws");
+        assert_eq!(caps.workspace_root, root.to_string_lossy().as_ref());
         assert!(caps.features.system_icons);
         assert!(caps.features.open_default);
         assert!(caps.features.open_text);
