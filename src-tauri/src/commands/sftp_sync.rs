@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use chrono::{SecondsFormat, Utc};
 use russh_sftp::protocol::OpenFlags;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,13 +16,15 @@ use crate::state::LauncherLogStore;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 const ERROR_RETRY_BACKOFF: Duration = Duration::from_secs(3);
-const MAX_SYNC_FILE_BYTES: u64 = 100 * 1024 * 1024;
+const MISSING_REMOVE_THRESHOLD: u8 = 3;
+pub const MAX_SYNC_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_SYNC_EVENTS: usize = 500;
 const CHUNK_SIZE: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenSyncEvent {
     pub seq: u64,
+    pub time: String,
     pub session: String,
     pub remote_path: String,
     pub local_path: String,
@@ -40,6 +43,7 @@ struct WatchedRemoteFile {
     last_seen_len: u64,
     pending_since: Option<Instant>,
     next_retry_at: Option<Instant>,
+    missing_polls: u8,
 }
 
 #[derive(Default)]
@@ -87,6 +91,7 @@ impl SftpOpenSyncManager {
                     last_seen_len: len,
                     pending_since: None,
                     next_retry_at: None,
+                    missing_polls: 0,
                 },
             );
         }
@@ -113,7 +118,23 @@ impl SftpOpenSyncManager {
             .collect()
     }
 
-    async fn push_event(
+    pub async fn events_after_for_session(
+        &self,
+        session_id: &str,
+        after_seq: u64,
+    ) -> Vec<OpenSyncEvent> {
+        if session_id.is_empty() {
+            return Vec::new();
+        }
+        let guard = self.events.lock().await;
+        guard
+            .iter()
+            .filter(|ev| ev.seq > after_seq && ev.session == session_id)
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) async fn push_event(
         &self,
         session: &str,
         remote_path: &str,
@@ -124,6 +145,7 @@ impl SftpOpenSyncManager {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let event = OpenSyncEvent {
             seq,
+            time: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             session: session.to_string(),
             remote_path: remote_path.to_string(),
             local_path: local_path.to_string(),
@@ -160,9 +182,16 @@ impl SftpOpenSyncManager {
             let mut guard = self.watches.lock().await;
             for (key, watch) in guard.iter_mut() {
                 let meta = match std::fs::metadata(&watch.local_path) {
-                    Ok(m) => m,
+                    Ok(m) => {
+                        watch.missing_polls = 0;
+                        m
+                    }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        remove_keys.push(key.clone());
+                        // Tolerate brief disappearance from atomic-save editors.
+                        watch.missing_polls = watch.missing_polls.saturating_add(1);
+                        if watch.missing_polls >= MISSING_REMOVE_THRESHOLD {
+                            remove_keys.push(key.clone());
+                        }
                         continue;
                     }
                     Err(_) => continue,

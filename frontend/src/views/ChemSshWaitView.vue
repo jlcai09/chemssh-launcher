@@ -28,13 +28,14 @@ import { t } from '../i18n'
 interface WaitStatus {
   phase?: string
   running?: boolean
+  url?: string
   last_error?: string | null
 }
 
 const query = new URLSearchParams(window.location.search)
 const profileID = query.get('profile_id') || ''
 const name = ref(query.get('name') || '')
-const target = query.get('target') || ''
+let target = query.get('target') || ''
 
 const failed = ref(false)
 const errorText = ref('')
@@ -67,6 +68,7 @@ async function poll() {
       if (seen || misses > 10) return fail('')
     } else {
       seen = true
+      if (status.url) target = status.url
       if (status.phase === 'ready') return handoff()
       if (status.phase === 'failed' || status.phase === 'stopped' || status.running === false) {
         return fail(status.last_error || '')
@@ -83,7 +85,8 @@ async function retry() {
   seen = false
   misses = 0
   try {
-    await postJSON('/api/session/start', { id: profileID })
+    const status = await postJSON<WaitStatus>('/api/session/start', { id: profileID })
+    if (status?.url) target = status.url
   } catch (error) {
     return fail((error as Error).message)
   }

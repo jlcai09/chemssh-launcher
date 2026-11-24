@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -7,6 +8,9 @@ use core_secret::{KeyringStore, SecretStore};
 use core_transfer::TransferProgressStore;
 use win_native::{DragJobRegistry, FileIconService};
 
+use crate::chemssh_bridge::ChemSshBridgeManager;
+use crate::chemssh_proxy::{bind_proxy_listener, generate_api_token};
+use crate::client_identity::ClientIdentityStore;
 use crate::commands::sessions::SessionManager;
 use crate::commands::sftp::SftpManager;
 use crate::commands::sftp_sync::SftpOpenSyncManager;
@@ -42,6 +46,7 @@ impl LauncherLogStore {
     }
 }
 
+#[derive(Clone)]
 pub struct AppState {
     pub profiles: Arc<FileStore>,
     pub secrets: Arc<dyn SecretStore>,
@@ -57,6 +62,11 @@ pub struct AppState {
     pub drag_jobs: Arc<DragJobRegistry>,
     pub file_icons: Arc<FileIconService>,
     pub launcher_logs: Arc<LauncherLogStore>,
+    pub client_identity: Arc<ClientIdentityStore>,
+    pub chemssh_bridge: Arc<ChemSshBridgeManager>,
+    pub proxy_base_url: String,
+    pub api_token: String,
+    pub proxy_listener: Arc<Mutex<Option<TcpListener>>>,
 }
 
 impl AppState {
@@ -66,6 +76,8 @@ impl AppState {
         let settings_path = paths::default_settings_path()?;
         let known_hosts_path = paths::default_known_hosts_path()?;
         let sftp_cache_dir = paths::default_sftp_open_cache_dir()?;
+        let client_identity_path = paths::default_client_identity_path()?;
+        let (listener, proxy_base_url) = bind_proxy_listener()?;
         Ok(Self {
             profiles: Arc::new(FileStore::new(profiles_path)),
             secrets: Arc::new(KeyringStore::new()),
@@ -81,6 +93,11 @@ impl AppState {
             drag_jobs: Arc::new(DragJobRegistry::new()),
             file_icons: Arc::new(FileIconService::new()),
             launcher_logs: Arc::new(LauncherLogStore::default()),
+            client_identity: Arc::new(ClientIdentityStore::new(client_identity_path)),
+            chemssh_bridge: Arc::new(ChemSshBridgeManager::new()),
+            proxy_base_url,
+            api_token: generate_api_token(),
+            proxy_listener: Arc::new(Mutex::new(Some(listener))),
         })
     }
 
@@ -92,6 +109,7 @@ impl AppState {
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
         let known_hosts_path = config_dir.join("known_hosts");
+        let client_identity_path = config_dir.join("client_identity.json");
         Self {
             profiles: Arc::new(FileStore::new(profiles_path)),
             secrets,
@@ -107,6 +125,11 @@ impl AppState {
             drag_jobs: Arc::new(DragJobRegistry::new()),
             file_icons: Arc::new(FileIconService::new()),
             launcher_logs: Arc::new(LauncherLogStore::default()),
+            client_identity: Arc::new(ClientIdentityStore::new(client_identity_path)),
+            chemssh_bridge: Arc::new(ChemSshBridgeManager::new()),
+            proxy_base_url: String::new(),
+            api_token: generate_api_token(),
+            proxy_listener: Arc::new(Mutex::new(None)),
         }
     }
 }

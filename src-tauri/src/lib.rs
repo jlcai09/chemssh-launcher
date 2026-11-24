@@ -1,3 +1,6 @@
+pub mod chemssh_bridge;
+pub mod chemssh_proxy;
+pub mod client_identity;
 pub mod commands;
 pub mod state;
 
@@ -66,6 +69,16 @@ pub fn run() {
                 .unwrap_or_default()
         })
         .setup(move |app| {
+            let proxy_state = app.state::<AppState>().inner().clone();
+            if let Some(listener) = proxy_state
+                .proxy_listener
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take())
+            {
+                chemssh_proxy::spawn_proxy_server(listener, Arc::new(proxy_state));
+            }
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -187,11 +200,15 @@ pub fn run() {
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
             let state = app_handle.state::<AppState>();
+            let bridge = Arc::clone(&state.chemssh_bridge);
             let sessions = Arc::clone(&state.sessions);
             let terminals = Arc::clone(&state.terminals);
             let sftp = Arc::clone(&state.sftp);
+            let sftp_sync = Arc::clone(&state.sftp_sync);
+            let launcher_logs = Arc::clone(&state.launcher_logs);
             tauri::async_runtime::block_on(async move {
                 let _ = tokio::time::timeout(Duration::from_secs(3), async move {
+                    bridge.close_all(&sftp, &sftp_sync, &launcher_logs).await;
                     tokio::join!(
                         sessions.stop_all_on_exit(),
                         terminals.close_all(),

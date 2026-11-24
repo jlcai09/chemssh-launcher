@@ -14,6 +14,7 @@ use core_ssh::{
     write_proxy_bridge, HostKeyPolicy, KnownHostsVerifier, LocalTunnel, RemoteProcessHandle,
     ReverseProxyChannel, SshConnection, SshCredentials, SshError,
 };
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
@@ -93,7 +94,85 @@ pub struct ConnectionTestResult {
     pub message: String,
 }
 
-enum SessionBackend {
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+pub(crate) fn encode_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
+}
+
+pub(crate) fn profile_proxy_slug(profile: &Profile) -> String {
+    let name = profile.name.trim();
+    if !name.is_empty() {
+        name.to_string()
+    } else {
+        profile.id.clone()
+    }
+}
+
+pub(crate) fn profile_proxy_prefix(profile: &Profile) -> String {
+    format!("/{}/chemssh", encode_path_segment(&profile_proxy_slug(profile)))
+}
+
+pub(crate) fn normalized_proxy_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".into()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
+pub(crate) fn session_proxy_url(proxy_base_url: &str, profile: &Profile, open_seq: u64) -> String {
+    let base = proxy_base_url.trim_end_matches('/');
+    if base.is_empty() {
+        return profile.browser_url();
+    }
+    let prefix = profile_proxy_prefix(profile);
+    let path = normalized_proxy_path(&profile.local_url_path);
+    let mut raw = if path != "/" {
+        format!("{base}{prefix}{path}")
+    } else {
+        format!("{base}{prefix}")
+    };
+    let sep = if raw.contains('?') { '&' } else { '?' };
+    raw.push(sep);
+    raw.push_str("profile_id=");
+    raw.push_str(&encode_path_segment(&profile.id));
+    if open_seq > 0 {
+        raw.push_str("&launcher_open_seq=");
+        raw.push_str(&open_seq.to_string());
+    }
+    raw
+}
+
+pub(crate) fn profile_proxy_slug_from_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_start_matches('/');
+    let mut parts = trimmed.split('/');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next().unwrap_or("");
+    if first.is_empty() || second.is_empty() {
+        return None;
+    }
+    match first {
+        "api" | "assets" | "launcher-logs" | "shell" | "sftp" | "static" | "terminal"
+        | "chemssh" | "chemssh-wait" => return None,
+        _ => {}
+    }
+    let decoded = percent_decode_str(first).decode_utf8().ok()?;
+    let slug = decoded.trim();
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_string())
+    }
+}
+
+pub(crate) enum SessionBackend {
     Remote {
         profile: Profile,
         connection: Arc<SshConnection>,
@@ -110,12 +189,55 @@ enum SessionBackend {
     },
 }
 
-struct ActiveSession {
-    profile_id: String,
-    profile_name: String,
-    status: Mutex<SessionStatus>,
-    backend: SessionBackend,
-    stop_requested: AtomicBool,
+pub(crate) struct ActiveSession {
+    pub(crate) profile_id: String,
+    pub(crate) profile_name: String,
+    pub(crate) status: Mutex<SessionStatus>,
+    pub(crate) backend: SessionBackend,
+    pub(crate) stop_requested: AtomicBool,
+    pub(crate) remote_pid: Mutex<u32>,
+    pub(crate) workspace_root: Mutex<String>,
+}
+
+impl ActiveSession {
+    pub(crate) fn profile(&self) -> &Profile {
+        match &self.backend {
+            SessionBackend::Remote { profile, .. } | SessionBackend::Local { profile, .. } => {
+                profile
+            }
+        }
+    }
+
+    pub(crate) fn security_token(&self) -> Option<&str> {
+        match &self.backend {
+            SessionBackend::Remote { security_token, .. }
+            | SessionBackend::Local { security_token, .. } => security_token.as_deref(),
+        }
+    }
+
+    pub(crate) fn remote_connection(&self) -> Option<Arc<SshConnection>> {
+        match &self.backend {
+            SessionBackend::Remote { connection, .. } => Some(Arc::clone(connection)),
+            SessionBackend::Local { .. } => None,
+        }
+    }
+
+    pub(crate) async fn is_forwarding(&self) -> bool {
+        self.status.lock().await.forwarding
+    }
+
+    pub(crate) async fn is_ready(&self) -> bool {
+        self.status.lock().await.phase == "ready"
+    }
+
+    pub(crate) async fn workspace_root(&self) -> String {
+        self.workspace_root.lock().await.clone()
+    }
+
+    pub(crate) async fn set_identity(&self, pid: u32, workspace_root: String) {
+        *self.remote_pid.lock().await = pid;
+        *self.workspace_root.lock().await = workspace_root;
+    }
 }
 
 #[derive(Default)]
@@ -203,6 +325,80 @@ impl SessionManager {
         *self.active_profile_id.lock().await = Some(profile_id.to_string());
     }
 
+    #[cfg(test)]
+    pub(crate) async fn insert_active_for_test(
+        &self,
+        profile_id: String,
+        session: Arc<ActiveSession>,
+    ) {
+        self.sessions
+            .lock()
+            .await
+            .insert(profile_id.clone(), session);
+        *self.active_profile_id.lock().await = Some(profile_id);
+    }
+
+    pub(crate) async fn is_same_session(&self, target: &Arc<ActiveSession>) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .get(&target.profile_id)
+            .map(|current| Arc::ptr_eq(current, target))
+            .unwrap_or(false)
+    }
+
+    pub(crate) async fn find_for_proxy_request(
+        &self,
+        query_profile_id: Option<&str>,
+        req_path: &str,
+        referer: Option<&str>,
+    ) -> Option<Arc<ActiveSession>> {
+        let sessions = self.sessions.lock().await.clone();
+        let active_id = self.active_profile_id.lock().await.clone();
+
+        if let Some(pid) = query_profile_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(found) = sessions.get(pid) {
+                return Some(Arc::clone(found));
+            }
+        }
+
+        if let Some(slug) = profile_proxy_slug_from_path(req_path) {
+            if let Some(found) = match_session_by_slug(&sessions, &slug) {
+                return Some(found);
+            }
+        }
+
+        if let Some(ref_val) = referer.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Ok(parsed) = Url::parse(ref_val) {
+                for (k, v) in parsed.query_pairs() {
+                    if k == "profile_id" && !v.trim().is_empty() {
+                        if let Some(found) = sessions.get(v.trim()) {
+                            return Some(Arc::clone(found));
+                        }
+                    }
+                }
+                if let Some(slug) = profile_proxy_slug_from_path(parsed.path()) {
+                    if let Some(found) = match_session_by_slug(&sessions, &slug) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+
+        if let Some(id) = active_id {
+            if let Some(found) = sessions.get(&id) {
+                return Some(Arc::clone(found));
+            }
+        }
+
+        for session in sessions.values() {
+            if session.is_forwarding().await {
+                return Some(Arc::clone(session));
+            }
+        }
+        None
+    }
+
     pub async fn all_statuses(&self) -> Vec<SessionStatus> {
         let sessions: Vec<Arc<ActiveSession>> =
             self.sessions.lock().await.values().cloned().collect();
@@ -273,6 +469,18 @@ impl SessionManager {
             st.phase = "stopped".into();
         }
     }
+}
+
+fn match_session_by_slug(
+    sessions: &HashMap<String, Arc<ActiveSession>>,
+    slug: &str,
+) -> Option<Arc<ActiveSession>> {
+    sessions
+        .values()
+        .find(|s| {
+            profile_proxy_slug(s.profile()).eq_ignore_ascii_case(slug) || s.profile_id == slug
+        })
+        .cloned()
 }
 
 pub(crate) fn load_ssh_credentials(
@@ -422,6 +630,8 @@ async fn resume_or_reuse_session(
     if currently_forwarding || profile.is_local() {
         let mut st = session.status.lock().await;
         st.open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
+        st.url = session_proxy_url(&state.proxy_base_url, profile, st.open_seq);
+        st.local_url = profile.browser_url();
         let snapshot = st.clone();
         drop(st);
         state
@@ -520,6 +730,8 @@ async fn resume_or_reuse_session(
         st.forwarding = true;
         st.forwarding_active = true;
         st.open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
+        st.url = session_proxy_url(&state.proxy_base_url, profile, st.open_seq);
+        st.local_url = profile.browser_url();
         st.phase = "starting".into();
         st.last_error = None;
         for w in extra_warnings {
@@ -542,9 +754,8 @@ async fn resume_or_reuse_session(
         .await;
 
     spawn_health_check_task(
+        state.clone(),
         Arc::clone(&session),
-        Arc::clone(&state.sessions),
-        Arc::clone(&state.launcher_logs),
         profile.clone(),
         security_token.clone(),
     );
@@ -557,6 +768,10 @@ async fn start_local_session(
     profile: Profile,
     security_token: Option<String>,
 ) -> Result<SessionStatus, String> {
+    state
+        .chemssh_bridge
+        .close_for_profile(&profile.id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .await;
     let browser_url = profile.browser_url();
     let (health_url, health_opts) =
         build_health_check_target(&profile, security_token.as_deref());
@@ -582,6 +797,7 @@ async fn start_local_session(
             .await;
 
         let open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
+        let proxy_url = session_proxy_url(&state.proxy_base_url, &profile, open_seq);
         let ready_status = SessionStatus {
             profile_id: profile.id.clone(),
             name: profile.name.clone(),
@@ -591,7 +807,7 @@ async fn start_local_session(
             open_seq,
             open_browser: profile.open_browser,
             phase: "ready".into(),
-            url: browser_url.clone(),
+            url: proxy_url,
             local_url: browser_url,
             warnings,
             local_proxy: LocalProxyStatus::default(),
@@ -604,17 +820,25 @@ async fn start_local_session(
             backend: SessionBackend::Local {
                 profile: profile.clone(),
                 child: Mutex::new(None),
-                security_token,
+                security_token: security_token.clone(),
             },
             stop_requested: AtomicBool::new(false),
+            remote_pid: Mutex::new(0),
+            workspace_root: Mutex::new(String::new()),
         });
         state
             .sessions
             .sessions
             .lock()
             .await
-            .insert(profile.id.clone(), active);
+            .insert(profile.id.clone(), Arc::clone(&active));
         state.sessions.activate(&profile.id).await;
+        tokio::spawn(refresh_session_identity_and_warm_bridge(
+            state.clone(),
+            active,
+            profile,
+            security_token,
+        ));
         return Ok(ready_status);
     }
 
@@ -636,6 +860,7 @@ async fn start_local_session(
     let stderr = child.stderr.take();
 
     let open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
+    let proxy_url = session_proxy_url(&state.proxy_base_url, &profile, open_seq);
     let initial_status = SessionStatus {
         profile_id: profile.id.clone(),
         name: profile.name.clone(),
@@ -645,7 +870,7 @@ async fn start_local_session(
         open_seq,
         open_browser: profile.open_browser,
         phase: "starting".into(),
-        url: browser_url.clone(),
+        url: proxy_url,
         local_url: browser_url,
         warnings: warnings.clone(),
         local_proxy: LocalProxyStatus::default(),
@@ -662,6 +887,8 @@ async fn start_local_session(
             security_token: security_token.clone(),
         },
         stop_requested: AtomicBool::new(false),
+        remote_pid: Mutex::new(0),
+        workspace_root: Mutex::new(String::new()),
     });
 
     for w in &warnings {
@@ -762,9 +989,8 @@ async fn start_local_session(
     });
 
     spawn_health_check_task(
+        state.clone(),
         Arc::clone(&active),
-        Arc::clone(&state.sessions),
-        Arc::clone(&state.launcher_logs),
         profile,
         security_token,
     );
@@ -778,6 +1004,10 @@ async fn start_remote_session(
     security_token: Option<String>,
     host_key_policy: Option<HostKeyPolicy>,
 ) -> Result<SessionStatus, String> {
+    state
+        .chemssh_bridge
+        .close_for_profile(&profile.id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .await;
     if let Err(err) = check_port_available(&profile.local_host, profile.local_port) {
         let suggestions = suggest_free_ports(&profile.local_host, profile.local_port, 3);
         let msg = format!("{err}; suggested free ports: {suggestions:?}");
@@ -808,6 +1038,7 @@ async fn start_remote_session(
     // immediate "starting" status; the host-key prompt above stays synchronous.
     let browser_url = profile.browser_url();
     let open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
+    let proxy_url = session_proxy_url(&state.proxy_base_url, &profile, open_seq);
     let initial_status = SessionStatus {
         profile_id: profile.id.clone(),
         name: profile.name.clone(),
@@ -817,7 +1048,7 @@ async fn start_remote_session(
         open_seq,
         open_browser: profile.open_browser,
         phase: "starting".into(),
-        url: browser_url.clone(),
+        url: proxy_url,
         local_url: browser_url,
         warnings: warnings.clone(),
         local_proxy: LocalProxyStatus {
@@ -841,6 +1072,8 @@ async fn start_remote_session(
             security_token: security_token.clone(),
         },
         stop_requested: AtomicBool::new(false),
+        remote_pid: Mutex::new(0),
+        workspace_root: Mutex::new(String::new()),
     });
 
     for w in &warnings {
@@ -860,8 +1093,7 @@ async fn start_remote_session(
 
     tokio::spawn(finish_remote_startup(
         Arc::clone(&active),
-        Arc::clone(&state.sessions),
-        Arc::clone(&state.launcher_logs),
+        state.clone(),
         profile,
         security_token,
     ));
@@ -869,18 +1101,28 @@ async fn start_remote_session(
     Ok(initial_status)
 }
 
-async fn fail_remote_startup(
-    active: &Arc<ActiveSession>,
-    sessions: &Arc<SessionManager>,
-    logs: &Arc<LauncherLogStore>,
-    msg: String,
-) {
+async fn fail_remote_startup(active: &Arc<ActiveSession>, state: &AppState, msg: String) {
     if active.stop_requested.load(Ordering::SeqCst) {
         return;
     }
-    sessions.set_failure(&active.profile_id, msg.clone()).await;
-    sessions
-        .push_log(&active.profile_id, &active.profile_name, logs, format!("[error] {msg}"))
+    state
+        .chemssh_bridge
+        .close_for_profile(
+            &active.profile_id,
+            &state.sftp,
+            &state.sftp_sync,
+            &state.launcher_logs,
+        )
+        .await;
+    state.sessions.set_failure(&active.profile_id, msg.clone()).await;
+    state
+        .sessions
+        .push_log(
+            &active.profile_id,
+            &active.profile_name,
+            &state.launcher_logs,
+            format!("[error] {msg}"),
+        )
         .await;
     cleanup_remote_backend(active).await;
     let mut st = active.status.lock().await;
@@ -893,11 +1135,12 @@ async fn fail_remote_startup(
 
 async fn finish_remote_startup(
     active: Arc<ActiveSession>,
-    sessions: Arc<SessionManager>,
-    logs: Arc<LauncherLogStore>,
+    state: AppState,
     profile: Profile,
     security_token: Option<String>,
 ) {
+    let sessions = Arc::clone(&state.sessions);
+    let logs = Arc::clone(&state.launcher_logs);
     let SessionBackend::Remote {
         connection,
         tunnel,
@@ -1015,7 +1258,7 @@ async fn finish_remote_startup(
             st.forwarding_active = true;
         }
         Err(err) => {
-            fail_remote_startup(&active, &sessions, &logs, err.to_string()).await;
+            fail_remote_startup(&active, &state, err.to_string()).await;
             return;
         }
     }
@@ -1040,8 +1283,7 @@ async fn finish_remote_startup(
                 });
 
                 let watch_session = Arc::clone(&active);
-                let watch_mgr = Arc::clone(&sessions);
-                let watch_logs = Arc::clone(&logs);
+                let watch_state = state.clone();
                 tokio::spawn(async move {
                     let exit_res = exit_rx.await;
                     if watch_session.stop_requested.load(Ordering::SeqCst) {
@@ -1050,11 +1292,12 @@ async fn finish_remote_startup(
                     match exit_res {
                         Ok(Ok(Some(0))) | Ok(Ok(None)) => {
                             // Clean exit (for example backgrounded/reused remote service): keep tunnel & session alive.
-                            watch_mgr
+                            watch_state
+                                .sessions
                                 .push_log(
                                     &watch_session.profile_id,
                                     &watch_session.profile_name,
-                                    &watch_logs,
+                                    &watch_state.launcher_logs,
                                     "[session] remote launcher command exited cleanly; keeping SSH tunnel open",
                                 )
                                 .await;
@@ -1066,24 +1309,25 @@ async fn finish_remote_startup(
                                 Err(_) => "remote command monitor dropped".to_string(),
                                 Ok(Ok(None)) => unreachable!(),
                             };
-                            watch_mgr
+                            watch_state
+                                .sessions
                                 .push_log(
                                     &watch_session.profile_id,
                                     &watch_session.profile_name,
-                                    &watch_logs,
+                                    &watch_state.launcher_logs,
                                     format!("[session] {msg}"),
                                 )
                                 .await;
                             let already_ready = watch_session.status.lock().await.phase == "ready";
                             if !already_ready {
-                                fail_remote_startup(&watch_session, &watch_mgr, &watch_logs, msg).await;
+                                fail_remote_startup(&watch_session, &watch_state, msg).await;
                             }
                         }
                     }
                 });
             }
             Err(err) => {
-                fail_remote_startup(&active, &sessions, &logs, err.to_string()).await;
+                fail_remote_startup(&active, &state, err.to_string()).await;
                 return;
             }
         }
@@ -1092,13 +1336,12 @@ async fn finish_remote_startup(
         return;
     }
 
-    spawn_health_check_task(Arc::clone(&active), sessions, logs, profile, security_token);
+    spawn_health_check_task(state, Arc::clone(&active), profile, security_token);
 }
 
 fn spawn_health_check_task(
+    state: AppState,
     session: Arc<ActiveSession>,
-    sessions_mgr: Arc<SessionManager>,
-    launcher_logs: Arc<LauncherLogStore>,
     profile: Profile,
     security_token: Option<String>,
 ) {
@@ -1121,15 +1364,22 @@ fn spawn_health_check_task(
                     st.last_error = None;
                 }
                 drop(st);
-                sessions_mgr.clear_failure(&profile.id).await;
-                sessions_mgr
+                state.sessions.clear_failure(&profile.id).await;
+                state
+                    .sessions
                     .push_log(
                         &profile.id,
                         &profile.name,
-                        &launcher_logs,
+                        &state.launcher_logs,
                         format!("[session] ready at {display_url}"),
                     )
                     .await;
+                tokio::spawn(refresh_session_identity_and_warm_bridge(
+                    state,
+                    session,
+                    profile,
+                    security_token,
+                ));
             }
             Err(err) => {
                 let msg = err.to_string();
@@ -1139,18 +1389,92 @@ fn spawn_health_check_task(
                     st.last_error = Some(msg.clone());
                 }
                 drop(st);
-                sessions_mgr.set_failure(&profile.id, msg.clone()).await;
-                sessions_mgr
+                state.sessions.set_failure(&profile.id, msg.clone()).await;
+                state
+                    .sessions
                     .push_log(
                         &profile.id,
                         &profile.name,
-                        &launcher_logs,
+                        &state.launcher_logs,
                         format!("[warn] health check: {msg}"),
                     )
                     .await;
             }
         }
     });
+}
+
+async fn refresh_session_identity_and_warm_bridge(
+    state: AppState,
+    session: Arc<ActiveSession>,
+    profile: Profile,
+    security_token: Option<String>,
+) {
+    if !state.sessions.is_same_session(&session).await || !session.is_forwarding().await {
+        return;
+    }
+    let res = if profile.is_local() {
+        fetch_local_identity(
+            &profile.local_host,
+            profile.local_port,
+            security_token.as_deref(),
+        )
+        .await
+    } else {
+        let Some(conn) = session.remote_connection() else {
+            return;
+        };
+        conn.fetch_remote_identity(
+            &profile.remote_host,
+            profile.remote_port,
+            security_token.as_deref(),
+        )
+        .await
+    };
+
+    let identity = match res {
+        Ok(id) => id,
+        Err(err) => {
+            let scope = if profile.is_local() { "local " } else { "" };
+            state
+                .sessions
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &state.launcher_logs,
+                    format!("warning: could not read {scope}ChemSSH identity: {err}"),
+                )
+                .await;
+            return;
+        }
+    };
+
+    if !state.sessions.is_same_session(&session).await {
+        return;
+    }
+    session
+        .set_identity(identity.pid, identity.workspace_root.clone())
+        .await;
+    let scope = if profile.is_local() {
+        "local ChemSSH identity"
+    } else {
+        "ChemSSH identity"
+    };
+    state
+        .sessions
+        .push_log(
+            &profile.id,
+            &profile.name,
+            &state.launcher_logs,
+            format!("{scope} OK: pid {}, version {}", identity.pid, identity.project_version),
+        )
+        .await;
+
+    if !profile.is_local() && !identity.workspace_root.trim().is_empty() {
+        state
+            .chemssh_bridge
+            .spawn_warm_sftp(state.clone(), session, profile, identity.workspace_root);
+    }
 }
 
 fn build_local_shell_command(script: &str) -> tokio::process::Command {
@@ -1273,6 +1597,11 @@ pub async fn pause_forwarding(
     drop(status);
 
     state
+        .chemssh_bridge
+        .close_for_profile(&profile_id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .await;
+
+    state
         .sessions
         .push_log(
             &session.profile_id,
@@ -1295,6 +1624,10 @@ pub async fn stop_session(state: State<'_, AppState>, profile_id: String) -> Res
         .await
         .get(&profile_id)
         .cloned();
+    state
+        .chemssh_bridge
+        .close_for_profile(&profile_id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .await;
     let Some(session) = session else {
         return Ok(());
     };

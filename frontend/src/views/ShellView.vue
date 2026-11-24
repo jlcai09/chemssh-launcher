@@ -239,6 +239,12 @@ function titleForURL(url: string): TabTitle {
       if (parsed.pathname === '/sftp') return { title: '', titleKey: 'app.sftp' }
       if (parsed.pathname === '/launcher-logs') return { title: '', titleKey: 'app.backend' }
       if (parsed.pathname === '/chemssh-wait') return { title: parsed.searchParams.get('name') || 'ChemSSH', titleKey: '' }
+    }
+    if (
+      parsed.origin === window.location.origin ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === 'localhost'
+    ) {
       const parts = parsed.pathname.split('/').filter(Boolean)
       if (parts.length >= 2 && parts[1] === 'chemssh') return { title: decodeURIComponent(parts[0]), titleKey: '' }
     }
@@ -428,9 +434,23 @@ function waitURLFor(status: { profile_id?: string; name?: string; open_seq?: num
   return wait.href
 }
 
-function openSessionTab(name: string, target: string, tabURL: string) {
+function waitProfileIDOf(url: string) {
+  try {
+    const parsed = new URL(url, window.location.origin)
+    if (parsed.origin === window.location.origin && parsed.pathname === '/chemssh-wait') {
+      return parsed.searchParams.get('profile_id') || ''
+    }
+  } catch {
+    // Ignore invalid URLs.
+  }
+  return ''
+}
+
+function openSessionTab(name: string, target: string, tabURL: string, profileID = '') {
   const finalTarget = absoluteURL(target)
-  const existing = tabs.find(tab => sessionTargetOf(tab.url) === finalTarget)
+  const existing = tabs.find(
+    tab => sessionTargetOf(tab.url) === finalTarget || (profileID && waitProfileIDOf(tab.url) === profileID)
+  )
   if (existing) {
     activate(existing.id)
     return
@@ -544,7 +564,7 @@ async function pollSession() {
       lastSessionURL.value = url
       lastSessionOpenSeq.value = openSeq
       const tabURL = status.phase === 'ready' ? url : waitURLFor(status, url)
-      openSessionTab(status.name || 'ChemSSH', url, tabURL)
+      openSessionTab(status.name || 'ChemSSH', url, tabURL, String(status.profile_id || ''))
     }
     if (openSeq > maxSeenOpenSeq) maxSeenOpenSeq = openSeq
     if (!url) {

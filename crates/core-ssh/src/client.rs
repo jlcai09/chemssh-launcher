@@ -166,9 +166,17 @@ pub struct CheckPortResult {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChemSshIdentity {
     #[serde(default)]
+    pub app: String,
+    #[serde(default)]
     pub service: String,
     #[serde(default)]
+    pub project_version: String,
+    #[serde(default)]
     pub pid: u32,
+    #[serde(default)]
+    pub scheduler: String,
+    #[serde(default)]
+    pub workspace_root: String,
     #[serde(default)]
     pub host: String,
     #[serde(default)]
@@ -828,7 +836,7 @@ where
             .nth(1)
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| SshError::Protocol(format!("malformed HTTP status line: {status_line}")))?;
-        if status_code != 200 {
+        if !(200..=299).contains(&status_code) {
             return Err(SshError::Protocol(format!(
                 "identity endpoint returned HTTP {status_code}"
             )));
@@ -855,7 +863,14 @@ where
                 "ChemSSH identity returned missing or zero pid".into(),
             ));
         }
-        if !identity.service.is_empty() && !identity.service.eq_ignore_ascii_case("chemssh") {
+        if !identity.app.is_empty() {
+            if !identity.app.eq_ignore_ascii_case("chemssh") {
+                return Err(SshError::Protocol(format!(
+                    "unexpected identity app {:?}",
+                    identity.app
+                )));
+            }
+        } else if !identity.service.is_empty() && !identity.service.eq_ignore_ascii_case("chemssh") {
             return Err(SshError::Protocol(format!(
                 "unexpected identity service {:?}",
                 identity.service
@@ -1054,5 +1069,57 @@ mod tests {
             .unwrap();
         assert_eq!(ident.pid, 4242);
         assert_eq!(ident.service, "chemssh");
+    }
+
+    #[tokio::test]
+    async fn fetch_local_identity_parses_full_chemssh_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req).await.unwrap();
+            let json = r#"{"app":"chemssh","project_version":"1.2.3","pid":9001,"scheduler":"slurm","workspace_root":"/home/user/project"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                json.len(),
+                json
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        let ident = fetch_local_identity("127.0.0.1", addr.port(), None)
+            .await
+            .unwrap();
+        assert_eq!(ident.app, "chemssh");
+        assert_eq!(ident.project_version, "1.2.3");
+        assert_eq!(ident.pid, 9001);
+        assert_eq!(ident.scheduler, "slurm");
+        assert_eq!(ident.workspace_root, "/home/user/project");
+    }
+
+    #[tokio::test]
+    async fn fetch_local_identity_rejects_non_chemssh_app() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 1024];
+            let _ = sock.read(&mut req).await.unwrap();
+            let json = r#"{"app":"other-service","pid":9001}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                json.len(),
+                json
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        let err = fetch_local_identity("127.0.0.1", addr.port(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unexpected identity app"));
     }
 }

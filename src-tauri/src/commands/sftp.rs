@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -15,13 +15,14 @@ use russh_sftp::client::fs::File as SftpRemoteFile;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::State;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::commands::backend::{open_path_in_system, open_text_file_in_system};
 use crate::commands::sessions::{format_ssh_error, load_ssh_credentials};
-use crate::commands::sftp_sync::OpenSyncEvent;
+use crate::commands::sftp_sync::{OpenSyncEvent, MAX_SYNC_FILE_BYTES};
 use crate::state::AppState;
 
 const DEFAULT_DOWNLOAD_BYTES_LIMIT: u64 = 256 * 1024 * 1024;
@@ -129,6 +130,43 @@ impl SftpManager {
     ) -> Result<(Arc<SshConnection>, Arc<SftpSession>), String> {
         let (_, entry) = self.get_entry_with_id(id).await?;
         Ok((entry.connection, entry.sftp))
+    }
+
+    pub(crate) async fn connect_dedicated(
+        &self,
+        state: &AppState,
+        profile: &Profile,
+    ) -> Result<String, String> {
+        let (entry, _) =
+            connect_sftp_for_profile(state, profile, Some(HostKeyPolicy::Strict)).await?;
+        let session_id = new_id();
+        // Dedicated bridge sessions are never registered in `by_profile` so
+        // user-opened SFTP tabs keep their own session mapping untouched.
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), entry);
+        Ok(session_id)
+    }
+
+    pub(crate) async fn is_connected(&self, session_id: &str) -> bool {
+        if session_id.is_empty() {
+            return false;
+        }
+        self.sessions.lock().await.contains_key(session_id)
+    }
+
+    pub(crate) async fn disconnect_session(&self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        let entry = self.sessions.lock().await.remove(session_id);
+        let mut by_profile = self.by_profile.lock().await;
+        by_profile.retain(|_, v| v != session_id);
+        drop(by_profile);
+        if let Some(entry) = entry {
+            entry.connection.disconnect().await;
+        }
     }
 
     pub async fn disconnect_all(&self) {
@@ -402,27 +440,53 @@ pub async fn sftp_delete(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn sftp_open_file(
-    state: State<'_, AppState>,
-    profile_id: String,
-    path: String,
-    as_text: Option<bool>,
-) -> Result<SftpOpenFileResponse, String> {
-    let (session_id, entry) = state.sftp.get_entry_with_id(&profile_id).await?;
-    let safe_segments: Vec<String> = path
-        .split('/')
-        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-        .map(sanitize_filename_segment)
-        .collect();
-    if safe_segments.is_empty() {
-        return Err("invalid remote file path".into());
+pub(crate) fn sftp_open_cache_path(
+    cache_root: &Path,
+    session_id: &str,
+    remote_path: &str,
+) -> Result<PathBuf, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(remote_path.as_bytes());
+    let digest = hasher.finalize();
+    let bucket: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+
+    let raw_name = remote_path
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let safe_name = if raw_name.is_empty() || raw_name == "." || raw_name == ".." {
+        "remote-file".to_string()
+    } else {
+        sanitize_filename_segment(raw_name)
+    };
+    Ok(cache_root.join(bucket).join(safe_name))
+}
+
+pub(crate) async fn cache_sftp_file_for_open(
+    state: &AppState,
+    session_id: &str,
+    remote_path: &str,
+) -> Result<PathBuf, String> {
+    let (resolved_sid, entry) = state.sftp.get_entry_with_id(session_id).await?;
+    let meta = entry
+        .sftp
+        .metadata(remote_path)
+        .await
+        .map_err(|e| format!("stat {remote_path}: {e}"))?;
+    if meta.is_dir() {
+        return Err("cannot open a directory as a file".into());
+    }
+    let size = meta.size.unwrap_or(0);
+    if size > MAX_SYNC_FILE_BYTES {
+        return Err(format!(
+            "file is too large to open with sync (limit 100 MB): {size} bytes"
+        ));
     }
 
-    let mut local_path = state.sftp_cache_dir.join(&session_id);
-    for seg in &safe_segments {
-        local_path = local_path.join(seg);
-    }
+    let local_path = sftp_open_cache_path(&state.sftp_cache_dir, &resolved_sid, remote_path)?;
     if let Some(parent) = local_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -432,7 +496,7 @@ pub async fn sftp_open_file(
     let transfer_id = format!("open-{}", new_id());
     download_file_resumable(
         &entry.sftp,
-        &path,
+        remote_path,
         &local_path,
         &transfer_id,
         false,
@@ -441,11 +505,18 @@ pub async fn sftp_open_file(
     .await
     .map_err(|e| e.to_string())?;
 
-    if as_text.unwrap_or(false) {
-        open_text_file_in_system(&local_path)?;
-    } else {
-        open_path_in_system(&local_path)?;
-    }
+    Ok(local_path)
+}
+
+#[tauri::command]
+pub async fn sftp_open_file(
+    state: State<'_, AppState>,
+    profile_id: String,
+    path: String,
+    as_text: Option<bool>,
+) -> Result<SftpOpenFileResponse, String> {
+    let (session_id, _) = state.sftp.get_entry_with_id(&profile_id).await?;
+    let local_path = cache_sftp_file_for_open(&state, &session_id, &path).await?;
 
     state
         .sftp_sync
@@ -457,6 +528,12 @@ pub async fn sftp_open_file(
             local_path.clone(),
         )
         .await;
+
+    if as_text.unwrap_or(false) {
+        open_text_file_in_system(&local_path)?;
+    } else {
+        open_path_in_system(&local_path)?;
+    }
 
     Ok(SftpOpenFileResponse {
         path: local_path.display().to_string(),
