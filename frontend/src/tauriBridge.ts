@@ -531,6 +531,42 @@ export function resolveTauriCommand(
       },
     }
   }
+  if (pathname === '/api/installer/check' && verb === 'POST') {
+    return {
+      command: 'installer_check',
+      args: {
+        profileId: body.profile_id ?? body.id ?? '',
+        options: body.options ?? {},
+        hostKeyPolicy: resolveHostKeyPolicy(body),
+      },
+    }
+  }
+  if (pathname === '/api/installer/run' && verb === 'POST') {
+    return {
+      command: 'installer_run',
+      args: {
+        profileId: body.profile_id ?? body.id ?? '',
+        options: body.options ?? {},
+        mode: body.mode ?? 'auto',
+        hostKeyPolicy: resolveHostKeyPolicy(body),
+      },
+    }
+  }
+  if (pathname === '/api/installer/status' && verb === 'GET') {
+    return {
+      command: 'installer_status',
+      args: {
+        profileId: params.get('profile_id') ?? '',
+        since: Number(params.get('since') ?? 0) || 0,
+      },
+    }
+  }
+  if (pathname === '/api/installer/apply' && verb === 'POST') {
+    return {
+      command: 'installer_apply_profile',
+      args: { profileId: body.profile_id ?? body.id ?? '', options: body.options ?? {} },
+    }
+  }
   if (pathname === '/api/defaults' && verb === 'GET') {
     return { command: 'profile_defaults' }
   }
@@ -1351,40 +1387,11 @@ export function installTauriNativeDragBridge(): void {
   }
   window.chemsshCancelNativeDragJob = (id: string) =>
     window.chemsshControlNativeDragJob!(id, 'cancel')
-  window.chemsshDragOutFiles = async (payloadJson: string) => {
-    const parsed = JSON.parse(payloadJson) as {
-      id: string
-      session: string
-      paths: string[]
-      staged_local_paths?: string[]
-    }
-    const channel = new Channel<NativeDragJob>()
-    channel.onmessage = job => {
-      window.dispatchEvent(new CustomEvent('chemssh-native-drag-job', { detail: job }))
-    }
-    try {
-      const outcome = await invoke<string>('start_native_drag_out', {
-        request: {
-          id: parsed.id,
-          session: parsed.session,
-          paths: parsed.paths,
-          staged_local_paths: parsed.staged_local_paths ?? [],
-        },
-        onEvent: channel,
-      })
-      window.dispatchEvent(
-        new CustomEvent('chemssh-native-drag-finished', {
-          detail: { id: parsed.id, status: outcome, ok: outcome === 'dropped' },
-        }),
-      )
-    } catch (err) {
-      window.dispatchEvent(
-        new CustomEvent('chemssh-native-drag-finished', {
-          detail: { id: parsed.id, status: String(err), ok: false },
-        }),
-      )
-    }
-  }
+  // Do not expose window.chemsshDragOutFiles here until Tauri supports delayed
+  // SFTP staging during OLE DoDragDrop: invoking start_native_drag_out with
+  // empty staged_local_paths fails immediately and aborts remote file drags
+  // right after long-press arming. Leaving it unset falls back cleanly to the
+  // built-in HTML5 drag-and-drop flow (same-pane move & cross-pane transfer).
 }
 
 export function tauriFileIconURL(name: string, isDir: boolean, size = 16): string {

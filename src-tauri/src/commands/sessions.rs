@@ -300,6 +300,15 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// True while the profile has a ChemSSH session that is starting or running.
+    pub(crate) async fn is_profile_running(&self, profile_id: &str) -> bool {
+        let session = self.sessions.lock().await.get(profile_id).cloned();
+        match session {
+            Some(session) => session.status.lock().await.running,
+            None => false,
+        }
+    }
+
     async fn ensure_log_tx(&self, profile_id: &str) -> broadcast::Sender<(u64, String)> {
         let mut txs = self.log_txs.lock().await;
         txs.entry(profile_id.to_string())

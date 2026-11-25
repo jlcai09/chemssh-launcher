@@ -118,6 +118,25 @@ Profile 保存在本机，分为远程 profile 和本地 profile。保存后的�
 
 本地 profile 中，`Local Host`、`Local Port`、`Local URL Path`、`Pre-start Commands` 和 `Start Command` 描述本机 ChemSSH 进程。如果 health URL 已经可访问，Launcher 会直接复用；否则会用 Windows PowerShell 或 Unix-like 系统的 `sh -c` 执行配置的本地启动命令。
 
+## 一键安装与更新 ChemSSH
+
+打开已保存的远程 Profile，在 **ChemSSH 安装与更新** 区域操作。启动器通过 SSH 连接服务器，读取 ChemSSH 仓库最新 GitHub Release 中的 `latest.json`，并在服务器上运行安装脚本：
+
+```text
+~/.chemssh/
+  app/           程序文件（backend、frontend/dist、plugins），原地覆盖
+  .venv/         虚拟环境，只创建一次，不会被移动
+  config.yaml    你的配置，永不覆盖
+  install.json   已安装版本与依赖指纹
+```
+
+- **安装**：下载 Release 压缩包并校验 sha256，创建 `.venv` 并安装依赖（`pip install -e .`）。
+- **更新**：`latest.json` 中的依赖指纹与已安装版本一致时，只替换程序文件；否则在现有 `.venv` 中重装依赖。更新失败会恢复原文件。只保留一个版本。
+- **修复**：从零重建 `.venv`。虚拟环境绑定其绝对路径，不能改名或搬运。
+- 更新前请先停止该 Profile 上运行的 ChemSSH。点击 **应用到此服务器** 可把前置命令和启动命令指向已安装的副本，修改前会先确认。
+
+下载顺序：服务器直接从 GitHub 下载（Profile 启用本机网络代理时走代理）；可额外配置下载加速前缀作为第二来源；服务器完全无法下载时，启动器在本机下载压缩包（需要 `curl`）并通过 SFTP 上传。校验值始终来自官方 GitHub Release。
+
 ## 默认启动命令
 
 默认远程 `Start Command` 假设服务器有 `bash`、项目 `.venv` 和可用的 `chemssh` 命令：

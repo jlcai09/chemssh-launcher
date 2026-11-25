@@ -537,6 +537,53 @@ impl SshConnection {
         Ok(exit_code)
     }
 
+    /// Runs `command`, feeds `stdin_bytes` (then EOF) and streams stdout/stderr chunks to
+    /// `output_tx` until the command exits. Used for long-running scripts such as the installer.
+    pub async fn exec_streaming_stdin(
+        &self,
+        command: &str,
+        stdin_bytes: &[u8],
+        output_tx: mpsc::Sender<String>,
+    ) -> Result<Option<u32>, SshError> {
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| SshError::Exec(format!("open session channel: {e}")))?;
+        let (mut read_half, write_half) = channel.split();
+        write_half
+            .exec(true, command.as_bytes().to_vec())
+            .await
+            .map_err(|e| SshError::Exec(format!("exec command: {e}")))?;
+        if !stdin_bytes.is_empty() {
+            write_half
+                .data_bytes(stdin_bytes.to_vec())
+                .await
+                .map_err(|e| SshError::Exec(format!("write command stdin: {e}")))?;
+        }
+        write_half
+            .eof()
+            .await
+            .map_err(|e| SshError::Exec(format!("send command eof: {e}")))?;
+
+        let mut exit_code = None;
+        while let Some(msg) = read_half.wait().await {
+            match msg {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    let _ = output_tx.send(text).await;
+                }
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
+                ChannelMsg::Failure => {
+                    return Err(SshError::Exec("remote command execution rejected".into()));
+                }
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        Ok(exit_code)
+    }
+
     pub async fn start_remote_process(
         &self,
         command: &str,

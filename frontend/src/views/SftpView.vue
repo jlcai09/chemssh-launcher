@@ -4223,11 +4223,25 @@ function hasNativeAppDrag() {
 // The pending marker is the only way to tell it apart from a real file upload
 // while the cursor is over the page, because getData() is unavailable then.
 function hasAppDrag(event: DragEvent) {
-  return hasNativeAppDrag() || Array.from(event.dataTransfer?.types || []).includes(appDragType)
+  return (
+    hasNativeAppDrag() ||
+    dragging.value !== null ||
+    Array.from(event.dataTransfer?.types || []).includes(appDragType)
+  )
 }
 
 function isExternalFileDrag(event: DragEvent) {
-  return hasExternalFiles(event) && !hasNativeAppDrag()
+  return hasExternalFiles(event) && !hasNativeAppDrag() && dragging.value === null
+}
+
+function resolveMoveDropEffect(event: DragEvent): 'copy' | 'move' {
+  if (hasNativeAppDrag()) {
+    const allowed = event.dataTransfer?.effectAllowed || ''
+    if (allowed && !allowed.toLowerCase().includes('move') && allowed !== 'all' && allowed !== 'uninitialized') {
+      return 'copy'
+    }
+  }
+  return 'move'
 }
 
 function isFolderDropTarget(paneName: PaneName, entry: FileEntry) {
@@ -4273,7 +4287,7 @@ function startFileDrag(paneName: PaneName, index: number, entry: FileEntry, even
   // ChemSSH itself does. Only one DownloadURL is honoured, so this is the
   // single-file and browser-only path; multi-file drags were handed to the host
   // at arm time.
-  const external = items.length === 1 && !items[0].is_dir ? externalDownloadURL(tab, items[0]) : ''
+  const external = !isTauriRuntime() && items.length === 1 && !items[0].is_dir ? externalDownloadURL(tab, items[0]) : ''
   if (external) {
     event.dataTransfer.setData('DownloadURL', `${externalDownloadMime}:${sanitizeDownloadName(items[0].name)}:${external}`)
   }
@@ -4431,7 +4445,10 @@ function handleFolderDragOver(paneName: PaneName, entry: FileEntry, event: DragE
   event.preventDefault()
   event.stopPropagation()
   folderDropTarget.value = { pane: paneName, path: entry.path }
-  if (event.dataTransfer) event.dataTransfer.dropEffect = external || payload?.pane !== paneName ? 'copy' : 'move'
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect =
+      external || payload?.pane !== paneName ? 'copy' : resolveMoveDropEffect(event)
+  }
 }
 
 function handleFolderDragLeave(paneName: PaneName, entry: FileEntry, event: DragEvent) {
@@ -4510,7 +4527,7 @@ function handleParentDragOver(paneName: PaneName, event: DragEvent) {
   event.preventDefault()
   event.stopPropagation()
   folderDropTarget.value = { pane: paneName, path: parent.path }
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  if (event.dataTransfer) event.dataTransfer.dropEffect = resolveMoveDropEffect(event)
 }
 
 function handleParentDragLeave(paneName: PaneName, event: DragEvent) {
@@ -4690,24 +4707,57 @@ async function moveEntriesToFolderPath(paneName: PaneName, payload: DragPayload,
     })
   if (entries.length === 0) return
 
-  let existingNames: Set<string>
+  let existingItems: Map<string, FileEntry>
   try {
     const listing = await listTabDirectory(tab, targetPath)
-    existingNames = new Set(listing.entries.map(entry => entry.name))
+    existingItems = new Map(listing.entries.map(entry => [entry.name, entry] as const))
   } catch (error) {
     ElMessage.error((error as Error).message)
     return
   }
 
-  const blocked = entries.filter(entry => existingNames.has(entry.name))
-  const movable = entries.filter(entry => !existingNames.has(entry.name))
-  if (blocked.length > 0) {
-    ElMessage.warning(t('sftp.moveSkipped', { names: blocked.map(entry => entry.name).join(t('sftp.listSeparator')) }))
+  const planned: { entry: FileEntry; targetName: string; replaceExisting: FileEntry | null }[] = []
+  let applyAllAction: UploadConflictAction | null = null
+  for (const entry of entries) {
+    const existing = existingItems.get(entry.name) ?? null
+    let action: UploadConflictAction = 'overwrite'
+    if (existing) {
+      const resolution: UploadConflictResolution = applyAllAction
+        ? { action: applyAllAction, applyAll: true }
+        : await promptConflict(entry.name)
+      if (resolution.applyAll) applyAllAction = resolution.action
+      action = resolution.action
+    }
+    if (action === 'cancel') return
+    if (action === 'skip') continue
+    const targetName = action === 'suffix' ? uniqueSuffixedName(entry.name, existingItems) : entry.name
+    const replaceExisting = action === 'overwrite' ? existing : null
+    existingItems.set(targetName, {
+      name: targetName,
+      path: joinPath(targetPath, targetName, tab.kind),
+      is_dir: entry.is_dir,
+      size: entry.size,
+      mode: entry.mode,
+      mod_time: entry.mod_time
+    })
+    planned.push({ entry, targetName, replaceExisting })
   }
+
   let moved = 0
-  for (const entry of movable) {
-    const newPath = joinPath(targetPath, entry.name, tab.kind)
+  for (const { entry, targetName, replaceExisting } of planned) {
+    const newPath = joinPath(targetPath, targetName, tab.kind)
     try {
+      if (replaceExisting) {
+        if (tab.kind === 'local') {
+          await postJSON('/api/local/delete', { path: replaceExisting.path })
+        } else {
+          await postJSON('/api/sftp/delete', {
+            session: tab.session,
+            path: replaceExisting.path,
+            is_dir: replaceExisting.is_dir
+          })
+        }
+      }
       if (tab.kind === 'local') {
         await postJSON('/api/local/rename', { path: entry.path, new_path: newPath })
       } else {

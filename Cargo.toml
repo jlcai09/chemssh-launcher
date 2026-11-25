@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core-config",
     "crates/core-secret",
+    "crates/core-installer",
     "crates/core-ssh",
     "crates/core-transfer",
     "crates/core-session",

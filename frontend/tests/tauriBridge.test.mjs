@@ -286,3 +286,29 @@ test('createSessionLogCursor deduplicates channel push and poll fallback batches
     { lines: ['tail-1', 'tail-2'], isReplay: true },
   ])
 })
+
+test('maps installer routes to Tauri commands', () => {
+  assert.deepEqual(
+    resolveTauriCommand('/api/installer/check', 'POST', {
+      profile_id: 'p1',
+      options: { install_dir: '~/.chemssh' },
+      accept_host_key: true,
+    }),
+    {
+      command: 'installer_check',
+      args: { profileId: 'p1', options: { install_dir: '~/.chemssh' }, hostKeyPolicy: 'accept_new' },
+    },
+  )
+  assert.deepEqual(resolveTauriCommand('/api/installer/run', 'POST', { profile_id: 'p1', mode: 'repair' }), {
+    command: 'installer_run',
+    args: { profileId: 'p1', options: {}, mode: 'repair', hostKeyPolicy: null },
+  })
+  assert.deepEqual(resolveTauriCommand('/api/installer/status?profile_id=p1&since=7', 'GET'), {
+    command: 'installer_status',
+    args: { profileId: 'p1', since: 7 },
+  })
+  assert.deepEqual(resolveTauriCommand('/api/installer/apply', 'POST', { profile_id: 'p1' }), {
+    command: 'installer_apply_profile',
+    args: { profileId: 'p1', options: {} },
+  })
+})

@@ -12,6 +12,7 @@ use crate::chemssh_bridge::ChemSshBridgeManager;
 use crate::chemssh_proxy::{bind_proxy_listener, generate_api_token};
 use crate::client_identity::ClientIdentityStore;
 use crate::commands::sessions::SessionManager;
+use crate::commands::installer::InstallerManager;
 use crate::commands::sftp::SftpManager;
 use crate::commands::sftp_sync::SftpOpenSyncManager;
 use crate::commands::terminal::TerminalManager;
@@ -64,6 +65,7 @@ pub struct AppState {
     pub launcher_logs: Arc<LauncherLogStore>,
     pub client_identity: Arc<ClientIdentityStore>,
     pub chemssh_bridge: Arc<ChemSshBridgeManager>,
+    pub installer: Arc<InstallerManager>,
     pub proxy_base_url: String,
     pub api_token: String,
     pub proxy_listener: Arc<Mutex<Option<TcpListener>>>,
@@ -95,6 +97,7 @@ impl AppState {
             launcher_logs: Arc::new(LauncherLogStore::default()),
             client_identity: Arc::new(ClientIdentityStore::new(client_identity_path)),
             chemssh_bridge: Arc::new(ChemSshBridgeManager::new()),
+            installer: Arc::new(InstallerManager::default()),
             proxy_base_url,
             api_token: generate_api_token(),
             proxy_listener: Arc::new(Mutex::new(Some(listener))),
@@ -127,6 +130,7 @@ impl AppState {
             launcher_logs: Arc::new(LauncherLogStore::default()),
             client_identity: Arc::new(ClientIdentityStore::new(client_identity_path)),
             chemssh_bridge: Arc::new(ChemSshBridgeManager::new()),
+            installer: Arc::new(InstallerManager::default()),
             proxy_base_url: String::new(),
             api_token: generate_api_token(),
             proxy_listener: Arc::new(Mutex::new(None)),

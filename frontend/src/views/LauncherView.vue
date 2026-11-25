@@ -218,6 +218,8 @@
             </el-form-item>
           </section>
 
+          <InstallerPanel v-if="!isLocalProfile" :profile-id="current.id" @applied="handleInstallerApplied" />
+
           <details class="form-section form-section-collapsible">
             <summary class="form-section-summary">
               <span class="form-section-title">{{ t('launcher.otherSettings') }}</span>
@@ -431,6 +433,7 @@ import { createAutoScroll } from '../autoScroll'
 import { confirmHostKey, hostKeyFromError } from '../hostKey'
 import { t } from '../i18n'
 import { notifyProfilesChanged } from '../profileEvents'
+import InstallerPanel from './InstallerPanel.vue'
 
 type SessionPhase = 'stopped' | 'starting' | 'ready' | 'paused' | 'failed'
 
@@ -695,6 +698,12 @@ function setProfileKind(kind: string | number | boolean) {
 function profileSummary(profile: Partial<Profile>) {
   if (profile.kind === 'local') return `${t('launcher.kindLocal')} · ${profile.local_host || '127.0.0.1'}:${profile.local_port || 8888}`
   return `${profile.ssh_user || '?'}@${profile.ssh_host || '?'}`
+}
+
+async function handleInstallerApplied(profile: Profile) {
+  applyProfile(profile)
+  await loadProfiles()
+  notifyProfilesChanged()
 }
 
 function snapshotDraft() {

@@ -533,6 +533,7 @@ dependencies = [
  "bytes",
  "chrono",
  "core-config",
+ "core-installer",
  "core-secret",
  "core-session",
  "core-ssh",
@@ -689,6 +690,16 @@ dependencies = [
  "bitflags 2.13.2",
  "core-foundation 0.10.1",
  "libc",
+]
+
+[[package]]
+name = "core-installer"
+version = "0.4.0"
+dependencies = [
+ "core-config",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

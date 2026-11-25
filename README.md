@@ -118,6 +118,25 @@ Local profiles are for local ChemSSH debugging. They do not use SSH, do not crea
 
 For a local profile, `Local Host`, `Local Port`, `Local URL Path`, `Pre-start Commands`, and `Start Command` describe a local ChemSSH process. If the local health URL is already reachable, the launcher reuses it. Otherwise it runs the configured local command with PowerShell on Windows or `sh -c` on Unix-like systems.
 
+## One-Click ChemSSH Install And Update
+
+Open a saved remote profile and use the **ChemSSH installation** section. The launcher connects over SSH, reads `latest.json` from the latest GitHub release of the ChemSSH repository, and runs an installer script on the server:
+
+```text
+~/.chemssh/
+  app/           application files (backend, frontend/dist, plugins), replaced in place
+  .venv/         virtual environment, created once and never moved
+  config.yaml    your configuration, never overwritten
+  install.json   installed version and dependency fingerprint
+```
+
+- **Install**: downloads the release archive, verifies its sha256, creates `.venv` and installs the dependencies (`pip install -e .`).
+- **Update**: if the dependency fingerprint in `latest.json` equals the installed one, only the application files are replaced. Otherwise the dependencies are reinstalled in the existing `.venv`. A failed update restores the previous files. Only one version is kept.
+- **Repair**: rebuilds `.venv` from scratch. A virtual environment is bound to its absolute path and must not be renamed or moved.
+- Stop the running ChemSSH of the profile before updating. Use **Use for this server** to point the profile's pre-start and start commands at the installed copy; it asks before changing anything.
+
+Download order: the server downloads from GitHub directly (through the local network proxy when the profile enables it); an optional proxy prefix can be configured as a second source; if the server cannot download at all, the launcher downloads the archive on this computer (needs `curl`) and uploads it over SFTP. The checksum always comes from the official GitHub release.
+
 ## Default Start Command
 
 The default remote start command assumes the server has `bash`, a project `.venv`, and a `chemssh` command available:

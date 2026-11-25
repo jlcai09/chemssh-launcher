@@ -16,6 +16,7 @@ base64 = "0.22"
 bytes = "1"
 chrono = "0.4"
 core-config = { path = "../crates/core-config" }
+core-installer = { path = "../crates/core-installer" }
 core-secret = { path = "../crates/core-secret" }
 core-session = { path = "../crates/core-session" }
 core-ssh = { path = "../crates/core-ssh" }

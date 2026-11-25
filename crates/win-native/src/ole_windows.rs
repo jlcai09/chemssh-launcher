@@ -10,7 +10,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, OleInitialize, OleUninitialize, DROPEFFECT,
-    DROPEFFECT_COPY,
+    DROPEFFECT_COPY, DROPEFFECT_MOVE,
 };
 use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::Shell::{ILFree, SHCreateDataObject, SHParseDisplayName};
@@ -107,7 +107,12 @@ pub fn start_shell_file_drag(
 
     let hr = unsafe {
         let _ = hwnd;
-        DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut performed_effect)
+        DoDragDrop(
+            &data_object,
+            &drop_source,
+            DROPEFFECT_COPY | DROPEFFECT_MOVE,
+            &mut performed_effect,
+        )
     };
 
     if hr == DRAGDROP_S_DROP && performed_effect.0 != 0 {
