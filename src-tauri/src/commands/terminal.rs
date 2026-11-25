@@ -493,7 +493,9 @@ impl TerminalManager {
     /// probe active SSH terminals so half-open sockets fail fast instead of
     /// hanging for a full keepalive cycle.
     pub fn spawn_sleep_wake_monitor(self: Arc<Self>, launcher_logs: Arc<LauncherLogStore>) {
-        tokio::spawn(async move {
+        // Must use `tauri::async_runtime::spawn` because `.setup()` runs on the
+        // main thread outside a Tokio runtime context (where `tokio::spawn` panics).
+        tauri::async_runtime::spawn(async move {
             let mut last_wall = SystemTime::now();
             loop {
                 tokio::time::sleep(WAKE_CHECK_INTERVAL).await;
@@ -922,5 +924,13 @@ mod tests {
         let events = dead.wire_events_after(0);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "exit");
+    }
+
+    #[test]
+    fn spawn_sleep_wake_monitor_works_outside_tokio_runtime() {
+        let mgr = Arc::new(TerminalManager::default());
+        let logs = Arc::new(LauncherLogStore::default());
+        // Regression test: `.setup()` invokes this synchronously on the main thread.
+        mgr.spawn_sleep_wake_monitor(logs);
     }
 }
