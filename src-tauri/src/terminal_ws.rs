@@ -331,8 +331,21 @@ pub async fn handle_terminal_ws(mut req: Request<Incoming>, state: &AppState) ->
                 frame_res = read_ws_frame(&mut rd) => {
                     match frame_res {
                         Ok(Some((WS_OP_BINARY, payload))) => {
-                            if !payload.is_empty() {
-                                let _ = active.send_input(payload);
+                            if !payload.is_empty()
+                                && matches!(
+                                    active.send_input(payload),
+                                    core_ssh::SendInputResult::Closed
+                                )
+                            {
+                                if let Some(ev) = active.push_exit(
+                                    None,
+                                    "terminal session closed".to_string(),
+                                ) {
+                                    let frame = encode_raw_terminal_frame(&ev);
+                                    let _ = write_ws_frame(&mut wr, WS_OP_BINARY, &frame).await;
+                                }
+                                let _ = write_ws_frame(&mut wr, WS_OP_CLOSE, &[]).await;
+                                break;
                             }
                         }
                         Ok(Some((WS_OP_TEXT, payload))) => {

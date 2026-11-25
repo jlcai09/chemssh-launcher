@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -15,14 +15,18 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinSet;
 
 use crate::commands::sessions::{format_ssh_error, load_ssh_credentials};
-use crate::state::AppState;
+use crate::state::{AppState, LauncherLogStore};
 
 const MAX_TERMINAL_EVENTS: usize = 4096;
 const MAX_TERMINAL_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 const EXITED_SESSION_GRACE: Duration = Duration::from_secs(15);
 const OUTPUT_COALESCE_CAP: usize = 32 * 1024;
+const WAKE_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+const WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const WAKE_JUMP_THRESHOLD: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WireTerminalEvent {
@@ -110,6 +114,7 @@ struct RawTerminalHub {
     next_seq: u64,
     total_bytes: usize,
     next_sub_id: u64,
+    exited: bool,
     subscriber: Option<(u64, mpsc::UnboundedSender<RawTerminalEvent>)>,
 }
 
@@ -120,6 +125,7 @@ impl Default for RawTerminalHub {
             next_seq: 1,
             total_bytes: 0,
             next_sub_id: 1,
+            exited: false,
             subscriber: None,
         }
     }
@@ -155,13 +161,17 @@ impl RawTerminalHub {
         self.push_event(RawTerminalEvent::Output { seq, data })
     }
 
-    fn push_exit(&mut self, status: Option<u32>, reason: String) -> RawTerminalEvent {
+    fn push_exit(&mut self, status: Option<u32>, reason: String) -> Option<RawTerminalEvent> {
+        if self.exited {
+            return None;
+        }
+        self.exited = true;
         let seq = self.next_seq;
-        self.push_event(RawTerminalEvent::Exit {
+        Some(self.push_event(RawTerminalEvent::Exit {
             seq,
             status,
             reason,
-        })
+        }))
     }
 
     fn events_after(&self, cursor: u64) -> Vec<RawTerminalEvent> {
@@ -229,9 +239,37 @@ impl ActiveTerminal {
         guard.push_output(data)
     }
 
-    fn push_exit(&self, status: Option<u32>, reason: String) -> RawTerminalEvent {
+    pub(crate) fn push_exit(&self, status: Option<u32>, reason: String) -> Option<RawTerminalEvent> {
         let mut guard = self.hub.lock().expect("terminal hub lock poisoned");
         guard.push_exit(status, reason)
+    }
+
+    pub(crate) fn has_exited(&self) -> bool {
+        self.hub
+            .lock()
+            .expect("terminal hub lock poisoned")
+            .exited
+    }
+
+    async fn probe_alive(&self, timeout: Duration) -> bool {
+        if self.has_exited() {
+            return false;
+        }
+        match &self.endpoint {
+            TerminalEndpoint::Pty { connection, .. } => connection.probe_alive(timeout).await,
+            TerminalEndpoint::Mock { input_tx, .. } => !input_tx.is_closed(),
+        }
+    }
+
+    async fn mark_dead_and_disconnect(&self, reason: String) {
+        let _ = self.push_exit(None, reason);
+        if let TerminalEndpoint::Pty {
+            shell, connection, ..
+        } = &self.endpoint
+        {
+            shell.close();
+            connection.disconnect().await;
+        }
     }
 
     #[cfg(test)]
@@ -393,6 +431,101 @@ impl TerminalManager {
             .into_iter()
             .filter_map(|(sid, cursor)| guard.get(&sid).cloned().map(|t| (sid, cursor, t)))
             .collect()
+    }
+
+    /// Probes active terminal SSH connections concurrently and immediately marks
+    /// dead/half-open sessions (such as after OS sleep/wake) as exited.
+    pub async fn probe_and_prune_dead(
+        &self,
+        session_ids: Option<Vec<String>>,
+        timeout: Duration,
+    ) -> Vec<String> {
+        let mut dead_ids = Vec::new();
+        let targets: Vec<(String, Arc<ActiveTerminal>)> = {
+            let Ok(guard) = self.terminals.read() else {
+                return dead_ids;
+            };
+            match session_ids {
+                Some(ids) => {
+                    let mut found = Vec::with_capacity(ids.len());
+                    for id in ids {
+                        if let Some(active) = guard.get(&id) {
+                            found.push((id, Arc::clone(active)));
+                        } else {
+                            dead_ids.push(id);
+                        }
+                    }
+                    found
+                }
+                None => guard
+                    .iter()
+                    .map(|(id, active)| (id.clone(), Arc::clone(active)))
+                    .collect(),
+            }
+        };
+
+        let mut join_set = JoinSet::new();
+        for (id, active) in targets {
+            join_set.spawn(async move {
+                let alive = active.probe_alive(timeout).await;
+                if !alive {
+                    active
+                        .mark_dead_and_disconnect(
+                            "SSH connection lost (keepalive timeout)".to_string(),
+                        )
+                        .await;
+                    Some(id)
+                } else {
+                    None
+                }
+            });
+        }
+
+        while let Some(res) = join_set.join_next().await {
+            if let Ok(Some(dead_id)) = res {
+                dead_ids.push(dead_id);
+            }
+        }
+        dead_ids
+    }
+
+    /// Watches wall-clock jumps to detect OS sleep/wake cycles and proactively
+    /// probe active SSH terminals so half-open sockets fail fast instead of
+    /// hanging for a full keepalive cycle.
+    pub fn spawn_sleep_wake_monitor(self: Arc<Self>, launcher_logs: Arc<LauncherLogStore>) {
+        tokio::spawn(async move {
+            let mut last_wall = SystemTime::now();
+            loop {
+                tokio::time::sleep(WAKE_CHECK_INTERVAL).await;
+                let now_wall = SystemTime::now();
+                let jumped = now_wall
+                    .duration_since(last_wall)
+                    .unwrap_or(Duration::ZERO);
+                last_wall = now_wall;
+
+                if jumped >= WAKE_JUMP_THRESHOLD {
+                    let has_any = self
+                        .terminals
+                        .read()
+                        .map(|g| !g.is_empty())
+                        .unwrap_or(false);
+                    if !has_any {
+                        continue;
+                    }
+                    launcher_logs.push(format!(
+                        "[terminal] system wake detected (wall-clock jump {}s); probing active SSH terminals",
+                        jumped.as_secs()
+                    ));
+                    let dead = self.probe_and_prune_dead(None, WAKE_PROBE_TIMEOUT).await;
+                    if !dead.is_empty() {
+                        launcher_logs.push(format!(
+                            "[terminal] pruned {} dead SSH terminal(s) after wake",
+                            dead.len()
+                        ));
+                    }
+                }
+            }
+        });
     }
 
     pub async fn close_all(&self) {
@@ -606,7 +739,7 @@ pub async fn open_terminal(
                             Err(_) => break,
                         }
                     }
-                    let raw_ev = active_for_task.push_output(bytes);
+                    let raw_ev = Some(active_for_task.push_output(bytes));
                     (false, raw_ev, deferred_exit)
                 }
                 TerminalEvent::Exit { status, reason } => {
@@ -615,13 +748,16 @@ pub async fn open_terminal(
                 }
             };
             // Skip Base64 + WebView eval completely when the direct binary WebSocket is attached.
-            if !active_for_task.is_ws_active() {
-                let _ = on_event.send(raw_ev.to_wire());
+            if let Some(ev) = raw_ev {
+                if !active_for_task.is_ws_active() {
+                    let _ = on_event.send(ev.to_wire());
+                }
             }
             if let Some(TerminalEvent::Exit { status, reason }) = pending_exit {
-                let exit_ev = active_for_task.push_exit(status, reason);
-                if !active_for_task.is_ws_active() {
-                    let _ = on_event.send(exit_ev.to_wire());
+                if let Some(exit_ev) = active_for_task.push_exit(status, reason) {
+                    if !active_for_task.is_ws_active() {
+                        let _ = on_event.send(exit_ev.to_wire());
+                    }
                 }
                 break;
             }
@@ -742,4 +878,49 @@ pub async fn close_terminal(state: State<'_, AppState>, session_id: String) -> R
         active.cleanup_resources().await;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn probe_terminal_sessions(
+    state: State<'_, AppState>,
+    session_ids: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    Ok(state
+        .terminals
+        .probe_and_prune_dead(session_ids, WAKE_PROBE_TIMEOUT)
+        .await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn probe_and_prune_dead_marks_closed_and_missing_sessions_and_keeps_live_ones() {
+        let mgr = TerminalManager::default();
+        let (live, _live_in_rx, _live_rz_rx) = mgr.insert_mock("live-1".to_string());
+        let (dead, dead_in_rx, _dead_rz_rx) = mgr.insert_mock("dead-1".to_string());
+        drop(dead_in_rx);
+
+        let mut pruned = mgr
+            .probe_and_prune_dead(
+                Some(vec![
+                    "live-1".to_string(),
+                    "dead-1".to_string(),
+                    "missing-1".to_string(),
+                ]),
+                Duration::from_millis(200),
+            )
+            .await;
+        pruned.sort();
+        assert_eq!(pruned, vec!["dead-1".to_string(), "missing-1".to_string()]);
+        assert!(!live.has_exited());
+        assert!(dead.has_exited());
+
+        // Second exit push is idempotent and does not duplicate Exit events.
+        assert!(dead.push_exit(None, "duplicate".into()).is_none());
+        let events = dead.wire_events_after(0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "exit");
+    }
 }

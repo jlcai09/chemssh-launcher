@@ -155,6 +155,8 @@ impl PreparedPtyChannel {
         }
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<ShellControl>();
+        let writer_failed = Arc::new(tokio::sync::Notify::new());
+        let writer_failed_tx = Arc::clone(&writer_failed);
         let write_half = self.write_half;
         let mut read_half = self.read_half;
 
@@ -181,6 +183,7 @@ impl PreparedPtyChannel {
                             }
                         }
                         if !bytes.is_empty() && write_half.data_bytes(bytes).await.is_err() {
+                            writer_failed_tx.notify_one();
                             break;
                         }
                     }
@@ -205,36 +208,48 @@ impl PreparedPtyChannel {
         tokio::spawn(async move {
             let mut exit_status: Option<u32> = None;
             let mut exit_signal: Option<String> = None;
+            let mut write_aborted = false;
 
-            while let Some(msg) = read_half.wait().await {
-                match msg {
-                    ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                        if !data.is_empty()
-                            && event_tx.send(TerminalEvent::Output(data.to_vec())).is_err()
-                        {
-                            break;
+            loop {
+                tokio::select! {
+                    msg_opt = read_half.wait() => {
+                        let Some(msg) = msg_opt else { break; };
+                        match msg {
+                            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                                if !data.is_empty()
+                                    && event_tx.send(TerminalEvent::Output(data.to_vec())).is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            ChannelMsg::ExitStatus { exit_status: code } => {
+                                exit_status = Some(code);
+                            }
+                            ChannelMsg::ExitSignal {
+                                signal_name,
+                                error_message,
+                                ..
+                            } => {
+                                exit_signal = Some(if error_message.trim().is_empty() {
+                                    format!("{signal_name:?}")
+                                } else {
+                                    format!("{signal_name:?}: {error_message}")
+                                });
+                            }
+                            ChannelMsg::Close => break,
+                            ChannelMsg::Eof | _ => {}
                         }
                     }
-                    ChannelMsg::ExitStatus { exit_status: code } => {
-                        exit_status = Some(code);
+                    _ = writer_failed.notified() => {
+                        write_aborted = true;
+                        break;
                     }
-                    ChannelMsg::ExitSignal {
-                        signal_name,
-                        error_message,
-                        ..
-                    } => {
-                        exit_signal = Some(if error_message.trim().is_empty() {
-                            format!("{signal_name:?}")
-                        } else {
-                            format!("{signal_name:?}: {error_message}")
-                        });
-                    }
-                    ChannelMsg::Close => break,
-                    ChannelMsg::Eof | _ => {}
                 }
             }
 
-            let reason = if let Some(sig) = exit_signal {
+            let reason = if write_aborted {
+                "shell write failed: connection lost".to_string()
+            } else if let Some(sig) = exit_signal {
                 format!("terminated by signal {sig}")
             } else if let Some(code) = exit_status {
                 format!("shell exited with status {code}")

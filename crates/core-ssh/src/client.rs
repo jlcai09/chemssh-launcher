@@ -237,7 +237,7 @@ impl SshConnection {
     ) -> Result<Self, SshError> {
         let mut config = Config::default();
         config.inactivity_timeout = Some(Duration::from_secs(300));
-        config.keepalive_interval = Some(Duration::from_secs(20));
+        config.keepalive_interval = Some(Duration::from_secs(10));
         config.keepalive_max = 3;
         config.nodelay = true;
         if let Some(preferred_keys) = verifier.preferred_key_algorithms() {

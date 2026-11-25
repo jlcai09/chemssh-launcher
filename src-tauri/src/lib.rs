@@ -71,6 +71,8 @@ pub fn run() {
         })
         .setup(move |app| {
             let proxy_state = app.state::<AppState>().inner().clone();
+            Arc::clone(&proxy_state.terminals)
+                .spawn_sleep_wake_monitor(Arc::clone(&proxy_state.launcher_logs));
             if let Some(listener) = proxy_state
                 .proxy_listener
                 .lock()
@@ -149,6 +151,7 @@ pub fn run() {
             commands::terminal::send_terminal_input,
             commands::terminal::resize_terminal,
             commands::terminal::close_terminal,
+            commands::terminal::probe_terminal_sessions,
             commands::local_fs::get_local_home,
             commands::local_fs::local_list,
             commands::local_fs::local_mkdir_cmd,

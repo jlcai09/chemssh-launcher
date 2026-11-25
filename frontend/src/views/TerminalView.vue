@@ -436,7 +436,12 @@ import {
 import { t } from '../i18n'
 import { onProfilesChanged } from '../profileEvents'
 import { isTerminalDirectory, terminalUploadDirectory } from '../terminalDirectory'
-import { downloadRemoteFileViaTauri, isTauriRuntime, uploadFormViaTauri } from '../tauriBridge'
+import {
+  downloadRemoteFileViaTauri,
+  isTauriRuntime,
+  probeTauriTerminalSessions,
+  uploadFormViaTauri
+} from '../tauriBridge'
 
 const props = defineProps<{ active: boolean }>()
 
@@ -2586,6 +2591,25 @@ async function connect(tab: TerminalTab, cdPath = '', options: { resume?: boolea
   }
 }
 
+function handleSessionEnded(tab: TerminalTab, id: string, autoReconnectOnWake: boolean) {
+  const runtime = runtimeFor(tab)
+  if (!runtime || runtime.disposed || tab.status !== 'connected' || runtime.sessionID !== id) return
+  tab.status = 'idle'
+  runtime.sessionID = ''
+  runtime.pendingInput = ''
+  resetStreamState(tab)
+  resetSftpPanelData(tab)
+  writeNotice(tab, t('terminal.sessionEnded'))
+  releaseSftpIfIdle(tab)
+  if (autoReconnectOnWake && tab.wasConnected && navigator.onLine !== false) {
+    window.setTimeout(() => {
+      if (!viewDisposed && !runtime.disposed && tab.status === 'idle') {
+        void reconnect(tab)
+      }
+    }, 600)
+  }
+}
+
 // Output arrives over the shared app events channel. One websocket carries
 // every terminal, so opening more tabs no longer consumes one HTTP connection
 // each; the hub replays buffered output when the channel reconnects.
@@ -2612,14 +2636,8 @@ function attachTerminalOutput(tab: TerminalTab, id: string) {
       writeNotice(tab, t('terminal.outputGap'))
     },
     onExit: () => {
-      if (runtime.disposed || tab.status !== 'connected' || runtime.sessionID !== id) return
-      tab.status = 'idle'
-      runtime.sessionID = ''
-      runtime.pendingInput = ''
-      resetStreamState(tab)
-      resetSftpPanelData(tab)
-      writeNotice(tab, t('terminal.sessionEnded'))
-      releaseSftpIfIdle(tab)
+      const recentWake = Date.now() - lastWakeDetectedAt < 15000
+      handleSessionEnded(tab, id, recentWake)
     }
   })
 }
@@ -2745,6 +2763,65 @@ watch(() => props.active, async active => {
   activateCurrentTerminal()
 })
 
+const WAKE_CLOCK_POLL_MS = 3000
+const WAKE_CLOCK_JUMP_MS = 12000
+const WAKE_HIDDEN_THRESHOLD_MS = 10000
+const WAKE_PROBE_COOLDOWN_MS = 4000
+let wakeClockTimer: number | undefined
+let lastWakeClockAt = Date.now()
+let hiddenAt = 0
+let lastWakeProbeAt = 0
+let lastWakeDetectedAt = 0
+let wakeProbeInFlight = false
+
+async function probeConnectedTerminalsOnWake(autoReconnect: boolean) {
+  if (viewDisposed || !isTauriRuntime() || wakeProbeInFlight) return
+  const now = Date.now()
+  if (now - lastWakeProbeAt < WAKE_PROBE_COOLDOWN_MS) return
+
+  const connected: Array<{ tab: TerminalTab; id: string }> = []
+  for (const tab of tabs.value) {
+    if (tab.status !== 'connected') continue
+    const id = runtimeFor(tab)?.sessionID
+    if (id) connected.push({ tab, id })
+  }
+  if (!connected.length) return
+
+  lastWakeProbeAt = now
+  wakeProbeInFlight = true
+  try {
+    const deadIds = new Set(await probeTauriTerminalSessions(connected.map(item => item.id)))
+    if (viewDisposed || deadIds.size === 0) return
+    for (const { tab, id } of connected) {
+      if (deadIds.has(id)) {
+        handleSessionEnded(tab, id, autoReconnect)
+      }
+    }
+  } catch {
+    // Ignore transient probe errors.
+  } finally {
+    wakeProbeInFlight = false
+  }
+}
+
+function handleTerminalVisibilityChange() {
+  if (document.hidden) {
+    hiddenAt = Date.now()
+    return
+  }
+  const hiddenMs = hiddenAt > 0 ? Date.now() - hiddenAt : 0
+  hiddenAt = 0
+  if (hiddenMs >= WAKE_HIDDEN_THRESHOLD_MS) {
+    lastWakeDetectedAt = Date.now()
+    void probeConnectedTerminalsOnWake(true)
+  }
+}
+
+function handleNetworkOnline() {
+  lastWakeDetectedAt = Date.now()
+  void probeConnectedTerminalsOnWake(true)
+}
+
 onMounted(async () => {
   const params = new URLSearchParams(window.location.search)
   const initialProfile = params.get('profile') || ''
@@ -2773,6 +2850,18 @@ onMounted(async () => {
   openSyncPollTimer = window.setInterval(() => {
     void pollOpenSyncEvents()
   }, OPEN_SYNC_POLL_INTERVAL)
+  lastWakeClockAt = Date.now()
+  wakeClockTimer = window.setInterval(() => {
+    const now = Date.now()
+    const elapsed = now - lastWakeClockAt
+    lastWakeClockAt = now
+    if (elapsed >= WAKE_CLOCK_JUMP_MS) {
+      lastWakeDetectedAt = now
+      void probeConnectedTerminalsOnWake(true)
+    }
+  }, WAKE_CLOCK_POLL_MS)
+  document.addEventListener('visibilitychange', handleTerminalVisibilityChange)
+  window.addEventListener('online', handleNetworkOnline)
   activateCurrentTerminal()
   // The launcher's terminal button opens this page for one server, so connect
   // right away instead of landing on a tab the user still has to start.
@@ -2785,6 +2874,12 @@ onBeforeUnmount(() => {
     window.clearInterval(openSyncPollTimer)
     openSyncPollTimer = undefined
   }
+  if (wakeClockTimer !== undefined) {
+    window.clearInterval(wakeClockTimer)
+    wakeClockTimer = undefined
+  }
+  document.removeEventListener('visibilitychange', handleTerminalVisibilityChange)
+  window.removeEventListener('online', handleNetworkOnline)
   resizeObserver?.disconnect()
   resizeObserver = null
   if (settingsSaveTimer !== null) window.clearTimeout(settingsSaveTimer)

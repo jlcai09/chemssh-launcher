@@ -282,9 +282,30 @@ export function createTerminalInputQueue(
   }
 }
 
-const terminalInputQueue = createTerminalInputQueue((sessionId, data) =>
-  invoke('send_terminal_input', { sessionId, data }),
-)
+const terminalInputQueue = createTerminalInputQueue(async (sessionId, data) => {
+  try {
+    const res = await invoke<unknown>('send_terminal_input', { sessionId, data })
+    if (
+      res === 'Closed' ||
+      (typeof res === 'object' && res !== null && (res as { accepted?: boolean }).accepted === false)
+    ) {
+      const buf = terminalStreams.get(sessionId)
+      if (buf && !buf.exited) {
+        deliverTerminalFrame(buf, 'exit', undefined, () => new Uint8Array(0), false)
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('terminal session not found')) {
+      const buf = terminalStreams.get(sessionId)
+      if (buf && !buf.exited) {
+        deliverTerminalFrame(buf, 'exit', undefined, () => new Uint8Array(0), false)
+      }
+      return
+    }
+    throw err
+  }
+})
 
 export function sendTauriTerminalText(sessionId: string, text: string): void {
   if (!sessionId || !text) return
@@ -378,9 +399,19 @@ function attachTerminalWebSocket(
   }
   ws.onclose = () => {
     if (buf.ws === ws) buf.ws = null
+    if (!buf.exited && terminalStreams.get(sessionId) === buf) {
+      // Loopback WS dropped (e.g. after OS sleep/wake): re-enable polling fallback
+      // so any pending output or Exit event is delivered immediately.
+      buf.channelDelivered = false
+      ensureTerminalPollLoop()
+    }
   }
   ws.onerror = () => {
     if (buf.ws === ws) buf.ws = null
+    if (!buf.exited && terminalStreams.get(sessionId) === buf) {
+      buf.channelDelivered = false
+      ensureTerminalPollLoop()
+    }
   }
 }
 
@@ -1123,6 +1154,14 @@ export function sendTauriTerminalInput(sessionId: string, dataB64: string) {
     sessionId,
     dataB64,
   })
+}
+
+export async function probeTauriTerminalSessions(sessionIds?: string[]): Promise<string[]> {
+  if (!isTauriRuntime()) return []
+  const dead = await invoke<string[]>('probe_terminal_sessions', {
+    sessionIds: sessionIds && sessionIds.length > 0 ? sessionIds : null,
+  })
+  return Array.isArray(dead) ? dead : []
 }
 
 export interface TauriSessionLogPollResponse {
