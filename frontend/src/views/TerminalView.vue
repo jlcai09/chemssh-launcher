@@ -238,8 +238,8 @@
               </button>
             </div>
             <div class="terminal-sftp-footer" :title="sftpStatsText">{{ sftpStatsText }}</div>
-            <input ref="sftpFileInput" type="file" multiple class="hidden-file-input" @change="handleSftpUploadInput('files', $event)" />
-            <input ref="sftpFolderInput" type="file" webkitdirectory multiple class="hidden-file-input" @change="handleSftpUploadInput('folder', $event)" />
+            <input ref="sftpFileInput" type="file" multiple hidden class="hidden-file-input" @change="handleSftpUploadInput('files', $event)" />
+            <input ref="sftpFolderInput" type="file" webkitdirectory multiple hidden class="hidden-file-input" @change="handleSftpUploadInput('folder', $event)" />
           </template>
           <div v-if="sftpDropActive" class="terminal-sftp-drop-hint">{{ t('terminal.sftpDropUpload') }}</div>
         </div>
@@ -483,7 +483,7 @@
         </button>
         <button type="button" role="menuitem" @click="runSftpMenuAction('uploadFiles')">{{ t('sftp.uploadFile') }}</button>
         <button type="button" role="menuitem" @click="runSftpMenuAction('uploadFolder')">{{ t('sftp.uploadFolder') }}</button>
-        <div class="sftp-context-divider" />
+        <span class="sftp-context-separator" />
         <button type="button" role="menuitem" @click="runSftpMenuAction('newFile')">{{ t('sftp.newFile') }}</button>
         <button type="button" role="menuitem" @click="runSftpMenuAction('newFolder')">{{ t('sftp.newFolder') }}</button>
         <template v-if="sftpSelectedEntries.length === 1">
@@ -491,21 +491,27 @@
           <button type="button" role="menuitem" @click="runSftpMenuAction('copyPath')">{{ t('sftp.copyPath') }}</button>
         </template>
         <template v-if="sftpSelectedEntries.length > 0 && sftpCompressFormats.length > 0">
-          <div class="sftp-context-divider" />
-          <button
-            v-for="fmt in sftpCompressFormats"
-            :key="fmt"
-            type="button"
-            role="menuitem"
-            @click="runSftpCompress(fmt)"
-          >
-            {{ t('terminal.sftpCompressAs', { format: fmt }) }}
-          </button>
+          <span class="sftp-context-separator" />
+          <div class="sftp-submenu-parent" role="menuitem" tabindex="0">
+            <span>{{ t('sftp.compress') }}</span>
+            <span aria-hidden="true">›</span>
+            <div class="sftp-context-menu sftp-submenu" role="menu">
+              <button
+                v-for="fmt in sftpCompressFormats"
+                :key="fmt"
+                type="button"
+                role="menuitem"
+                @click="runSftpCompress(fmt)"
+              >
+                {{ t('sftp.compressAs', { format: fmt }) }}
+              </button>
+            </div>
+          </div>
         </template>
         <button v-if="sftpCanExtractSelection" type="button" role="menuitem" @click="runSftpMenuAction('extract')">
           {{ t('sftp.extract') }}
         </button>
-        <div class="sftp-context-divider" />
+        <span class="sftp-context-separator" />
         <button type="button" role="menuitem" @click="runSftpMenuAction('refresh')">{{ t('terminal.sftpRefresh') }}</button>
         <button
           v-if="sftpSelectedEntries.length > 0"

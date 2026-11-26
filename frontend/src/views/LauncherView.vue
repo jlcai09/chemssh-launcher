@@ -209,12 +209,15 @@
           </section>
 
           <section class="form-section">
-            <div class="section-head">
+            <div class="form-section-head">
               <h3>{{ isLocalProfile ? t('launcher.localCommands') : t('launcher.commandSetup') }}</h3>
-              <el-radio-group v-if="!isLocalProfile" v-model="commandMode" size="small" @change="persistCommandMode">
-                <el-radio-button value="manual">{{ t('launcher.modeManual') }}</el-radio-button>
-                <el-radio-button value="auto">{{ t('launcher.modeAutoInstall') }}</el-radio-button>
-              </el-radio-group>
+              <el-segmented
+                v-if="!isLocalProfile"
+                v-model="commandMode"
+                :options="commandModeOptions"
+                size="small"
+                @change="persistCommandMode"
+              />
             </div>
             <template v-if="isLocalProfile || commandMode === 'manual'">
               <el-form-item :label="t('launcher.preStartCommands')">
@@ -710,6 +713,10 @@ function profileSummary(profile: Partial<Profile>) {
 
 const COMMAND_MODE_PREFIX = 'chemssh-launcher:command-mode:'
 const commandMode = ref<'manual' | 'auto'>('manual')
+const commandModeOptions = computed(() => [
+  { label: t('launcher.modeManual'), value: 'manual' },
+  { label: t('launcher.modeAutoInstall'), value: 'auto' }
+])
 
 function restoreCommandMode(profileId: string) {
   if (!profileId) {
