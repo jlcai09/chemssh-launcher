@@ -7,14 +7,14 @@ use std::sync::Mutex;
 
 use windows::core::{implement, Result as WinResult, HRESULT};
 use windows::Win32::Foundation::{
-    BOOL, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, DV_E_FORMATETC,
-    DV_E_TYMED, E_FAIL, E_INVALIDARG, E_NOTIMPL, HGLOBAL, HWND, POINT, S_OK,
+    GlobalFree, BOOL, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS,
+    DV_E_FORMATETC, DV_E_TYMED, E_FAIL, E_INVALIDARG, E_NOTIMPL, HGLOBAL, HWND, POINT, S_OK,
 };
 use windows::Win32::System::Com::{
     IDataObject, IDataObject_Impl, IEnumFORMATETC, DVASPECT_CONTENT, FORMATETC, STGMEDIUM,
     STGMEDIUM_0, TYMED_HGLOBAL,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GHND};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, OleInitialize, OleUninitialize, DROPEFFECT,
     DROPEFFECT_COPY, DROPEFFECT_MOVE,
@@ -140,7 +140,7 @@ fn alloc_hglobal_bytes(bytes: &[u8]) -> WinResult<HGLOBAL> {
         let hmem = GlobalAlloc(GHND, bytes.len())?;
         let ptr = GlobalLock(hmem) as *mut u8;
         if ptr.is_null() {
-            let _ = GlobalFree(Some(hmem));
+            let _ = GlobalFree(hmem);
             return Err(E_FAIL.into());
         }
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
