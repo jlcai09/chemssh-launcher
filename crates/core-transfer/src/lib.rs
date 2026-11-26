@@ -157,9 +157,21 @@ mod tests {
 
         let step = build_compress_step(FORMAT_TAR_GZ, "out.tar.gz", &["a.txt".into()]).unwrap();
         assert_eq!(step.argv, vec!["tar", "-czf", "out.tar.gz", "a.txt"]);
+        assert!(step.pipe_to.is_none());
+
+        let zst_comp = build_compress_step(FORMAT_TAR_ZST, "old.tar.zst", &["old".into()]).unwrap();
+        assert_eq!(zst_comp.argv, vec!["tar", "-cf", "-", "old"]);
+        assert_eq!(
+            zst_comp.pipe_to.as_deref(),
+            Some(&["zstd", "-1", "-T4", "-f", "-o", "old.tar.zst"].map(String::from)[..])
+        );
 
         let ext = build_extract_step("out.tar.zst", "dest").unwrap();
-        assert_eq!(ext.argv, vec!["tar", "--zstd", "-xf", "out.tar.zst", "-C", "dest"]);
+        assert_eq!(ext.argv, vec!["zstd", "-dc", "out.tar.zst"]);
+        assert_eq!(
+            ext.pipe_to.as_deref(),
+            Some(&["tar", "-xf", "-", "-C", "dest"].map(String::from)[..])
+        );
     }
 
     #[test]

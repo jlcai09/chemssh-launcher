@@ -71,6 +71,8 @@ export class AppEvents {
   private terminals = new Map<string, TerminalWatch>()
   private transfers = new Map<string, Set<(progress: TransferProgressSnapshot) => void>>()
   private tauriTransferSubscribed = false
+  private tauriTransferPollTimer: number | null = null
+  private tauriTransferPollInFlight = false
   private tauriBridgePromise: Promise<typeof import('./tauriBridge')> | null = null
   private tauriBridgeModule: typeof import('./tauriBridge') | null = null
 
@@ -130,6 +132,44 @@ export class AppEvents {
     return this.sendTerminalBytes(session, base64FromText(text))
   }
 
+  private dispatchTauriTransferItems(items: Array<TransferProgressSnapshot & { id: string }>) {
+    for (const progress of items) {
+      const target = this.transfers.get(progress.id)
+      if (!target) continue
+      for (const cb of target) cb(progress)
+    }
+  }
+
+  private ensureTauriTransferPolling() {
+    if (this.tauriTransferPollTimer !== null || this.transfers.size === 0) return
+    const poll = () => {
+      if (this.transfers.size === 0) {
+        this.stopTauriTransferPolling()
+        return
+      }
+      if (this.tauriTransferPollInFlight) return
+      this.tauriTransferPollInFlight = true
+      void this.getTauriBridge()
+        .then(({ pollTauriTransferProgress }) => pollTauriTransferProgress())
+        .then(items => {
+          if (Array.isArray(items)) this.dispatchTauriTransferItems(items)
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          this.tauriTransferPollInFlight = false
+        })
+    }
+    poll()
+    this.tauriTransferPollTimer = window.setInterval(poll, 150)
+  }
+
+  private stopTauriTransferPolling() {
+    if (this.tauriTransferPollTimer !== null) {
+      window.clearInterval(this.tauriTransferPollTimer)
+      this.tauriTransferPollTimer = null
+    }
+  }
+
   watchTransfer(id: string, handler: (progress: TransferProgressSnapshot) => void): () => void {
     if (!id) return () => {}
     let handlers = this.transfers.get(id)
@@ -137,16 +177,15 @@ export class AppEvents {
       handlers = new Set()
       this.transfers.set(id, handlers)
       if (hasTauriInternals()) {
+        // Poll as a safety net alongside Channel push so iframe Channel quirks
+        // in WebView2 can never freeze transfer progress at 0%.
+        this.ensureTauriTransferPolling()
         if (!this.tauriTransferSubscribed) {
           this.tauriTransferSubscribed = true
           void this.getTauriBridge()
             .then(({ subscribeTauriTransferProgress }) =>
               subscribeTauriTransferProgress(items => {
-                for (const progress of items) {
-                  const target = this.transfers.get(progress.id)
-                  if (!target) continue
-                  for (const cb of target) cb(progress)
-                }
+                this.dispatchTauriTransferItems(items)
               }),
             )
             .catch(err => {
@@ -166,7 +205,9 @@ export class AppEvents {
       current.delete(handler)
       if (current.size === 0) {
         this.transfers.delete(id)
-        if (!hasTauriInternals()) {
+        if (hasTauriInternals()) {
+          if (this.transfers.size === 0) this.stopTauriTransferPolling()
+        } else {
           this.send({ type: 'transfer:unwatch', id })
         }
       }

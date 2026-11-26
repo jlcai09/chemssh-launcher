@@ -8,21 +8,22 @@ use bytes::Bytes;
 use core_config::Profile;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use http::header::{
-    ACCEPT, ACCEPT_ENCODING, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, COOKIE,
-    HOST, LOCATION, REFERER, SET_COOKIE, TRANSFER_ENCODING, UPGRADE,
+    ACCEPT, ACCEPT_ENCODING, CONNECTION, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH,
+    CONTENT_TYPE, COOKIE, HOST, LOCATION, REFERER, SET_COOKIE, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use percent_encoding::percent_decode_str;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use rand::RngCore;
 use serde::Serialize;
 use subtle::ConstantTimeEq;
-use tokio::io::copy_bidirectional;
+use tokio::io::{copy_bidirectional, AsyncReadExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use url::Url;
 
 use crate::chemssh_bridge::{BridgeHttpError, ChemSshBridgeOpenRequest};
@@ -132,6 +133,7 @@ async fn handle_request(req: Request<Incoming>, state: Arc<AppState>) -> Respons
     let path = req.uri().path().to_string();
     match path.as_str() {
         "/api/file-icon" => handle_file_icon(&req, &state),
+        "/api/sftp/download" => handle_sftp_download(&req, &state).await,
         "/api/terminal-ws" => crate::terminal_ws::handle_terminal_ws(req, &state).await,
         "/api/chemssh-bridge/capabilities" => handle_bridge_capabilities(&req, &state).await,
         "/api/chemssh-bridge/client-identity" => handle_bridge_client_identity(&req, &state),
@@ -142,6 +144,141 @@ async fn handle_request(req: Request<Incoming>, state: Arc<AppState>) -> Respons
         }
         _ => proxy_to_chemssh(req, &state).await,
     }
+}
+
+struct ChannelStreamBody {
+    rx: mpsc::Receiver<Result<Bytes, BoxError>>,
+}
+
+impl Body for ChannelStreamBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                std::task::Poll::Ready(Some(Ok(Frame::data(bytes))))
+            }
+            std::task::Poll::Ready(Some(Err(err))) => std::task::Poll::Ready(Some(Err(err))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+fn content_disposition_attachment(filename: &str) -> String {
+    let fallback: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let fallback = fallback.trim();
+    let fallback = if fallback.is_empty() {
+        "download"
+    } else {
+        fallback
+    };
+    let encoded = utf8_percent_encode(filename, NON_ALPHANUMERIC).to_string();
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
+/// Streams a remote SFTP file as an HTTP attachment so WebView2 records the
+/// download in its native Downloads flyout with real progress.
+async fn handle_sftp_download(req: &Request<Incoming>, state: &Arc<AppState>) -> Response<ProxyBody> {
+    if req.method() != Method::GET {
+        return json_error(405, "method not allowed", None);
+    }
+    let token = query_param(req.uri(), "token").unwrap_or_default();
+    if token.is_empty()
+        || !bool::from(token.as_bytes().ct_eq(state.api_token.as_bytes()))
+    {
+        return json_error(401, "unauthorized", None);
+    }
+    let profile_id = query_param(req.uri(), "session")
+        .or_else(|| query_param(req.uri(), "profile_id"))
+        .unwrap_or_default();
+    let remote_path = query_param(req.uri(), "path").unwrap_or_default();
+    if profile_id.trim().is_empty() || remote_path.trim().is_empty() {
+        return json_error(400, "missing session or path", None);
+    }
+    let suggested = query_param(req.uri(), "name")
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            remote_path
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("download")
+                .to_string()
+        });
+
+    let session = match state.sftp.get_session(&profile_id).await {
+        Ok(s) => s,
+        Err(err) => return json_error(500, err, None),
+    };
+    let (transport, _) = match session.ensure_live().await {
+        Ok(pair) => pair,
+        Err(err) => return json_error(502, err, None),
+    };
+    let meta = match transport.sftp.metadata(&remote_path).await {
+        Ok(m) => m,
+        Err(err) => return json_error(404, format!("stat {remote_path}: {err}"), None),
+    };
+    let total_size = meta.size;
+    let mut remote_file = match transport.sftp.open(&remote_path).await {
+        Ok(f) => f,
+        Err(err) => return json_error(500, format!("open {remote_path}: {err}"), None),
+    };
+
+    let (tx, rx) = mpsc::channel::<Result<Bytes, BoxError>>(8);
+    let rpath_for_task = remote_path.clone();
+    tokio::spawn(async move {
+        // Keep transport alive for the entire streaming duration.
+        let _keep_alive = transport;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            match remote_file.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(Ok(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx
+                        .send(Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("read {rpath_for_task}: {err}"),
+                        ))))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CONTENT_DISPOSITION, content_disposition_attachment(&suggested))
+        .header("x-content-type-options", "nosniff");
+    if let Some(size) = total_size {
+        builder = builder.header(CONTENT_LENGTH, size.to_string());
+    }
+    let body: ProxyBody = ChannelStreamBody { rx }.boxed();
+    let mut resp = builder
+        .body(body)
+        .unwrap_or_else(|_| Response::new(empty_body()));
+    set_no_store(resp.headers_mut());
+    resp
 }
 
 pub(crate) fn empty_body() -> ProxyBody {

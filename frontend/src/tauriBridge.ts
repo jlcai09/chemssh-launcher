@@ -1355,6 +1355,14 @@ export async function subscribeTauriTransferProgress(
   await invoke('stream_transfer_progress', { onEvent: channel })
 }
 
+export function pollTauriTransferProgress(): Promise<TauriTransferProgressItem[]> {
+  return invoke<TauriTransferProgressItem[]>('list_transfers')
+}
+
+export function getTauriTransferProgress(id: string): Promise<TauriTransferProgressItem | null> {
+  return invoke<TauriTransferProgressItem | null>('get_transfer_progress', { id })
+}
+
 export async function listenCloseRequested(
   handler: (summary: ActiveWorkSummary) => void,
 ): Promise<() => void> {
@@ -1387,11 +1395,47 @@ export function installTauriNativeDragBridge(): void {
   }
   window.chemsshCancelNativeDragJob = (id: string) =>
     window.chemsshControlNativeDragJob!(id, 'cancel')
-  // Do not expose window.chemsshDragOutFiles here until Tauri supports delayed
-  // SFTP staging during OLE DoDragDrop: invoking start_native_drag_out with
-  // empty staged_local_paths fails immediately and aborts remote file drags
-  // right after long-press arming. Leaving it unset falls back cleanly to the
-  // built-in HTML5 drag-and-drop flow (same-pane move & cross-pane transfer).
+  // Only expose native OLE drag-out on Windows where start_shell_file_drag is supported.
+  // On Linux/macOS leave it unset so SFTP uses the built-in HTML5 drag-and-drop flow.
+  void invoke<boolean>('is_native_drag_supported')
+    .then(supported => {
+      if (!supported) return
+      window.chemsshDragOutFiles = async (payloadJson: string) => {
+        const parsed = JSON.parse(payloadJson) as {
+          id: string
+          session: string
+          paths: string[]
+          staged_local_paths?: string[]
+        }
+        const channel = new Channel<NativeDragJob>()
+        channel.onmessage = job => {
+          window.dispatchEvent(new CustomEvent('chemssh-native-drag-job', { detail: job }))
+        }
+        try {
+          const outcome = await invoke<string>('start_native_drag_out', {
+            request: {
+              id: parsed.id,
+              session: parsed.session,
+              paths: parsed.paths,
+              staged_local_paths: parsed.staged_local_paths ?? [],
+            },
+            onEvent: channel,
+          })
+          window.dispatchEvent(
+            new CustomEvent('chemssh-native-drag-finished', {
+              detail: { id: parsed.id, status: outcome, ok: outcome === 'dropped' },
+            }),
+          )
+        } catch (err) {
+          window.dispatchEvent(
+            new CustomEvent('chemssh-native-drag-finished', {
+              detail: { id: parsed.id, status: String(err), ok: false },
+            }),
+          )
+        }
+      }
+    })
+    .catch(() => undefined)
 }
 
 export function tauriFileIconURL(name: string, isDir: boolean, size = 16): string {
@@ -1450,6 +1494,27 @@ export async function downloadRemoteFileViaTauri(
   remotePath: string,
   suggestedName?: string,
 ): Promise<void> {
+  // Prefer streaming via the local loopback HTTP proxy so WebView2 records the
+  // download in its native Downloads flyout with live progress and no size cap.
+  try {
+    const downloadUrl = await invoke<string>('get_sftp_download_url', {
+      profileId: sessionId,
+      remotePath,
+      suggestedName: suggestedName || null,
+    })
+    if (downloadUrl) {
+      const targetDoc = (window.top || window).document
+      const frame = targetDoc.createElement('iframe')
+      frame.style.display = 'none'
+      frame.src = downloadUrl
+      targetDoc.body.appendChild(frame)
+      window.setTimeout(() => frame.remove(), 60_000)
+      return
+    }
+  } catch {
+    // Fall back to in-memory bytes download if the local proxy is unavailable.
+  }
+
   const res = await invoke<{ name: string; data_b64: string; size: number }>(
     'sftp_download_bytes',
     {

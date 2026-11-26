@@ -282,6 +282,11 @@ impl DragJobRegistry {
         }
     }
 
+    pub fn get(&self, id: &str) -> Option<DragJob> {
+        let guard = self.inner.lock().ok()?;
+        guard.jobs.get(id).map(|e| e.job.clone())
+    }
+
     pub fn list(&self) -> Vec<DragJob> {
         let Ok(guard) = self.inner.lock() else {
             return Vec::new();

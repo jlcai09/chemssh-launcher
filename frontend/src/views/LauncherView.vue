@@ -209,16 +209,23 @@
           </section>
 
           <section class="form-section">
-            <h3>{{ isLocalProfile ? t('launcher.localCommands') : t('launcher.remoteCommands') }}</h3>
-            <el-form-item :label="t('launcher.preStartCommands')">
-              <el-input v-model="current.pre_start_commands" type="textarea" :rows="5" :placeholder="isLocalProfile ? t('launcher.placeholder.localPreStartCommands') : t('launcher.placeholder.preStartCommands')" />
-            </el-form-item>
-            <el-form-item :label="t('launcher.startCommand')">
-              <el-input v-model="current.start_command" type="textarea" :rows="5" :placeholder="isLocalProfile ? t('launcher.placeholder.localStartCommand') : t('launcher.placeholder.startCommand')" />
-            </el-form-item>
+            <div class="section-head">
+              <h3>{{ isLocalProfile ? t('launcher.localCommands') : t('launcher.commandSetup') }}</h3>
+              <el-radio-group v-if="!isLocalProfile" v-model="commandMode" size="small" @change="persistCommandMode">
+                <el-radio-button value="manual">{{ t('launcher.modeManual') }}</el-radio-button>
+                <el-radio-button value="auto">{{ t('launcher.modeAutoInstall') }}</el-radio-button>
+              </el-radio-group>
+            </div>
+            <template v-if="isLocalProfile || commandMode === 'manual'">
+              <el-form-item :label="t('launcher.preStartCommands')">
+                <el-input v-model="current.pre_start_commands" type="textarea" :rows="5" :placeholder="isLocalProfile ? t('launcher.placeholder.localPreStartCommands') : t('launcher.placeholder.preStartCommands')" />
+              </el-form-item>
+              <el-form-item :label="t('launcher.startCommand')">
+                <el-input v-model="current.start_command" type="textarea" :rows="5" :placeholder="isLocalProfile ? t('launcher.placeholder.localStartCommand') : t('launcher.placeholder.startCommand')" />
+              </el-form-item>
+            </template>
+            <InstallerPanel v-else :profile-id="current.id" embedded @applied="handleInstallerApplied" />
           </section>
-
-          <InstallerPanel v-if="!isLocalProfile" :profile-id="current.id" @applied="handleInstallerApplied" />
 
           <details class="form-section form-section-collapsible">
             <summary class="form-section-summary">
@@ -653,6 +660,7 @@ const isDirty = computed(() => {
 
 function applyProfile(profile: Partial<Profile>) {
   Object.assign(current, defaults.value, profile)
+  restoreCommandMode(current.id || '')
   current.kind = current.kind || 'remote'
   current.local_proxy = {
     ...(defaults.value?.local_proxy || { enabled: false, host: '127.0.0.1', port: 7890, no_proxy: 'localhost,127.0.0.1,::1' }),
@@ -698,6 +706,31 @@ function setProfileKind(kind: string | number | boolean) {
 function profileSummary(profile: Partial<Profile>) {
   if (profile.kind === 'local') return `${t('launcher.kindLocal')} · ${profile.local_host || '127.0.0.1'}:${profile.local_port || 8888}`
   return `${profile.ssh_user || '?'}@${profile.ssh_host || '?'}`
+}
+
+const COMMAND_MODE_PREFIX = 'chemssh-launcher:command-mode:'
+const commandMode = ref<'manual' | 'auto'>('manual')
+
+function restoreCommandMode(profileId: string) {
+  if (!profileId) {
+    commandMode.value = 'manual'
+    return
+  }
+  try {
+    const saved = localStorage.getItem(COMMAND_MODE_PREFIX + profileId)
+    commandMode.value = saved === 'auto' ? 'auto' : 'manual'
+  } catch {
+    commandMode.value = 'manual'
+  }
+}
+
+function persistCommandMode() {
+  if (!current.id) return
+  try {
+    localStorage.setItem(COMMAND_MODE_PREFIX + current.id, commandMode.value)
+  } catch {
+    // ignore storage failures
+  }
 }
 
 async function handleInstallerApplied(profile: Profile) {

@@ -193,6 +193,7 @@ pub fn run() {
             commands::sftp::sftp_upload_bytes_chunk,
             commands::sftp::sftp_upload_bytes_finish,
             commands::sftp::sftp_download_bytes,
+            commands::sftp::get_sftp_download_url,
             commands::sftp::sftp_copy_remote,
             commands::sftp::sftp_archive_tools,
             commands::sftp::sftp_compress,

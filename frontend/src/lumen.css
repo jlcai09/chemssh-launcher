@@ -2183,21 +2183,21 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 8px 9px;
+  padding: 4px 7px;
   overflow: auto;
 }
 
 .lumen-window .terminal-session {
   width: 100%;
-  height: 46px;
-  min-height: 46px;
+  height: 34px;
+  min-height: 34px;
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) 8px;
+  grid-template-columns: 20px minmax(0, 1fr) 7px;
   align-items: center;
-  gap: 8px;
-  padding: 0 7px;
+  gap: 6px;
+  padding: 0 6px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 6px;
   background: transparent;
   color: #2c2c2e;
 }
@@ -2216,33 +2216,35 @@ body {
 }
 
 .lumen-window .terminal-session-icon {
-  width: 26px;
-  height: 26px;
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
-  border-radius: 6px;
+  border-radius: 5px;
   background: linear-gradient(160deg, #59a6ff, #1f6fe0);
   color: #ffffff;
-  font-size: calc(13px * var(--lumen-ui-scale));
+  font-size: calc(11px * var(--lumen-ui-scale));
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.35);
 }
 
 .lumen-window .terminal-session-text {
   min-width: 0;
   display: grid;
-  gap: 2px;
+  gap: 0;
 }
 
 .lumen-window .terminal-session-text strong {
   color: #2c2c2e;
-  font-size: calc(12.5px * var(--lumen-ui-scale));
+  font-size: calc(11.5px * var(--lumen-ui-scale));
   font-weight: 500;
+  line-height: 1.2;
 }
 
 .lumen-window .terminal-session-text small {
   color: #8e8e93;
   font-family: var(--lumen-mono);
-  font-size: calc(10.5px * var(--lumen-ui-scale));
+  font-size: calc(9.5px * var(--lumen-ui-scale));
+  line-height: 1.15;
 }
 
 .lumen-window .terminal-session-dot {
@@ -2269,12 +2271,21 @@ body {
 
 .lumen-window .terminal-servers-section {
   flex: 1 1 0;
-  min-height: 118px;
+  min-height: 84px;
 }
 
 .lumen-window .terminal-servers-section.is-collapsed {
   flex: 0 0 auto;
   min-height: 0;
+}
+
+.lumen-window .terminal-side-vsplitter::after {
+  background: rgba(0, 0, 0, 0.09);
+}
+
+.lumen-window .terminal-side-vsplitter:hover::after,
+.lumen-window .terminal-side-vsplitter:active::after {
+  background: rgba(31, 111, 224, 0.45);
 }
 
 .lumen-window .terminal-sftp-section {
@@ -2284,7 +2295,7 @@ body {
 
 .lumen-window .terminal-sftp-section.is-open {
   flex: 1 1 0;
-  min-height: 172px;
+  min-height: 148px;
 }
 
 .lumen-window .terminal-sftp-title {
@@ -2358,13 +2369,13 @@ body {
 }
 
 .lumen-window .terminal-sftp-path-input {
-  height: 24px;
+  height: 27px;
   border: 0.5px solid rgba(0, 0, 0, 0.14);
   border-radius: 6px;
   background: #ffffff;
   color: #1d1d1f;
   font-family: var(--lumen-mono);
-  font-size: calc(11px * var(--lumen-ui-scale));
+  font-size: calc(12.5px * var(--lumen-ui-scale));
 }
 
 .lumen-window .terminal-sftp-path-input:focus {
@@ -2374,15 +2385,21 @@ body {
 
 .lumen-window .terminal-sftp-entry {
   color: #2c2c2e;
-  font-size: calc(11.5px * var(--lumen-ui-scale));
+  font-size: calc(13px * var(--lumen-ui-scale));
 }
 
 .lumen-window .terminal-sftp-entry:hover {
   background: rgba(0, 0, 0, 0.05);
 }
 
+.lumen-window .terminal-sftp-entry.is-selected {
+  background: rgba(31, 111, 224, 0.14);
+  color: #1d1d1f;
+}
+
 .lumen-window .terminal-sftp-entry-icon {
   color: #8e8e93;
+  font-size: calc(14px * var(--lumen-ui-scale));
 }
 
 .lumen-window .terminal-sftp-entry.is-dir .terminal-sftp-entry-icon {
@@ -2390,13 +2407,20 @@ body {
 }
 
 .lumen-window .terminal-sftp-entry-size {
-  color: #9a9aa0;
+  color: #8e8e93;
   font-family: var(--lumen-mono);
+  font-size: calc(11.5px * var(--lumen-ui-scale));
+}
+
+.lumen-window .terminal-sftp-footer {
+  border-top: 0.5px solid rgba(0, 0, 0, 0.08);
+  color: #77777c;
+  font-size: calc(11.5px * var(--lumen-ui-scale));
 }
 
 .lumen-window .terminal-sftp-hint {
   color: #8e8e93;
-  font-size: calc(11px * var(--lumen-ui-scale));
+  font-size: calc(12.5px * var(--lumen-ui-scale));
 }
 
 .lumen-window .terminal-sftp-hint.is-error {

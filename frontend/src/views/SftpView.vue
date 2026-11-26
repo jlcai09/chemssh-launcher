@@ -658,7 +658,7 @@ import {
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
 import { appEvents } from '../appEvents'
-import { downloadRemoteFileViaTauri, isTauriRuntime, tauriFileIconURL, uploadFormViaTauri } from '../tauriBridge'
+import { downloadRemoteFileViaTauri, getTauriTransferProgress, isTauriRuntime, tauriFileIconURL, uploadFormViaTauri } from '../tauriBridge'
 import { waitForTransferProgress } from '../transferProgress'
 import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, mergeNativeDragRows, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 import { onProfilesChanged } from '../profileEvents'
@@ -4907,7 +4907,25 @@ async function runWithTransferProgress(item: TransferItem, transferID: string, a
   )
   try {
     await action()
-    await waiter.done
+    if (isTauriRuntime()) {
+      // Tauri transfer commands resolve only after the backend copy/upload/download
+      // has actually finished; fetch the final snapshot instead of hanging on Channel push.
+      const finalSnapshot = await getTauriTransferProgress(transferID).catch(() => null)
+      if (finalSnapshot) {
+        const target = currentTransferItem(item)
+        target.paused = finalSnapshot.paused
+        target.cancelled = target.cancelled || finalSnapshot.cancelled
+        updateTransferItem(target, finalSnapshot.loaded, finalSnapshot.total || target.total)
+        if (finalSnapshot.cancelled) {
+          throw new Error(finalSnapshot.error || t('sftp.transferCancelled'))
+        }
+        if (finalSnapshot.error) {
+          throw new Error(finalSnapshot.error)
+        }
+      }
+    } else {
+      await waiter.done
+    }
     const target = currentTransferItem(item)
     if (target.cancelled) throw new Error(target.error || t('sftp.transferCancelled'))
     if (target.status === 'running') updateTransferItem(target, target.total, target.total)

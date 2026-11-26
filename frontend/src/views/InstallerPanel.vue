@@ -1,6 +1,6 @@
 <template>
-  <section class="form-section installer-panel">
-    <h3>{{ t('launcher.installer') }}</h3>
+  <component :is="embedded ? 'div' : 'section'" :class="embedded ? 'installer-panel is-embedded' : 'form-section installer-panel'">
+    <h3 v-if="!embedded">{{ t('launcher.installer') }}</h3>
     <p class="field-hint">{{ t('launcher.installerHint') }}</p>
     <p v-if="!profileId" class="field-hint">{{ t('launcher.installerSaveFirst') }}</p>
     <template v-else>
@@ -42,7 +42,7 @@
         <pre ref="logEl" class="installer-log">{{ logLines.join('\n') }}</pre>
       </details>
     </template>
-  </section>
+  </component>
 </template>
 
 <script setup lang="ts">
@@ -77,7 +77,7 @@ interface InstallerProgress {
   next: number
 }
 
-const props = defineProps<{ profileId: string }>()
+const props = defineProps<{ profileId: string; embedded?: boolean }>()
 const emit = defineEmits<{ (e: 'applied', profile: Profile): void }>()
 
 const STORAGE_PREFIX = 'chemssh-launcher:installer:'

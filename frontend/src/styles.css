@@ -3051,12 +3051,39 @@ body,
 
 .terminal-servers-section {
   flex: 1 1 0;
-  min-height: 118px;
+  min-height: 84px;
 }
 
 .terminal-servers-section.is-collapsed {
   flex: 0 0 auto;
   min-height: 0;
+}
+
+.terminal-side-vsplitter {
+  position: relative;
+  flex: 0 0 6px;
+  height: 6px;
+  cursor: row-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+.terminal-side-vsplitter::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: var(--panel-border);
+  transition: background 0.15s ease;
+}
+
+.terminal-side-vsplitter:hover::after,
+.terminal-side-vsplitter:active::after {
+  background: rgba(14, 116, 144, 0.55);
 }
 
 .terminal-sftp-section {
@@ -3066,7 +3093,7 @@ body,
 
 .terminal-sftp-section.is-open {
   flex: 1 1 0;
-  min-height: 168px;
+  min-height: 148px;
 }
 
 .terminal-side-toggle {
@@ -3215,13 +3242,13 @@ body,
 .terminal-sftp-path-input {
   flex: 1 1 auto;
   min-width: 0;
-  height: 24px;
-  padding: 0 7px;
+  height: 27px;
+  padding: 0 8px;
   border: 1px solid var(--panel-border);
   border-radius: 6px;
   background: #ffffff;
   color: var(--text);
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 
 .terminal-sftp-path-input:focus {
@@ -3236,27 +3263,34 @@ body,
   flex-direction: column;
   gap: 1px;
   overflow: auto;
+  outline: 0;
 }
 
 .terminal-sftp-entry {
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
-  padding: 3px 6px;
+  padding: 5px 7px;
   border: 0;
   border-radius: 5px;
   background: transparent;
   color: var(--text);
-  font-size: 11.5px;
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
+  user-select: none;
 }
 
 .terminal-sftp-entry:hover {
   background: var(--soft-bg);
+}
+
+.terminal-sftp-entry.is-selected {
+  background: var(--accent-weak);
+  color: var(--text);
 }
 
 .terminal-sftp-entry-icon {
@@ -3264,7 +3298,7 @@ body,
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .terminal-sftp-entry.is-dir .terminal-sftp-entry-icon {
@@ -3280,14 +3314,25 @@ body,
 
 .terminal-sftp-entry-size {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
 
-.terminal-sftp-hint {
-  padding: 3px 4px;
+.terminal-sftp-footer {
+  flex: 0 0 auto;
+  padding: 4px 6px 2px;
+  border-top: 1px solid var(--panel-border);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-sftp-hint {
+  padding: 4px 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
   line-height: 1.5;
 }
 
@@ -3376,8 +3421,8 @@ body,
   min-height: 0;
   display: grid;
   align-content: start;
-  gap: 4px;
-  padding: 6px;
+  gap: 2px;
+  padding: 4px 6px;
   overflow: auto;
 }
 
@@ -3385,12 +3430,12 @@ body,
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 8px;
+  grid-template-columns: 20px minmax(0, 1fr) 7px;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid transparent;
-  border-radius: 7px;
-  padding: 6px 8px;
+  border-radius: 6px;
+  padding: 4px 6px;
   color: #24313d;
   background: transparent;
   text-align: left;
@@ -3412,20 +3457,20 @@ body,
 }
 
 .terminal-session-icon {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
-  border-radius: 6px;
+  border-radius: 5px;
   background: rgba(14, 116, 144, 0.1);
   color: var(--accent);
-  font-size: 14px;
+  font-size: 11px;
 }
 
 .terminal-session-text {
   min-width: 0;
   display: grid;
-  gap: 1px;
+  gap: 0;
 }
 
 .terminal-session-text strong,
@@ -3437,13 +3482,15 @@ body,
 }
 
 .terminal-session-text strong {
-  font-size: 12px;
-  font-weight: 650;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.25;
 }
 
 .terminal-session-text small {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 9.5px;
+  line-height: 1.2;
 }
 
 .terminal-session-dot {

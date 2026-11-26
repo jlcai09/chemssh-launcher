@@ -1,7 +1,11 @@
 <template>
   <section class="terminal-view" :style="{ '--terminal-sidebar-width': `${sidebarWidth}px` }">
-    <aside class="terminal-sessions">
-      <section class="terminal-side-section terminal-servers-section" :class="{ 'is-collapsed': serverSectionCollapsed }">
+    <aside ref="sidebarEl" class="terminal-sessions">
+      <section
+        class="terminal-side-section terminal-servers-section"
+        :class="{ 'is-collapsed': serverSectionCollapsed }"
+        :style="serverSectionStyle"
+      >
         <header class="terminal-sessions-title">
           <button
             type="button"
@@ -56,6 +60,14 @@
           </div>
         </div>
       </section>
+      <div
+        v-if="!serverSectionCollapsed && sftpPanelOpen"
+        class="terminal-side-vsplitter"
+        role="separator"
+        aria-orientation="horizontal"
+        :title="t('terminal.sftpSplitResize')"
+        @mousedown.prevent="beginServerSplitResize"
+      />
       <section
         class="terminal-side-section terminal-sftp-section"
         :class="{ 'is-open': sftpPanelOpen }"
@@ -71,6 +83,56 @@
             <span class="terminal-sessions-label">SFTP</span>
           </button>
           <span v-if="sftpPanelOpen" class="terminal-sessions-actions">
+            <button
+              type="button"
+              class="terminal-sessions-refresh"
+              :title="t('sftp.newFile')"
+              :aria-label="t('sftp.newFile')"
+              :disabled="!sftpPanelAvailable"
+              @click="createSftpFile"
+            >
+              <el-icon><DocumentAdd /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="terminal-sessions-refresh"
+              :title="t('sftp.newFolder')"
+              :aria-label="t('sftp.newFolder')"
+              :disabled="!sftpPanelAvailable"
+              @click="createSftpFolder"
+            >
+              <el-icon><FolderAdd /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="terminal-sessions-refresh"
+              :title="t('sftp.uploadFile')"
+              :aria-label="t('sftp.uploadFile')"
+              :disabled="!sftpPanelAvailable"
+              @click="triggerSftpUpload('files')"
+            >
+              <el-icon><Upload /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="terminal-sessions-refresh"
+              :title="t('sftp.download')"
+              :aria-label="t('sftp.download')"
+              :disabled="!sftpPanelAvailable || !sftpHasDownloadableSelection"
+              @click="downloadSftpSelection"
+            >
+              <el-icon><Download /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="terminal-sessions-refresh"
+              :title="t('sftp.delete')"
+              :aria-label="t('sftp.delete')"
+              :disabled="!sftpPanelAvailable || sftpSelectedEntries.length === 0"
+              @click="deleteSftpSelection"
+            >
+              <el-icon><Delete /></el-icon>
+            </button>
             <button
               type="button"
               class="terminal-sftp-sync"
@@ -103,6 +165,7 @@
           @dragover="handleSftpDragOver"
           @dragleave="handleSftpDragLeave"
           @drop="handleSftpDrop"
+          @contextmenu.prevent="openSftpContextMenu(null, $event)"
         >
           <div v-if="!sftpPanelAvailable" class="terminal-sftp-hint">{{ t('terminal.sftpNeedsTerminal') }}</div>
           <template v-else>
@@ -135,26 +198,36 @@
             <div v-else-if="!sftpEntries.length && !sftpParentPath" class="terminal-sftp-hint">
               {{ t('terminal.sftpEmpty') }}
             </div>
-            <div v-else class="terminal-sftp-list" role="list">
+            <div
+              v-else
+              class="terminal-sftp-list"
+              role="list"
+              tabindex="0"
+              @click.self="clearSftpSelection"
+              @keydown="handleSftpListKeydown"
+            >
               <button
                 v-if="sftpParentPath"
                 type="button"
                 class="terminal-sftp-entry is-dir is-parent"
                 :title="t('terminal.sftpUp')"
+                @click="clearSftpSelection"
                 @dblclick="openSftpParent"
               >
                 <span class="terminal-sftp-entry-icon"><el-icon><FolderOpened /></el-icon></span>
                 <span class="terminal-sftp-entry-name">..</span>
               </button>
               <button
-                v-for="entry in sftpEntries"
+                v-for="(entry, index) in sftpEntries"
                 :key="entry.path || entry.name"
                 type="button"
                 class="terminal-sftp-entry"
-                :class="{ 'is-dir': entry.is_dir }"
+                :class="{ 'is-dir': entry.is_dir, 'is-selected': isSftpEntrySelected(entry) }"
                 draggable="true"
                 :title="entry.is_dir ? t('terminal.sftpEntryDirTitle', { name: entry.path }) : t('terminal.sftpEntryFileTitle', { name: entry.path })"
+                @click="handleSftpEntryClick(entry, index, $event)"
                 @dblclick="openSftpEntry(entry)"
+                @contextmenu.prevent.stop="openSftpContextMenu(entry, $event)"
                 @dragstart="startSftpEntryDrag(entry, $event)"
               >
                 <span class="terminal-sftp-entry-icon">
@@ -164,6 +237,9 @@
                 <span v-if="!entry.is_dir" class="terminal-sftp-entry-size">{{ formatBytes(entry.size) }}</span>
               </button>
             </div>
+            <div class="terminal-sftp-footer" :title="sftpStatsText">{{ sftpStatsText }}</div>
+            <input ref="sftpFileInput" type="file" multiple class="hidden-file-input" @change="handleSftpUploadInput('files', $event)" />
+            <input ref="sftpFolderInput" type="file" webkitdirectory multiple class="hidden-file-input" @change="handleSftpUploadInput('folder', $event)" />
           </template>
           <div v-if="sftpDropActive" class="terminal-sftp-drop-hint">{{ t('terminal.sftpDropUpload') }}</div>
         </div>
@@ -390,6 +466,57 @@
       >
         <button type="button" role="menuitem" @click="openMenuProfileInSftp">{{ t('launcher.openSftp') }}</button>
       </div>
+      <div
+        v-if="sftpMenu.visible"
+        class="sftp-context-menu terminal-sftp-context-menu"
+        :style="{ left: `${sftpMenu.x}px`, top: `${sftpMenu.y}px` }"
+        role="menu"
+        @contextmenu.prevent
+      >
+        <template v-if="sftpSelectedEntries.length === 1">
+          <button type="button" role="menuitem" @click="runSftpMenuAction('open')">
+            {{ sftpSelectedEntries[0].is_dir ? t('sftp.open') : t('terminal.sftpOpenEdit') }}
+          </button>
+        </template>
+        <button v-if="sftpHasDownloadableSelection" type="button" role="menuitem" @click="runSftpMenuAction('download')">
+          {{ t('sftp.download') }}
+        </button>
+        <button type="button" role="menuitem" @click="runSftpMenuAction('uploadFiles')">{{ t('sftp.uploadFile') }}</button>
+        <button type="button" role="menuitem" @click="runSftpMenuAction('uploadFolder')">{{ t('sftp.uploadFolder') }}</button>
+        <div class="sftp-context-divider" />
+        <button type="button" role="menuitem" @click="runSftpMenuAction('newFile')">{{ t('sftp.newFile') }}</button>
+        <button type="button" role="menuitem" @click="runSftpMenuAction('newFolder')">{{ t('sftp.newFolder') }}</button>
+        <template v-if="sftpSelectedEntries.length === 1">
+          <button type="button" role="menuitem" @click="runSftpMenuAction('rename')">{{ t('sftp.rename') }}</button>
+          <button type="button" role="menuitem" @click="runSftpMenuAction('copyPath')">{{ t('sftp.copyPath') }}</button>
+        </template>
+        <template v-if="sftpSelectedEntries.length > 0 && sftpCompressFormats.length > 0">
+          <div class="sftp-context-divider" />
+          <button
+            v-for="fmt in sftpCompressFormats"
+            :key="fmt"
+            type="button"
+            role="menuitem"
+            @click="runSftpCompress(fmt)"
+          >
+            {{ t('terminal.sftpCompressAs', { format: fmt }) }}
+          </button>
+        </template>
+        <button v-if="sftpCanExtractSelection" type="button" role="menuitem" @click="runSftpMenuAction('extract')">
+          {{ t('sftp.extract') }}
+        </button>
+        <div class="sftp-context-divider" />
+        <button type="button" role="menuitem" @click="runSftpMenuAction('refresh')">{{ t('terminal.sftpRefresh') }}</button>
+        <button
+          v-if="sftpSelectedEntries.length > 0"
+          type="button"
+          role="menuitem"
+          class="is-danger"
+          @click="runSftpMenuAction('delete')"
+        >
+          {{ sftpSelectedEntries.length > 1 ? t('terminal.sftpDeleteCount', { count: sftpSelectedEntries.length }) : t('sftp.delete') }}
+        </button>
+      </div>
     </Teleport>
   </section>
 </template>
@@ -404,7 +531,11 @@ import {
   Back,
   Close,
   Connection,
+  Delete,
   Document,
+  DocumentAdd,
+  Download,
+  FolderAdd,
   FolderOpened,
   Link,
   Minus,
@@ -447,11 +578,17 @@ const props = defineProps<{ active: boolean }>()
 
 const TERMINAL_PROFILE_KEY = 'chemssh-launcher.terminal-profile'
 const SIDEBAR_WIDTH_KEY = 'chemssh-launcher.terminal-sidebar-width'
+const SERVER_HEIGHT_KEY = 'chemssh-launcher.terminal-server-height'
 const SERVER_COLLAPSED_KEY = 'chemssh-launcher.terminal-server-collapsed'
 const SFTP_SYNC_KEY = 'chemssh-launcher.terminal-sftp-sync'
 const SIDEBAR_WIDTH_DEFAULT = 224
 const SIDEBAR_WIDTH_MIN = 172
 const SIDEBAR_WIDTH_MAX = 560
+const SERVER_HEIGHT_DEFAULT = 180
+const SERVER_HEIGHT_MIN = 84
+const SFTP_HEIGHT_MIN = 148
+const ARCHIVE_EXT_RE = /\.(tar\.zst|tzst|tar\.gz|tgz|tar\.xz|txz|tar|zip|7z)$/i
+const VALID_NAME_RE = /^[^/\\]+$/
 
 type TerminalStatus = 'idle' | 'connecting' | 'connected' | 'error'
 type TabAction = 'duplicate' | 'sftp' | 'close' | 'closeAll'
@@ -482,6 +619,10 @@ interface TerminalSftpPanel {
   // back-history dropdown.
   history: string[]
   entries: FileEntry[]
+  selectedPaths: string[]
+  anchorPath: string
+  archiveFormats: string[]
+  archiveToolsLoaded: boolean
   loading: boolean
   error: string
   dropActive: boolean
@@ -636,6 +777,60 @@ const sftpParentPath = computed(() => {
   const parent = parentPath(current, 'remote')
   return parent && parent !== current ? parent : ''
 })
+const sidebarEl = ref<HTMLElement | null>(null)
+const sftpFileInput = ref<HTMLInputElement | null>(null)
+const sftpFolderInput = ref<HTMLInputElement | null>(null)
+const serverSectionHeight = ref<number>(loadSavedServerHeight())
+const sftpMenu = reactive({ visible: false, x: 0, y: 0 })
+
+function loadSavedServerHeight(): number {
+  try {
+    const raw = Number(localStorage.getItem(SERVER_HEIGHT_KEY))
+    if (Number.isFinite(raw) && raw >= SERVER_HEIGHT_MIN) return Math.round(raw)
+  } catch {
+    // ignore storage failures
+  }
+  return SERVER_HEIGHT_DEFAULT
+}
+
+const serverSectionStyle = computed(() => {
+  if (serverSectionCollapsed.value || !sftpPanelOpen.value) return undefined
+  return { flex: `0 0 ${serverSectionHeight.value}px` }
+})
+
+const sftpSelectedEntries = computed<FileEntry[]>(() => {
+  const tab = activeTab.value
+  if (!tab?.sftp.open || tab.sftp.selectedPaths.length === 0) return []
+  const selectedSet = new Set(tab.sftp.selectedPaths)
+  return tab.sftp.entries.filter(entry => selectedSet.has(sftpEntryPath(tab, entry)))
+})
+
+const sftpHasDownloadableSelection = computed(() =>
+  sftpSelectedEntries.value.some(entry => !entry.is_dir)
+)
+
+const sftpCompressFormats = computed(() => activeTab.value?.sftp.archiveFormats || [])
+
+const sftpCanExtractSelection = computed(() => {
+  if (sftpSelectedEntries.value.length !== 1) return false
+  const entry = sftpSelectedEntries.value[0]
+  return !entry.is_dir && ARCHIVE_EXT_RE.test(entry.name)
+})
+
+const sftpStatsText = computed(() => {
+  const entries = sftpEntries.value
+  const totalCount = entries.length
+  const selected = sftpSelectedEntries.value
+  if (selected.length > 0) {
+    const fileSize = selected.reduce((sum, entry) => sum + (entry.is_dir ? 0 : entry.size || 0), 0)
+    const sizePart = fileSize > 0 ? ` · ${formatBytes(fileSize)}` : ''
+    return t('terminal.sftpStatsSelected', { selected: selected.length, total: totalCount }) + sizePart
+  }
+  const totalBytes = entries.reduce((sum, entry) => sum + (entry.is_dir ? 0 : entry.size || 0), 0)
+  const sizePart = totalBytes > 0 ? ` · ${formatBytes(totalBytes)}` : ''
+  return t('terminal.sftpStatsTotal', { total: totalCount }) + sizePart
+})
+
 const sftpPathInput = computed({
   get: () => activeTab.value?.sftp.path || '',
   set: value => {
@@ -757,6 +952,34 @@ function beginSidebarResize(event: MouseEvent) {
   window.addEventListener('mouseup', handleUp)
 }
 
+function beginServerSplitResize(event: MouseEvent) {
+  const sidebar = sidebarEl.value
+  const startY = event.clientY
+  const startHeight = serverSectionHeight.value
+  const totalHeight = sidebar?.clientHeight || 600
+  const maxHeight = Math.max(SERVER_HEIGHT_MIN, totalHeight - SFTP_HEIGHT_MIN)
+  const previousCursor = document.body.style.cursor
+  document.body.style.cursor = 'row-resize'
+  document.body.style.userSelect = 'none'
+  const handleMove = (move: MouseEvent) => {
+    const next = Math.min(maxHeight, Math.max(SERVER_HEIGHT_MIN, startHeight + move.clientY - startY))
+    serverSectionHeight.value = Math.round(next)
+  }
+  const handleUp = () => {
+    window.removeEventListener('mousemove', handleMove)
+    window.removeEventListener('mouseup', handleUp)
+    document.body.style.cursor = previousCursor
+    document.body.style.userSelect = ''
+    try {
+      localStorage.setItem(SERVER_HEIGHT_KEY, String(serverSectionHeight.value))
+    } catch {
+      // Height persistence is best-effort.
+    }
+  }
+  window.addEventListener('mousemove', handleMove)
+  window.addEventListener('mouseup', handleUp)
+}
+
 function emptySftpPanel(): TerminalSftpPanel {
   return {
     open: false,
@@ -765,6 +988,10 @@ function emptySftpPanel(): TerminalSftpPanel {
     loadedPath: '',
     history: [],
     entries: [],
+    selectedPaths: [],
+    anchorPath: '',
+    archiveFormats: [],
+    archiveToolsLoaded: false,
     loading: false,
     error: '',
     dropActive: false,
@@ -776,10 +1003,399 @@ function emptySftpPanel(): TerminalSftpPanel {
 // its open/sync state so reconnecting restores the same place.
 function resetSftpPanelData(tab: TerminalTab) {
   tab.sftp.entries = []
+  tab.sftp.selectedPaths = []
+  tab.sftp.anchorPath = ''
+  tab.sftp.archiveFormats = []
+  tab.sftp.archiveToolsLoaded = false
   tab.sftp.error = ''
   tab.sftp.loading = false
   tab.sftp.loadedPath = ''
   tab.sftp.seq += 1
+}
+
+function sftpEntryPath(tab: TerminalTab, entry: FileEntry): string {
+  return entry.path || joinPath(tab.sftp.loadedPath || '.', entry.name, 'remote')
+}
+
+function isSftpEntrySelected(entry: FileEntry): boolean {
+  const tab = activeTab.value
+  if (!tab) return false
+  return tab.sftp.selectedPaths.includes(sftpEntryPath(tab, entry))
+}
+
+function clearSftpSelection() {
+  const tab = activeTab.value
+  if (!tab) return
+  tab.sftp.selectedPaths = []
+  tab.sftp.anchorPath = ''
+}
+
+function handleSftpEntryClick(entry: FileEntry, index: number, event: MouseEvent) {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  if (!tab) return
+  const path = sftpEntryPath(tab, entry)
+  const entries = tab.sftp.entries
+  if (event.shiftKey && tab.sftp.anchorPath) {
+    const anchorIdx = entries.findIndex(item => sftpEntryPath(tab, item) === tab.sftp.anchorPath)
+    if (anchorIdx >= 0) {
+      const from = Math.min(anchorIdx, index)
+      const to = Math.max(anchorIdx, index)
+      tab.sftp.selectedPaths = entries.slice(from, to + 1).map(item => sftpEntryPath(tab, item))
+      return
+    }
+  }
+  if (event.ctrlKey || event.metaKey) {
+    const exists = tab.sftp.selectedPaths.includes(path)
+    tab.sftp.selectedPaths = exists
+      ? tab.sftp.selectedPaths.filter(item => item !== path)
+      : [...tab.sftp.selectedPaths, path]
+    tab.sftp.anchorPath = path
+    return
+  }
+  tab.sftp.selectedPaths = [path]
+  tab.sftp.anchorPath = path
+}
+
+function handleSftpListKeydown(event: KeyboardEvent) {
+  const tab = activeTab.value
+  if (!tab?.sftp.open) return
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+    event.preventDefault()
+    tab.sftp.selectedPaths = tab.sftp.entries.map(item => sftpEntryPath(tab, item))
+    tab.sftp.anchorPath = tab.sftp.selectedPaths[0] || ''
+    return
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    clearSftpSelection()
+    closeSftpContextMenu()
+    return
+  }
+  if (event.key === 'Delete' && sftpSelectedEntries.value.length > 0) {
+    event.preventDefault()
+    void deleteSftpSelection()
+    return
+  }
+  if (event.key === 'Enter' && sftpSelectedEntries.value.length === 1) {
+    event.preventDefault()
+    openSftpEntry(sftpSelectedEntries.value[0])
+  }
+}
+
+async function ensureSftpArchiveFormats(tab: TerminalTab) {
+  if (tab.sftp.archiveToolsLoaded) return
+  try {
+    const sessionID = await connectSftp(tab)
+    const tools = await api<{
+      tar?: boolean
+      zstd?: boolean
+      gzip?: boolean
+      xz?: boolean
+      zip?: boolean
+      seven_zip?: boolean
+      formats?: string[]
+    }>(`/api/sftp/archive-tools?session=${encodeURIComponent(sessionID)}`)
+    if (Array.isArray(tools.formats)) {
+      tab.sftp.archiveFormats = tools.formats
+    } else {
+      const fmts: string[] = []
+      if (tools.tar && tools.zstd) fmts.push('tar.zst')
+      if (tools.tar && tools.gzip) fmts.push('tar.gz')
+      if (tools.tar && tools.xz) fmts.push('tar.xz')
+      if (tools.tar) fmts.push('tar')
+      if (tools.zip) fmts.push('zip')
+      if (tools.seven_zip) fmts.push('7z')
+      tab.sftp.archiveFormats = fmts
+    }
+    tab.sftp.archiveToolsLoaded = true
+  } catch {
+    // Non-fatal: leave formats empty when probe fails.
+  }
+}
+
+function openSftpContextMenu(entry: FileEntry | null, event: MouseEvent) {
+  const tab = activeTab.value
+  if (!tab?.sftp.open || tab.status !== 'connected') return
+  closeProfileMenu()
+  tabMenu.visible = false
+  if (entry) {
+    const path = sftpEntryPath(tab, entry)
+    if (!tab.sftp.selectedPaths.includes(path)) {
+      tab.sftp.selectedPaths = [path]
+      tab.sftp.anchorPath = path
+    }
+  } else {
+    clearSftpSelection()
+  }
+  void ensureSftpArchiveFormats(tab)
+  const menuWidth = 196
+  const menuHeight = 320
+  sftpMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - menuWidth - 8))
+  sftpMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - menuHeight - 8))
+  sftpMenu.visible = true
+}
+
+function closeSftpContextMenu() {
+  if (!sftpMenu.visible) return
+  sftpMenu.visible = false
+}
+
+function triggerSftpUpload(kind: 'files' | 'folder') {
+  closeSftpContextMenu()
+  if (kind === 'folder') sftpFolderInput.value?.click()
+  else sftpFileInput.value?.click()
+}
+
+async function handleSftpUploadInput(kind: 'files' | 'folder', event: Event) {
+  const input = event.target as HTMLInputElement | null
+  const files = Array.from(input?.files || [])
+  if (input) input.value = ''
+  if (files.length === 0) return
+  const tab = activeTab.value
+  if (!tab?.sftp.open || tab.status !== 'connected') return
+  const dir = tab.sftp.loadedPath || tab.sftp.path || null
+  await uploadEntriesToDir(tab, filesToUploadEntries(files), dir)
+  if (tab.sftp.open) void loadSftpPanel(tab, tab.sftp.loadedPath || tab.sftp.path || '.')
+}
+
+async function downloadSftpSelection() {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  if (!tab?.sftp.open) return
+  const files = sftpSelectedEntries.value.filter(entry => !entry.is_dir)
+  if (files.length === 0) return
+  try {
+    const sessionID = await connectSftp(tab)
+    for (const entry of files) {
+      const path = sftpEntryPath(tab, entry)
+      if (isTauriRuntime()) {
+        await downloadRemoteFileViaTauri(sessionID, path, entry.name)
+      } else {
+        window.open(
+          `/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(path)}`,
+          '_blank',
+          'noopener'
+        )
+      }
+    }
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+async function createSftpFile() {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  if (!tab?.sftp.open || tab.status !== 'connected') return
+  let promptResult: { value: string }
+  try {
+    promptResult = await ElMessageBox.prompt(t('terminal.sftpNewFilePrompt'), t('sftp.newFile'), {
+      inputPattern: VALID_NAME_RE,
+      inputErrorMessage: t('sftp.nameInvalid'),
+      confirmButtonText: t('sftp.ok'),
+      cancelButtonText: t('sftp.cancel')
+    })
+  } catch {
+    return
+  }
+  const name = promptResult.value.trim()
+  if (!name) return
+  try {
+    const sessionID = await connectSftp(tab)
+    const dir = tab.sftp.loadedPath || tab.sftp.path || '.'
+    await postJSON('/api/sftp/create-file', { session: sessionID, path: joinPath(dir, name, 'remote') })
+    await loadSftpPanel(tab, dir)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+async function createSftpFolder() {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  if (!tab?.sftp.open || tab.status !== 'connected') return
+  let promptResult: { value: string }
+  try {
+    promptResult = await ElMessageBox.prompt(t('terminal.sftpNewFolderPrompt'), t('sftp.newFolder'), {
+      inputPattern: VALID_NAME_RE,
+      inputErrorMessage: t('sftp.nameInvalid'),
+      confirmButtonText: t('sftp.ok'),
+      cancelButtonText: t('sftp.cancel')
+    })
+  } catch {
+    return
+  }
+  const name = promptResult.value.trim()
+  if (!name) return
+  try {
+    const sessionID = await connectSftp(tab)
+    const dir = tab.sftp.loadedPath || tab.sftp.path || '.'
+    await postJSON('/api/sftp/mkdir', { session: sessionID, path: joinPath(dir, name, 'remote') })
+    await loadSftpPanel(tab, dir)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+async function renameSftpSelection() {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  const entry = sftpSelectedEntries.value[0]
+  if (!tab?.sftp.open || !entry) return
+  let promptResult: { value: string }
+  try {
+    promptResult = await ElMessageBox.prompt(t('sftp.renamePrompt'), t('sftp.renameTitle', { name: entry.name }), {
+      inputValue: entry.name,
+      inputPattern: VALID_NAME_RE,
+      inputErrorMessage: t('sftp.nameInvalid'),
+      confirmButtonText: t('sftp.ok'),
+      cancelButtonText: t('sftp.cancel')
+    })
+  } catch {
+    return
+  }
+  const name = promptResult.value.trim()
+  if (!name || name === entry.name) return
+  try {
+    const sessionID = await connectSftp(tab)
+    const oldPath = sftpEntryPath(tab, entry)
+    const newPath = joinPath(parentPath(oldPath, 'remote'), name, 'remote')
+    await postJSON('/api/sftp/rename', { session: sessionID, path: oldPath, new_path: newPath })
+    await loadSftpPanel(tab, tab.sftp.loadedPath || tab.sftp.path || '.')
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+async function copySftpSelectionPath() {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  const entry = sftpSelectedEntries.value[0]
+  if (!tab?.sftp.open || !entry) return
+  const path = sftpEntryPath(tab, entry)
+  try {
+    await navigator.clipboard.writeText(path)
+    ElMessage.success(t('sftp.pathCopied'))
+  } catch {
+    ElMessage.error(t('sftp.pathCopyFailed'))
+  }
+}
+
+async function deleteSftpSelection() {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  const selected = [...sftpSelectedEntries.value]
+  if (!tab?.sftp.open || selected.length === 0) return
+  try {
+    await ElMessageBox.confirm(t('sftp.deleteConfirmSimple', { count: selected.length }), t('sftp.delete'), {
+      type: 'warning',
+      confirmButtonText: t('sftp.delete'),
+      cancelButtonText: t('sftp.cancel')
+    })
+  } catch {
+    return
+  }
+  try {
+    const sessionID = await connectSftp(tab)
+    for (const entry of selected) {
+      await postJSON('/api/sftp/delete', {
+        session: sessionID,
+        path: sftpEntryPath(tab, entry),
+        is_dir: entry.is_dir
+      })
+    }
+    clearSftpSelection()
+    await loadSftpPanel(tab, tab.sftp.loadedPath || tab.sftp.path || '.')
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+async function runSftpCompress(format: string) {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  const selected = [...sftpSelectedEntries.value]
+  if (!tab?.sftp.open || selected.length === 0) return
+  const cwd = tab.sftp.loadedPath || tab.sftp.path || '.'
+  const stem = selected.length === 1 ? selected[0].name : 'archive'
+  const archiveName = `${stem}.${format}`
+  try {
+    const sessionID = await connectSftp(tab)
+    await postJSON('/api/sftp/compress', {
+      session: sessionID,
+      cwd,
+      format,
+      archive_name: archiveName,
+      entries: selected.map(item => item.name)
+    })
+    ElMessage.success(t('terminal.sftpCompressed', { name: archiveName }))
+    await loadSftpPanel(tab, cwd)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+async function extractSftpSelection() {
+  closeSftpContextMenu()
+  const tab = activeTab.value
+  const entry = sftpSelectedEntries.value[0]
+  if (!tab?.sftp.open || !entry || entry.is_dir) return
+  const cwd = tab.sftp.loadedPath || tab.sftp.path || '.'
+  try {
+    const sessionID = await connectSftp(tab)
+    await postJSON('/api/sftp/extract', {
+      session: sessionID,
+      cwd,
+      archive_name: entry.name,
+      dest_dir: cwd
+    })
+    ElMessage.success(t('terminal.sftpExtracted', { name: entry.name }))
+    await loadSftpPanel(tab, cwd)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+function runSftpMenuAction(
+  action: 'open' | 'download' | 'uploadFiles' | 'uploadFolder' | 'newFile' | 'newFolder' | 'rename' | 'copyPath' | 'extract' | 'refresh' | 'delete'
+) {
+  closeSftpContextMenu()
+  switch (action) {
+    case 'open':
+      if (sftpSelectedEntries.value[0]) openSftpEntry(sftpSelectedEntries.value[0])
+      break
+    case 'download':
+      void downloadSftpSelection()
+      break
+    case 'uploadFiles':
+      triggerSftpUpload('files')
+      break
+    case 'uploadFolder':
+      triggerSftpUpload('folder')
+      break
+    case 'newFile':
+      void createSftpFile()
+      break
+    case 'newFolder':
+      void createSftpFolder()
+      break
+    case 'rename':
+      void renameSftpSelection()
+      break
+    case 'copyPath':
+      void copySftpSelectionPath()
+      break
+    case 'extract':
+      void extractSftpSelection()
+      break
+    case 'refresh':
+      refreshSftpPanel()
+      break
+    case 'delete':
+      void deleteSftpSelection()
+      break
+  }
 }
 
 function sortSftpEntries(entries: FileEntry[]) {
@@ -832,6 +1448,9 @@ async function loadSftpPanel(
     state.path = data.path || target
     state.loadedPath = state.path
     state.entries = sortSftpEntries(data.entries || [])
+    const validPaths = new Set(state.entries.map(item => sftpEntryPath(tab, item)))
+    state.selectedPaths = state.selectedPaths.filter(item => validPaths.has(item))
+    if (!validPaths.has(state.anchorPath)) state.anchorPath = state.selectedPaths[0] || ''
     if (options.recordHistory !== false && previous && previous !== state.loadedPath) {
       state.history = [previous, ...state.history.filter(item => item !== previous)].slice(0, SFTP_HISTORY_LIMIT)
     }
@@ -2002,6 +2621,7 @@ function openProfileMenu(profile: Profile, event: MouseEvent) {
 }
 
 function closeProfileMenu() {
+  closeSftpContextMenu()
   if (!profileMenu.visible) return
   profileMenu.visible = false
   profileMenu.profileID = ''

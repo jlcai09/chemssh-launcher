@@ -242,7 +242,7 @@ impl<T: SessionTransport> ReconnectableSession<T> {
         Ok((st.transport.clone(), st.generation))
     }
 
-    async fn ensure_live(&self) -> Result<(T, u64), String> {
+    pub(crate) async fn ensure_live(&self) -> Result<(T, u64), String> {
         let (transport, gen) = self.snapshot().await?;
         if !transport.is_closed() {
             return Ok((transport, gen));
@@ -1568,6 +1568,30 @@ pub async fn sftp_upload_bytes_finish(
     }
     state.transfers.finish(&guard.transfer_id, None);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_sftp_download_url(
+    state: State<'_, AppState>,
+    profile_id: String,
+    remote_path: String,
+    suggested_name: Option<String>,
+) -> Result<String, String> {
+    if state.proxy_base_url.is_empty() {
+        return Err("local proxy server is not available".into());
+    }
+    let mut url = url::Url::parse(&format!("{}/api/sftp/download", state.proxy_base_url))
+        .map_err(|e| e.to_string())?;
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("session", &profile_id);
+        qp.append_pair("path", &remote_path);
+        qp.append_pair("token", &state.api_token);
+        if let Some(name) = suggested_name.filter(|s| !s.trim().is_empty()) {
+            qp.append_pair("name", &name);
+        }
+    }
+    Ok(url.to_string())
 }
 
 #[tauri::command]
