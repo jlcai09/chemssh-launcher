@@ -17,9 +17,9 @@ pub use jobs::{is_terminal_state, DragJob, DragJobRegistry, FileProgress};
 pub use trash_windows::move_to_trash;
 
 #[cfg(target_os = "windows")]
-pub use ole_windows::start_shell_file_drag;
+pub use ole_windows::{start_shell_file_drag, start_shell_file_drag_delayed};
 #[cfg(not(target_os = "windows"))]
-pub use platform_stub::start_shell_file_drag;
+pub use platform_stub::{start_shell_file_drag, start_shell_file_drag_delayed};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

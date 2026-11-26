@@ -11,11 +11,12 @@ use win_native::{DragJobRegistry, FileIconService};
 use crate::chemssh_bridge::ChemSshBridgeManager;
 use crate::chemssh_proxy::{bind_proxy_listener, generate_api_token};
 use crate::client_identity::ClientIdentityStore;
-use crate::commands::sessions::SessionManager;
 use crate::commands::installer::InstallerManager;
+use crate::commands::sessions::SessionManager;
 use crate::commands::sftp::SftpManager;
 use crate::commands::sftp_sync::SftpOpenSyncManager;
 use crate::commands::terminal::TerminalManager;
+use crate::commands::transfer::{DownloadWorkers, ProgressSubscriptions};
 
 const MAX_LAUNCHER_LOG_LINES: usize = 2000;
 
@@ -60,6 +61,8 @@ pub struct AppState {
     pub sftp: Arc<SftpManager>,
     pub sftp_sync: Arc<SftpOpenSyncManager>,
     pub transfers: Arc<TransferProgressStore>,
+    pub(crate) download_workers: Arc<DownloadWorkers>,
+    pub(crate) progress_subscriptions: Arc<ProgressSubscriptions>,
     pub drag_jobs: Arc<DragJobRegistry>,
     pub file_icons: Arc<FileIconService>,
     pub launcher_logs: Arc<LauncherLogStore>,
@@ -92,6 +95,8 @@ impl AppState {
             sftp: Arc::new(SftpManager::default()),
             sftp_sync: Arc::new(SftpOpenSyncManager::new()),
             transfers: Arc::new(TransferProgressStore::new()),
+            download_workers: Arc::new(DownloadWorkers::default()),
+            progress_subscriptions: Arc::new(ProgressSubscriptions::default()),
             drag_jobs: Arc::new(DragJobRegistry::new()),
             file_icons: Arc::new(FileIconService::new()),
             launcher_logs: Arc::new(LauncherLogStore::default()),
@@ -125,6 +130,8 @@ impl AppState {
             sftp: Arc::new(SftpManager::default()),
             sftp_sync: Arc::new(SftpOpenSyncManager::new()),
             transfers: Arc::new(TransferProgressStore::new()),
+            download_workers: Arc::new(DownloadWorkers::default()),
+            progress_subscriptions: Arc::new(ProgressSubscriptions::default()),
             drag_jobs: Arc::new(DragJobRegistry::new()),
             file_icons: Arc::new(FileIconService::new()),
             launcher_logs: Arc::new(LauncherLogStore::default()),

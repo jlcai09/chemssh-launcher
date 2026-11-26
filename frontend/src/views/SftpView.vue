@@ -426,7 +426,7 @@
       </section>
     </div>
 
-    <section class="transfer-panel">
+    <section class="transfer-panel" :class="{ 'has-native-downloads': transferPanelMode === 'transfers' && downloadJobs.length }">
       <div class="logs-title">
         <div>
           <h2>{{ t('sftp.transferPanel') }}</h2>
@@ -442,6 +442,7 @@
           </el-tooltip>
         </div>
       </div>
+      <NativeDownloadList v-if="transferPanelMode === 'transfers'" :jobs="downloadJobs" />
       <div v-if="transferPanelMode === 'transfers'" class="transfer-list-shell">
         <div
           :ref="setTransferListRef"
@@ -460,7 +461,7 @@
             <span>{{ t('sftp.eta') }}</span>
             <span>{{ t('sftp.elapsed') }}</span>
           </div>
-          <div v-if="transferItems.length === 0" class="transfer-empty">{{ t('sftp.emptyTransfers') }}</div>
+          <div v-if="transferItems.length === 0 && downloadJobs.length === 0" class="transfer-empty">{{ t('sftp.emptyTransfers') }}</div>
           <div
             v-for="item in visibleTransferItems"
             :key="item.id"
@@ -658,10 +659,16 @@ import {
 } from '../uploadEntries'
 import { locale, t } from '../i18n'
 import { appEvents } from '../appEvents'
-import { downloadRemoteFileViaTauri, getTauriTransferProgress, isTauriRuntime, tauriFileIconURL, uploadFormViaTauri } from '../tauriBridge'
+import { getTauriTransferProgress, isTauriRuntime, pickTauriDownloadTargets, tauriFileIconURL, uploadFormViaTauri } from '../tauriBridge'
+import NativeDownloadList from '../NativeDownloadList.vue'
+import { downloadActive, nativeDownloads } from '../nativeDownloads'
+import { notifyDownloadBatch } from '../downloadNotifications'
+
 import { waitForTransferProgress } from '../transferProgress'
 import { cancelNativeDragJob, controlNativeDragJob, dragOutFiles, mergeNativeDragRows, nativeDragCanControl, nativeDragHost, nativeDragTransfer, nativeDragTransferRoots, nativeDragTransferUpdates, retainTransferHistory, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 import { onProfilesChanged } from '../profileEvents'
+
+const downloadJobs = nativeDownloads.jobs
 
 type PaneName = 'left' | 'right'
 type TabKind = 'local' | 'remote'
@@ -1143,10 +1150,10 @@ const deletingPanes = new Set<PaneName>()
 const inspectingPanes = new Set<PaneName>()
 
 const activeTransferSummary = computed(() => {
-  const running = transferItems.value.filter(item => item.status === 'running').length
+  const running = transferItems.value.filter(item => item.status === 'running').length + downloadJobs.value.filter(downloadActive).length
   if (running > 0) return t('sftp.runningSummary', { count: running })
-  const done = transferItems.value.filter(item => item.status === 'done').length
-  const failed = transferItems.value.filter(item => item.status === 'error').length
+  const done = transferItems.value.filter(item => item.status === 'done').length + downloadJobs.value.filter(job => job.state === 'saved').length
+  const failed = transferItems.value.filter(item => item.status === 'error').length + downloadJobs.value.filter(job => job.state === 'failed').length
   if (done || failed) return t('sftp.doneFailedSummary', { done, failed })
   return t('sftp.waitingTransfers')
 })
@@ -1493,6 +1500,7 @@ function clearTransferPanel() {
     nextTick(() => transferLogScroller.scrollToBottom(true))
     return
   }
+  nativeDownloads.clearFinished()
   for (const item of transferItems.value) {
     if (item.status !== 'running' && item.nativeDragID) clearedNativeTransfers.add(item.nativeDragID)
   }
@@ -2236,11 +2244,13 @@ async function closeTab(paneName: PaneName, tabID: string) {
     pane.active = next?.id || ''
   }
   closeTabContextMenu()
-  if (tab.kind === 'remote' && tab.session) {
-    await postJSON('/api/sftp/disconnect', { session: tab.session }).catch(() => undefined)
-  }
+  if (tab.kind === 'remote' && tab.session) disconnectAfterDownloads(tab.session)
   await nextTick()
   updateVirtualMetrics(paneName)
+}
+
+function disconnectAfterDownloads(sessionId: string) {
+  void nativeDownloads.waitForSession(sessionId).then(() => postJSON('/api/sftp/disconnect', { session: sessionId })).catch(() => undefined)
 }
 
 async function closeAllTabs(paneName: PaneName) {
@@ -2250,9 +2260,9 @@ async function closeAllTabs(paneName: PaneName) {
   pane.newMenuOpen = false
   pane.dropActive = false
   closeTabContextMenu()
-  await Promise.all(closing
-    .filter(tab => tab.kind === 'remote' && tab.session)
-    .map(tab => postJSON('/api/sftp/disconnect', { session: tab.session }).catch(() => undefined)))
+  for (const tab of closing) {
+    if (tab.kind === 'remote' && tab.session) disconnectAfterDownloads(tab.session)
+  }
   await nextTick()
   updateVirtualMetrics(paneName)
 }
@@ -4077,7 +4087,8 @@ function uniqueSuffixedName(name: string, existing: Map<string, FileEntry>) {
 
 function canDownload(paneName: PaneName) {
   const tab = activeTab(paneName)
-  return Boolean(tab?.kind === 'remote' && tab.selected.length === 1 && !tab.selected[0].is_dir)
+  if (tab?.kind !== 'remote') return false
+  return isTauriRuntime() ? tab.selected.some(entry => !entry.is_dir) : tab.selected.length === 1 && !tab.selected[0].is_dir
 }
 
 function renameSelected(paneName: PaneName) {
@@ -4182,19 +4193,27 @@ async function renameEntry(paneName: PaneName, entry: FileEntry) {
   await loadTab(paneName, tab)
 }
 
-function downloadSelected(paneName: PaneName) {
+async function downloadSelected(paneName: PaneName) {
   const tab = activeTab(paneName)
-  const entry = tab?.selected[0]
-  if (!tab?.session || !entry || entry.is_dir) return
+  const sessionId = tab?.session
+  if (!tab || !sessionId) return
+  const files = tab.selected.filter(entry => !entry.is_dir)
+  if (!files.length) return
   if (isTauriRuntime()) {
-    void downloadRemoteFileViaTauri(tab.session, entry.path, entry.name).catch(err => {
-      const msg = t('sftp.entryError', { name: entry.name, error: (err as Error).message })
+    const sources = files.map(entry => ({ path: entry.path, name: entry.name, size: entry.size }))
+    try {
+      const targets = await pickTauriDownloadTargets(sources)
+      if (!targets || locateTab(tab.id)?.tab.session !== sessionId) return
+      transferPanelMode.value = 'transfers'
+      notifyDownloadBatch(nativeDownloads.enqueue({ sessionId, sourceName: transferEndpointName(tab), sources, targets }), targets)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
       log(msg)
       ElMessage.error(msg)
-    })
+    }
     return
   }
-  const url = `/api/sftp/download?session=${encodeURIComponent(tab.session)}&path=${encodeURIComponent(entry.path)}`
+  const url = `/api/sftp/download?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(files[0].path)}`
   window.open(url, '_blank', 'noopener')
 }
 
@@ -5129,9 +5148,15 @@ onBeforeUnmount(() => {
   paneNames.forEach(paneName => {
     panes[paneName].tabs.forEach(tab => {
       if (tab.kind === 'remote' && tab.session) {
-        postJSON('/api/sftp/disconnect', { session: tab.session }).catch(() => undefined)
+        disconnectAfterDownloads(tab.session)
       }
     })
   })
 })
 </script>
+
+<style scoped>
+.transfer-panel.has-native-downloads {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+</style>

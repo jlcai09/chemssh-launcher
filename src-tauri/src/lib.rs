@@ -22,6 +22,7 @@ pub fn run() {
     let fallback_flag = Arc::clone(&reveal_state.revealed);
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
         .manage(reveal_state)
         .register_uri_scheme_protocol("fileicon", |ctx, request| {
@@ -173,6 +174,9 @@ pub fn run() {
             commands::transfer::get_transfer_count,
             commands::transfer::control_transfer,
             commands::transfer::stream_transfer_progress,
+            commands::transfer::stop_transfer_progress,
+            commands::transfer::pick_sftp_download_path,
+            commands::transfer::pick_sftp_download_dir,
             commands::sftp::sftp_connect,
             commands::sftp::sftp_reconnect,
             commands::sftp::sftp_disconnect,
@@ -192,8 +196,6 @@ pub fn run() {
             commands::sftp::sftp_upload_bytes_begin,
             commands::sftp::sftp_upload_bytes_chunk,
             commands::sftp::sftp_upload_bytes_finish,
-            commands::sftp::sftp_download_bytes,
-            commands::sftp::get_sftp_download_url,
             commands::sftp::sftp_copy_remote,
             commands::sftp::sftp_archive_tools,
             commands::sftp::sftp_compress,
@@ -202,6 +204,7 @@ pub fn run() {
             commands::dragout::list_native_drag_jobs,
             commands::dragout::control_native_drag_job,
             commands::dragout::has_active_work,
+            commands::dragout::force_close_app,
             commands::dragout::start_native_drag_out,
         ])
         .build(tauri::generate_context!())
@@ -210,6 +213,10 @@ pub fn run() {
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
             let state = app_handle.state::<AppState>();
+            let downloads = Arc::clone(&state.download_workers);
+            downloads.close();
+            state.transfers.cancel_all(Some("application closing"));
+            state.drag_jobs.cancel_all(Some("application closing"));
             let bridge = Arc::clone(&state.chemssh_bridge);
             let sessions = Arc::clone(&state.sessions);
             let terminals = Arc::clone(&state.terminals);
@@ -217,15 +224,23 @@ pub fn run() {
             let sftp_sync = Arc::clone(&state.sftp_sync);
             let launcher_logs = Arc::clone(&state.launcher_logs);
             tauri::async_runtime::block_on(async move {
-                let _ = tokio::time::timeout(Duration::from_secs(3), async move {
-                    bridge.close_all(&sftp, &sftp_sync, &launcher_logs).await;
-                    tokio::join!(
-                        sessions.stop_all_on_exit(),
-                        terminals.close_all(),
-                        sftp.disconnect_all(),
-                    );
-                })
-                .await;
+                sessions.begin_shutdown().await;
+                let sessions_cleanup =
+                    tokio::time::timeout(Duration::from_secs(4), sessions.stop_all_on_exit());
+                let terminals_cleanup =
+                    tokio::time::timeout(Duration::from_secs(3), terminals.close_all());
+                let sftp_cleanup = async {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), downloads.drain()).await;
+                    // Bridge cleanup still needs its SFTP connections; it must not delay the other managers.
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        bridge.close_all(&sftp, &sftp_sync, &launcher_logs),
+                    )
+                    .await;
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), sftp.disconnect_all()).await;
+                };
+                let _ = tokio::join!(sessions_cleanup, terminals_cleanup, sftp_cleanup);
             });
         }
     });

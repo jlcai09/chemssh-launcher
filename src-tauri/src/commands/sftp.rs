@@ -11,27 +11,23 @@ use core_config::{new_id, FileStore, Profile, ProfileStore};
 use core_secret::SecretStore;
 use core_ssh::{shell_quote, HostKeyPolicy, KnownHostsVerifier, SshConnection};
 use core_transfer::{
-    build_compress_step, build_extract_step, copy_remote_to_remote_once, delete_remote_path,
-    detect_remote_tools, download_file_resumable_once, is_sftp_transport_error, list_remote_dir,
-    remote_io_err, run_remote_step, sftp_err, upload_file_resumable_once, ArchiveTools, FsEntry,
-    TransferError,
+    build_compress_step, build_extract_step, copy_remote_file_once, delete_remote_path,
+    detect_remote_tools, download_file_attempt, is_sftp_transport_error, list_remote_dir,
+    remote_io_err, run_remote_step, sftp_err, upload_file_once, ArchiveTools, FsEntry,
+    RemoteStagedFile, TransferError, TransferProgressStore,
 };
-use russh_sftp::client::fs::File as SftpRemoteFile;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tauri::State;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, Notify};
 
 use crate::commands::backend::{open_path_in_system, open_text_file_in_system};
 use crate::commands::sessions::{format_ssh_error, load_ssh_credentials_from};
-use crate::commands::sftp_sync::{OpenSyncEvent, MAX_SYNC_FILE_BYTES};
+use crate::commands::sftp_sync::OpenSyncEvent;
 use crate::state::{AppState, LauncherLogStore};
 
-const DEFAULT_DOWNLOAD_BYTES_LIMIT: u64 = 256 * 1024 * 1024;
-const DOWNLOAD_CHUNK_SIZE: usize = 256 * 1024;
 const RECONNECT_COOLDOWN: Duration = Duration::from_secs(2);
 const KEEPALIVE_BASE_INTERVAL: Duration = Duration::from_secs(25);
 const KEEPALIVE_MAX_BACKOFF: Duration = Duration::from_secs(60);
@@ -84,17 +80,11 @@ pub struct UploadBytesBeginResponse {
     pub upload_id: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct DownloadBytesResponse {
-    pub name: String,
-    pub data_b64: String,
-    pub size: u64,
-}
-
 #[derive(Clone)]
 pub(crate) struct SftpTransport {
     pub connection: Arc<SshConnection>,
     pub sftp: Arc<SftpSession>,
+    pub(crate) sync_hash: Arc<Mutex<super::sftp_sync::RemoteHashCapabilities>>,
     pub profile_id: String,
     pub ssh_host: String,
     pub ssh_port: u16,
@@ -145,6 +135,7 @@ impl SessionTransport for SftpTransport {
                 SftpTransport {
                     connection: Arc::clone(&self.connection),
                     sftp: Arc::new(sftp),
+                    sync_hash: Arc::new(Mutex::default()),
                     profile_id: self.profile_id.clone(),
                     ssh_host: self.ssh_host.clone(),
                     ssh_port: self.ssh_port,
@@ -176,7 +167,10 @@ impl SessionDialer<SftpTransport> for ProfileSftpDialer {
         policy: Option<HostKeyPolicy>,
     ) -> Pin<Box<dyn Future<Output = Result<(SftpTransport, String), String>> + Send + 'a>> {
         Box::pin(async move {
-            let profile = self.profiles.get(&self.profile_id).map_err(|e| e.to_string())?;
+            let profile = self
+                .profiles
+                .get(&self.profile_id)
+                .map_err(|e| e.to_string())?;
             dial_sftp_transport(
                 self.secrets.as_ref(),
                 &self.known_hosts_path,
@@ -234,7 +228,7 @@ impl<T: SessionTransport> ReconnectableSession<T> {
         self.state.lock().await.closed
     }
 
-    async fn snapshot(&self) -> Result<(T, u64), String> {
+    pub(crate) async fn snapshot(&self) -> Result<(T, u64), String> {
         let st = self.state.lock().await;
         if st.closed {
             return Err(format!("sftp session disconnected: {}", self.id));
@@ -339,10 +333,8 @@ impl<T: SessionTransport> ReconnectableSession<T> {
             Ok(ok) => ok,
             Err(err) => {
                 if !quiet_fail {
-                    self.launcher_logs.push(format!(
-                        "[sftp:{}] auto-reconnect failed: {err}",
-                        self.id
-                    ));
+                    self.launcher_logs
+                        .push(format!("[sftp:{}] auto-reconnect failed: {err}", self.id));
                 }
                 return Err(err);
             }
@@ -453,17 +445,60 @@ pub(crate) fn format_sftp_command_error(msg: String, transport_lost: bool) -> St
     .to_string()
 }
 
-pub struct ActiveByteUpload {
-    session_id: String,
-    file: SftpRemoteFile,
+struct ActiveByteUpload {
+    session: Arc<ManagedSftpSession>,
+    generation: u64,
+    transport: SftpTransport,
     transfer_id: String,
+    progress: Arc<TransferProgressStore>,
+    total_size: Option<u64>,
+    writer: Mutex<ByteUploadWriter>,
+}
+
+struct ByteUploadWriter {
+    staged: Option<RemoteStagedFile<Arc<SftpSession>>>,
+    written: u64,
+}
+
+impl ActiveByteUpload {
+    async fn check_generation(&self) -> Result<(), TransferError> {
+        let (_, current) = self
+            .session
+            .snapshot()
+            .await
+            .map_err(TransferError::SftpTransport)?;
+        if self.generation != current {
+            return Err(TransferError::SftpTransport(
+                "upload session changed; restart the upload".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn cancel(&self) {
+        let _ = self
+            .progress
+            .cancel(&self.transfer_id, Some("upload aborted"));
+    }
+
+    async fn abort(&self) {
+        self.cancel();
+        let staged = self.writer.lock().await.staged.take();
+        if let Some(mut staged) = staged {
+            staged.cleanup().await;
+            self.progress
+                .finish(&self.transfer_id, Some("upload aborted".into()));
+        }
+        // If finish already owns the staged file, cancellation wakes it and
+        // leaves cleanup and the terminal progress update to that owner.
+    }
 }
 
 #[derive(Default)]
 pub struct SftpManager {
     sessions: Mutex<HashMap<String, Arc<ManagedSftpSession>>>,
     by_profile: Mutex<HashMap<String, String>>,
-    uploads: Mutex<HashMap<String, Arc<Mutex<ActiveByteUpload>>>>,
+    uploads: Mutex<HashMap<String, Arc<ActiveByteUpload>>>,
 }
 
 impl SftpManager {
@@ -537,22 +572,6 @@ impl SftpManager {
         }
     }
 
-    pub(crate) async fn run_sftp_op<R, F, Fut>(
-        &self,
-        id: &str,
-        op: F,
-    ) -> Result<R, String>
-    where
-        F: Fn(Arc<SftpSession>) -> Fut,
-        Fut: Future<Output = Result<R, TransferError>>,
-    {
-        self.run_with_reconnect(id, TransferError::is_transport_error, move |t| {
-            op(Arc::clone(&t.sftp))
-        })
-        .await
-        .map_err(|e| e.message)
-    }
-
     pub(crate) async fn connect_dedicated(
         &self,
         state: &AppState,
@@ -604,50 +623,57 @@ impl SftpManager {
         if session_id.is_empty() {
             return;
         }
-        let session = self.sessions.lock().await.remove(session_id);
-        {
-            let mut by_profile = self.by_profile.lock().await;
-            by_profile.retain(|_, v| v != session_id);
-        }
-        self.remove_uploads_for_session(session_id).await;
+        let (session, handles) = {
+            let mut sessions = self.sessions.lock().await;
+            let session = sessions.remove(session_id);
+            let mut uploads = self.uploads.lock().await;
+            let mut handles = Vec::new();
+            uploads.retain(|_, upload| {
+                if upload.session.id == session_id {
+                    handles.push(Arc::clone(upload));
+                    false
+                } else {
+                    true
+                }
+            });
+            (session, handles)
+        };
+        self.by_profile.lock().await.retain(|_, v| v != session_id);
+        Self::abort_uploads(handles).await;
         if let Some(session) = session {
             session.close().await;
         }
     }
 
     pub async fn disconnect_all(&self) {
-        let sessions: Vec<Arc<ManagedSftpSession>> = {
+        let (sessions, handles) = {
             let mut sessions = self.sessions.lock().await;
-            let mut by_profile = self.by_profile.lock().await;
-            by_profile.clear();
-            sessions.drain().map(|(_, v)| v).collect()
+            self.by_profile.lock().await.clear();
+            let mut uploads = self.uploads.lock().await;
+            (
+                sessions.drain().map(|(_, v)| v).collect::<Vec<_>>(),
+                uploads.drain().map(|(_, v)| v).collect(),
+            )
         };
-        let _ = self.uploads.lock().await.drain();
+        Self::abort_uploads(handles).await;
         for session in sessions {
             session.close().await;
         }
     }
 
-    async fn remove_uploads_for_session(&self, session_id: &str) {
-        let handles: Vec<(String, Arc<Mutex<ActiveByteUpload>>)> = {
-            let guard = self.uploads.lock().await;
-            guard
-                .iter()
-                .map(|(k, v)| (k.clone(), Arc::clone(v)))
-                .collect()
-        };
-        let mut to_remove = Vec::new();
-        for (upload_id, handle) in handles {
-            if handle.lock().await.session_id == session_id {
-                to_remove.push(upload_id);
-            }
+    async fn abort_uploads(handles: Vec<Arc<ActiveByteUpload>>) {
+        let mut cleanups = tokio::task::JoinSet::new();
+        for handle in handles {
+            handle.cancel();
+            cleanups.spawn(async move { handle.abort().await });
         }
-        if !to_remove.is_empty() {
-            let mut guard = self.uploads.lock().await;
-            for upload_id in to_remove {
-                guard.remove(&upload_id);
-            }
-        }
+        // Bound disconnection latency. Detached cleanups can finish after closing
+        // the transport wakes any outstanding SFTP requests.
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while cleanups.join_next().await.is_some() {}
+        })
+        .await;
+        cleanups.detach_all();
     }
 }
 
@@ -686,6 +712,7 @@ async fn dial_sftp_transport(
         SftpTransport {
             connection,
             sftp,
+            sync_hash: Arc::new(Mutex::default()),
             profile_id: profile.id.clone(),
             ssh_host: profile.ssh_host.trim().to_ascii_lowercase(),
             ssh_port: profile.ssh_port,
@@ -701,10 +728,7 @@ pub async fn sftp_connect(
     profile_id: String,
     host_key_policy: Option<HostKeyPolicy>,
 ) -> Result<SftpConnectResponse, String> {
-    let profile = state
-        .profiles
-        .get(&profile_id)
-        .map_err(|e| e.to_string())?;
+    let profile = state.profiles.get(&profile_id).map_err(|e| e.to_string())?;
     let (transport, home) = dial_sftp_transport(
         state.secrets.as_ref(),
         &state.known_hosts_path,
@@ -755,17 +779,16 @@ pub async fn sftp_reconnect(
     host_key_policy: Option<HostKeyPolicy>,
 ) -> Result<SftpConnectResponse, String> {
     if let Ok(existing) = state.sftp.get_session(&profile_id).await {
-        let (_, _, home) = existing.reconnect(None, host_key_policy, true, false).await?;
+        let (_, _, home) = existing
+            .reconnect(None, host_key_policy, true, false)
+            .await?;
         return Ok(SftpConnectResponse {
             id: existing.id.clone(),
             path: home,
         });
     }
 
-    let profile = state
-        .profiles
-        .get(&profile_id)
-        .map_err(|e| e.to_string())?;
+    let profile = state.profiles.get(&profile_id).map_err(|e| e.to_string())?;
     let (transport, home) = dial_sftp_transport(
         state.secrets.as_ref(),
         &state.known_hosts_path,
@@ -955,7 +978,10 @@ pub async fn sftp_create_file(
             async move {
                 let _file = t
                     .sftp
-                    .open_with_flags(&p, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE)
+                    .open_with_flags(
+                        &p,
+                        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+                    )
                     .await
                     .map_err(|e| sftp_err(format!("create {p}"), e))?;
                 Ok(())
@@ -1006,115 +1032,31 @@ pub async fn sftp_delete(
         .map_err(SftpOpError::into_command_string)
 }
 
-pub(crate) fn sftp_open_cache_path(
-    cache_root: &Path,
+pub(crate) async fn cache_sftp_file_for_open(
+    state: &AppState,
     session_id: &str,
     remote_path: &str,
+    workspace_root: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let mut hasher = Sha256::new();
-    hasher.update(session_id.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(remote_path.as_bytes());
-    let digest = hasher.finalize();
-    let bucket: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-
-    let raw_name = remote_path
-        .rsplit('/')
-        .next()
-        .unwrap_or("")
-        .trim();
+    let resolved_sid = state.sftp.get_session(session_id).await?.id.clone();
+    let raw_name = remote_path.rsplit('/').next().unwrap_or("").trim();
     let safe_name = if raw_name.is_empty() || raw_name == "." || raw_name == ".." {
         "remote-file".to_string()
     } else {
         sanitize_filename_segment(raw_name)
     };
-    Ok(cache_root.join(bucket).join(safe_name))
-}
-
-async fn cache_sftp_file_for_open_inner(
-    state: &AppState,
-    session_id: &str,
-    remote_path: &str,
-) -> Result<PathBuf, SftpOpError> {
-    let resolved_sid = {
-        let session = state
-            .sftp
-            .get_session(session_id)
-            .await
-            .map_err(|message| SftpOpError {
-                message,
-                transport_lost: false,
-            })?;
-        session.id.clone()
-    };
-
-    let local_path = sftp_open_cache_path(&state.sftp_cache_dir, &resolved_sid, remote_path)
-        .map_err(|message| SftpOpError {
-            message,
-            transport_lost: false,
-        })?;
-    if let Some(parent) = local_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| SftpOpError {
-                message: format!("create cache dir: {e}"),
-                transport_lost: false,
-            })?;
-    }
-
-    let rpath = remote_path.to_string();
-    let lpath = local_path.clone();
-    let transfers = Arc::clone(&state.transfers);
-
     state
-        .sftp
-        .run_with_reconnect(session_id, TransferError::is_transport_error, move |t| {
-            let rpath = rpath.clone();
-            let lpath = lpath.clone();
-            let transfers = Arc::clone(&transfers);
-            async move {
-                let meta = t
-                    .sftp
-                    .metadata(&rpath)
-                    .await
-                    .map_err(|e| sftp_err(format!("stat {rpath}"), e))?;
-                if meta.is_dir() {
-                    return Err(TransferError::InvalidInput(
-                        "cannot open a directory as a file".into(),
-                    ));
-                }
-                let size = meta.size.unwrap_or(0);
-                if size > MAX_SYNC_FILE_BYTES {
-                    return Err(TransferError::InvalidInput(format!(
-                        "file is too large to open with sync (limit 100 MB): {size} bytes"
-                    )));
-                }
-
-                let transfer_id = format!("open-{}", new_id());
-                download_file_resumable_once(
-                    &t.sftp,
-                    &rpath,
-                    &lpath,
-                    &transfer_id,
-                    false,
-                    &transfers,
-                )
-                .await
-            }
-        })
-        .await?;
-
-    Ok(local_path)
-}
-
-pub(crate) async fn cache_sftp_file_for_open(
-    state: &AppState,
-    session_id: &str,
-    remote_path: &str,
-) -> Result<PathBuf, String> {
-    cache_sftp_file_for_open_inner(state, session_id, remote_path)
+        .sftp_sync
+        .open_cached(
+            Arc::clone(&state.sftp),
+            Arc::clone(&state.launcher_logs),
+            resolved_sid,
+            remote_path.to_string(),
+            workspace_root.map(str::to_owned),
+            &state.sftp_cache_dir,
+            &safe_name,
+        )
         .await
-        .map_err(|err| err.message)
 }
 
 #[tauri::command]
@@ -1124,22 +1066,7 @@ pub async fn sftp_open_file(
     path: String,
     as_text: Option<bool>,
 ) -> Result<SftpOpenFileResponse, String> {
-    let (session_id, _) = state.sftp.get_entry_with_id(&profile_id).await?;
-    let local_path = cache_sftp_file_for_open_inner(&state, &session_id, &path)
-        .await
-        .map_err(SftpOpError::into_command_string)?;
-
-    state
-        .sftp_sync
-        .register(
-            Arc::clone(&state.sftp),
-            Arc::clone(&state.launcher_logs),
-            session_id,
-            path,
-            local_path.clone(),
-        )
-        .await;
-
+    let local_path = cache_sftp_file_for_open(&state, &profile_id, &path, None).await?;
     if as_text.unwrap_or(false) {
         open_text_file_in_system(&local_path)?;
     } else {
@@ -1176,8 +1103,37 @@ pub async fn sftp_server_copy_support(
     Ok(ServerCopySupportResponse { supported })
 }
 
-fn is_exec_transport_error(msg: &str) -> bool {
-    !msg.contains("remote command execution rejected")
+async fn has_exact_copy_tools(transport: &SftpTransport) -> bool {
+    // GNU-style exact-target and no-clobber flags are required for publication.
+    transport.connection.exec_command_timeout(
+        "cp -T --help >/dev/null 2>&1 && mv -nT --help >/dev/null 2>&1 && command -v mktemp >/dev/null 2>&1",
+        COPY_REMOTE_PROBE_TIMEOUT,
+    ).await.is_ok_and(|out| out.exit_code == Some(0))
+}
+
+fn same_host_copy_command(source: &str, destination: &str, parent: &str) -> String {
+    let script = r#"set -eu
+src=$1 dst=$2 parent=$3
+mkdir -p -- "$parent"
+if [ -e "$dst" ] || [ -L "$dst" ]; then
+    printf '%s\n' 'destination already exists' >&2
+    exit 1
+fi
+work=$(mktemp -d -- "${parent%/}/.chemssh-copy-XXXXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+cp -R -P -T -- "$src" "$work/item"
+mv -nT -- "$work/item" "$dst"
+if [ -e "$work/item" ] || [ -L "$work/item" ]; then
+    printf '%s\n' 'destination was created during copy' >&2
+    exit 1
+fi"#;
+    format!(
+        "/bin/sh -c {} sh {} {} {}",
+        shell_quote(script),
+        shell_quote(source),
+        shell_quote(destination),
+        shell_quote(parent)
+    )
 }
 
 #[tauri::command]
@@ -1188,102 +1144,75 @@ pub async fn sftp_copy_on_server(
     target_path: String,
     items: Vec<ServerCopyItem>,
 ) -> Result<ServerCopyResponse, String> {
-    let src_entry = state.sftp.get_entry_with_id(&source_session).await;
-    let dst_entry = state.sftp.get_entry_with_id(&target_session).await;
-    let (Ok((_, src)), Ok((_, dst))) = (src_entry, dst_entry) else {
-        return Ok(ServerCopyResponse {
-            supported: false,
-            results: Vec::new(),
-        });
+    let unsupported = || ServerCopyResponse {
+        supported: false,
+        results: Vec::new(),
     };
-    if !is_same_remote_host(&src, &dst) {
-        return Ok(ServerCopyResponse {
-            supported: false,
-            results: Vec::new(),
+    let (Ok((_, src)), Ok((_, dst))) = (
+        state.sftp.get_entry_with_id(&source_session).await,
+        state.sftp.get_entry_with_id(&target_session).await,
+    ) else {
+        return Ok(unsupported());
+    };
+    if !is_same_remote_host(&src, &dst)
+        || !target_path.starts_with('/')
+        || !has_exact_copy_tools(&dst).await
+    {
+        return Ok(unsupported());
+    }
+
+    let base = target_path.trim_end_matches('/');
+    let mut prepared = Vec::with_capacity(items.len());
+    // Preflight the whole batch before any writes. Existing destinations use the
+    // per-file SFTP pipeline so directories merge into the exact requested path.
+    for item in items {
+        let relative = &item.relative_path;
+        if !item.source_path.starts_with('/')
+            || item.source_path.contains('\0')
+            || relative.contains('\0')
+            || relative
+                .split('/')
+                .any(|part| matches!(part, "" | "." | ".."))
+        {
+            return Ok(unsupported());
+        }
+        let destination = format!("{base}/{relative}");
+        let missing = match dst.sftp.symlink_metadata(&destination).await {
+            Err(russh_sftp::client::error::Error::Status(status)) => {
+                status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile
+            }
+            _ => false,
+        };
+        if !missing {
+            return Ok(unsupported());
+        }
+        prepared.push((item.source_path, destination));
+    }
+
+    let mut results = Vec::with_capacity(prepared.len());
+    for (source_path, destination) in prepared {
+        let parent = destination
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .filter(|parent| !parent.is_empty())
+            .unwrap_or("/");
+        let command = same_host_copy_command(&source_path, &destination, parent);
+        // An interrupted reply may hide a successful publication. Never replay.
+        let error = match dst.connection.exec_command(&command).await {
+            Ok(out) if out.exit_code == Some(0) => None,
+            Ok(out) if out.exit_code.is_none() => Some("server copy outcome unknown".into()),
+            Ok(out) if !out.stderr.trim().is_empty() => Some(out.stderr.trim().to_owned()),
+            Ok(out) => Some(format!("server copy exited with code {:?}", out.exit_code)),
+            Err(err) => Some(format!(
+                "server copy failed or its outcome is unknown: {err}"
+            )),
+        };
+        results.push(ServerCopyItemResult {
+            source_path,
+            ok: error.is_none(),
+            error,
         });
     }
-
-    let mut results = Vec::with_capacity(items.len());
-    let base = target_path.trim_end_matches('/');
-    for item in items {
-        let rel = item.relative_path.trim_start_matches('/');
-        if rel.is_empty()
-            || rel.split('/').any(|s| s.is_empty() || s == "." || s == "..")
-        {
-            results.push(ServerCopyItemResult {
-                source_path: item.source_path,
-                ok: false,
-                error: Some("unsafe relative target path".into()),
-            });
-            continue;
-        }
-        let dst_item_path = if base.is_empty() {
-            format!("/{rel}")
-        } else {
-            format!("{base}/{rel}")
-        };
-        let parent_dir = dst_item_path
-            .rsplit_once('/')
-            .map(|(p, _)| if p.is_empty() { "/" } else { p })
-            .unwrap_or("/");
-        let cmd = format!(
-            "mkdir -p -- {} && cp -R -P -- {} {}",
-            shell_quote(parent_dir),
-            shell_quote(&item.source_path),
-            shell_quote(&dst_item_path)
-        );
-        let exec_res = state
-            .sftp
-            .run_with_reconnect(
-                &target_session,
-                |e: &TransferError| e.is_transport_error(),
-                |t| {
-                    let cmd = cmd.clone();
-                    async move {
-                        t.connection.exec_command(&cmd).await.map_err(|e| {
-                            let msg = e.to_string();
-                            if is_exec_transport_error(&msg) {
-                                TransferError::SftpTransport(msg)
-                            } else {
-                                TransferError::Archive(msg)
-                            }
-                        })
-                    }
-                },
-            )
-            .await;
-
-        match exec_res {
-            Ok(out) if out.exit_code == Some(0) => {
-                results.push(ServerCopyItemResult {
-                    source_path: item.source_path,
-                    ok: true,
-                    error: None,
-                });
-            }
-            Ok(out) => {
-                let err = out.stderr.trim();
-                let msg = if err.is_empty() {
-                    format!("cp exited with code {:?}", out.exit_code)
-                } else {
-                    err.to_string()
-                };
-                results.push(ServerCopyItemResult {
-                    source_path: item.source_path,
-                    ok: false,
-                    error: Some(msg),
-                });
-            }
-            Err(err) => {
-                results.push(ServerCopyItemResult {
-                    source_path: item.source_path,
-                    ok: false,
-                    error: Some(err.message),
-                });
-            }
-        }
-    }
-
     Ok(ServerCopyResponse {
         supported: true,
         results,
@@ -1316,6 +1245,7 @@ pub async fn sftp_upload_local(
     transfer_id: String,
     resume: Option<bool>,
 ) -> Result<(), String> {
+    let _ = resume;
     let session = state.sftp.get_session(&profile_id).await?;
     let (transport, gen) = session.ensure_live().await.map_err(|msg| {
         let out = format_sftp_command_error(msg.clone(), !is_explicit_disconnect_error(&msg));
@@ -1324,12 +1254,12 @@ pub async fn sftp_upload_local(
     })?;
 
     let local = PathBuf::from(&local_path);
-    match upload_file_resumable_once(
+    match upload_file_once(
         &transport.sftp,
+        Some(&transport.connection),
         &local,
         &remote_path,
         &transfer_id,
-        resume.unwrap_or(false),
         &state.transfers,
     )
     .await
@@ -1345,12 +1275,12 @@ pub async fn sftp_upload_local(
                     format_sftp_command_error(msg, !is_explicit_disconnect_error(&re_err))
                 })?;
 
-            match upload_file_resumable_once(
+            match upload_file_once(
                 &fresh_transport.sftp,
+                Some(&fresh_transport.connection),
                 &local,
                 &remote_path,
                 &transfer_id,
-                true,
                 &state.transfers,
             )
             .await
@@ -1384,65 +1314,56 @@ pub async fn sftp_download_local(
     remote_path: String,
     local_path: String,
     transfer_id: String,
-    resume: Option<bool>,
+    overwrite: Option<bool>,
 ) -> Result<(), String> {
-    let session = state.sftp.get_session(&profile_id).await?;
-    let (transport, gen) = session.ensure_live().await.map_err(|msg| {
-        let out = format_sftp_command_error(msg.clone(), !is_explicit_disconnect_error(&msg));
-        state.transfers.finish(&transfer_id, Some(msg));
-        out
-    })?;
-
-    let local = PathBuf::from(&local_path);
-    match download_file_resumable_once(
-        &transport.sftp,
-        &remote_path,
-        &local,
-        &transfer_id,
-        resume.unwrap_or(false),
-        &state.transfers,
-    )
-    .await
-    {
-        Ok(()) => Ok(()),
-        Err(err) if err.is_transport_error() && !state.transfers.is_cancelled(&transfer_id) => {
-            let (fresh_transport, _, _) = session
-                .reconnect(Some(gen), Some(HostKeyPolicy::Strict), false, false)
-                .await
-                .map_err(|re_err| {
-                    let msg = format!("{err} (auto-reconnect failed: {re_err})");
-                    state.transfers.finish(&transfer_id, Some(msg.clone()));
-                    format_sftp_command_error(msg, !is_explicit_disconnect_error(&re_err))
-                })?;
-
-            match download_file_resumable_once(
-                &fresh_transport.sftp,
-                &remote_path,
-                &local,
-                &transfer_id,
-                true,
-                &state.transfers,
-            )
-            .await
-            {
-                Ok(()) => Ok(()),
-                Err(err2) => {
-                    let is_transport = err2.is_transport_error();
-                    let msg = err2.to_string();
-                    if is_transport {
-                        state.transfers.finish(&transfer_id, Some(msg.clone()));
-                    }
-                    Err(format_sftp_command_error(msg, is_transport))
-                }
+    let store = &state.transfers;
+    // Existing callers may omit progress; a private ID still lets shutdown
+    // cancel and drain the worker before tearing down SFTP transports.
+    let transfer_id = if transfer_id.is_empty() { new_id() } else { transfer_id };
+    let _worker = state.download_workers.begin(store, &transfer_id)?;
+    let result = async {
+        let session = state.sftp.get_session(&profile_id).await.map_err(TransferError::Sftp)?;
+        let (transport, generation) = download_transport_wait(store, &transfer_id, session.ensure_live()).await?;
+        let local = PathBuf::from(&local_path);
+        let overwrite = overwrite.unwrap_or(true);
+        match download_file_attempt(&transport.sftp, &remote_path, &local, &transfer_id, store, overwrite).await {
+            Err(err) if err.is_transport_error() && !store.is_cancelled(&transfer_id) => {
+                store.reset_bytes(&transfer_id, 0);
+                let (fresh, _, _) = download_transport_wait(store, &transfer_id, async {
+                    session.reconnect(Some(generation), Some(HostKeyPolicy::Strict), false, false)
+                        .await
+                        .map_err(|re_err| {
+                            if is_explicit_disconnect_error(&re_err) {
+                                re_err
+                            } else {
+                                format!("{err} (auto-reconnect failed: {re_err})")
+                            }
+                        })
+                }).await?;
+                download_file_attempt(&fresh.sftp, &remote_path, &local, &transfer_id, store, overwrite).await
             }
+            result => result,
         }
-        Err(err) => {
-            let is_transport = err.is_transport_error();
-            let msg = err.to_string();
-            if is_transport {
-                state.transfers.finish(&transfer_id, Some(msg.clone()));
-            }
-            Err(format_sftp_command_error(msg, is_transport))
+    }.await;
+    store.finish(&transfer_id, result.as_ref().err().map(ToString::to_string));
+    result.map_err(|err| format_sftp_command_error(err.to_string(), err.is_transport_error()))
+}
+
+async fn download_transport_wait<T>(
+    store: &TransferProgressStore,
+    id: &str,
+    future: impl Future<Output = Result<T, String>>,
+) -> Result<T, TransferError> {
+    tokio::select! {
+        biased;
+        _ = store.wait_for_cancel(id) => Err(TransferError::Cancelled),
+        result = tokio::time::timeout(Duration::from_secs(60), future) => {
+            result.map_err(|_| TransferError::SftpTransport("download connection timed out".into()))?
+                .map_err(|err| if is_explicit_disconnect_error(&err) {
+                    TransferError::Sftp(err)
+                } else {
+                    TransferError::SftpTransport(err)
+                })
         }
     }
 }
@@ -1455,49 +1376,69 @@ pub async fn sftp_upload_bytes_begin(
     transfer_id: Option<String>,
     total_size: Option<u64>,
 ) -> Result<UploadBytesBeginResponse, String> {
-    let (resolved_sid, _) = state.sftp.get_entry_with_id(&profile_id).await?;
+    let session = state.sftp.get_session(&profile_id).await?;
+    let (transport, generation) = session.ensure_live().await.map_err(|msg| {
+        let lost = !is_explicit_disconnect_error(&msg);
+        format_sftp_command_error(msg, lost)
+    })?;
     let tid = transfer_id
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("upload-{}", new_id()));
-    let _ = state.transfers.begin(&tid, total_size.unwrap_or(0), false);
+    state
+        .transfers
+        .begin(&tid, total_size.unwrap_or(0), false)
+        .map_err(|err| err.to_string())?;
 
-    let rpath = remote_path.clone();
-    let file = match state
-        .sftp
-        .run_with_reconnect(&profile_id, TransferError::is_transport_error, |t| {
-            let rpath = rpath.clone();
-            async move {
-                if let Some((parent, _)) = rpath.rsplit_once('/') {
-                    if !parent.is_empty() {
-                        mkdir_remote_recursive(&t.sftp, parent).await?;
-                    }
-                }
-                t.sftp
-                    .open_with_flags(
-                        &rpath,
-                        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-                    )
-                    .await
-                    .map_err(|e| sftp_err(format!("open remote {rpath}"), e))
+    let begin = async {
+        state.transfers.wait_if_paused(&tid).await?;
+        if let Some((parent, _)) = remote_path.rsplit_once('/') {
+            if !parent.is_empty() {
+                mkdir_remote_recursive(&transport.sftp, parent).await?;
             }
-        })
-        .await
-    {
-        Ok(f) => f,
+        }
+        RemoteStagedFile::create_with_ssh(Arc::clone(&transport.sftp), &remote_path, &transport.connection)
+            .await
+    }
+    .await;
+    let mut staged = match begin {
+        Ok(staged) => staged,
         Err(err) => {
-            state.transfers.finish(&tid, Some(err.message.clone()));
-            return Err(err.into_command_string());
+            state.transfers.finish(&tid, Some(err.to_string()));
+            return Err(format_sftp_command_error(
+                err.to_string(),
+                err.is_transport_error(),
+            ));
         }
     };
-
     let upload_id = new_id();
+    // Use the same registry lock order as disconnect, so it cannot miss an upload
+    // inserted after its session was detached.
+    let sessions = state.sftp.sessions.lock().await;
+    if !sessions
+        .get(&session.id)
+        .is_some_and(|current| Arc::ptr_eq(current, &session))
+        || state.transfers.is_cancelled(&tid)
+    {
+        drop(sessions);
+        staged.cleanup().await;
+        let message = "upload cancelled or SFTP session disconnected";
+        state.transfers.finish(&tid, Some(message.into()));
+        return Err(message.into());
+    }
     state.sftp.uploads.lock().await.insert(
         upload_id.clone(),
-        Arc::new(Mutex::new(ActiveByteUpload {
-            session_id: resolved_sid,
-            file,
+        Arc::new(ActiveByteUpload {
+            session,
+            generation,
+            transport,
             transfer_id: tid,
-        })),
+            progress: Arc::clone(&state.transfers),
+            total_size,
+            writer: Mutex::new(ByteUploadWriter {
+                staged: Some(staged),
+                written: 0,
+            }),
+        }),
     );
     Ok(UploadBytesBeginResponse { upload_id })
 }
@@ -1518,24 +1459,49 @@ pub async fn sftp_upload_bytes_chunk(
         .await
         .get(&upload_id)
         .cloned()
-        .ok_or_else(|| format!("upload handle not found: {upload_id}"))?;
-
-    let mut guard = handle.lock().await;
-    if let Err(err) = state.transfers.wait_if_paused(&guard.transfer_id).await {
-        state
-            .transfers
-            .finish(&guard.transfer_id, Some(err.to_string()));
-        return Err(err.to_string());
+        .ok_or_else(|| "upload handle not found".to_string())?;
+    let result = async {
+        handle.progress.wait_if_paused(&handle.transfer_id).await?;
+        let mut writer = handle.writer.lock().await;
+        if handle.progress.is_cancelled(&handle.transfer_id) {
+            return Err(TransferError::Cancelled);
+        }
+        handle.check_generation().await?;
+        let written = writer
+            .written
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| TransferError::InvalidInput("upload size overflow".into()))?;
+        if handle.total_size.is_some_and(|total| written > total) {
+            return Err(TransferError::InvalidInput(
+                "upload exceeds declared size".into(),
+            ));
+        }
+        let staged = writer.staged.as_mut().ok_or(TransferError::Cancelled)?;
+        if let Err(err) = staged.file_mut().write_all(&bytes).await {
+            let err = remote_io_err("write upload chunk", err);
+            if let Some(mut failed_stage) = writer.staged.take() {
+                drop(writer);
+                failed_stage.cleanup().await;
+                handle.progress.finish(&handle.transfer_id, Some(err.to_string()));
+            }
+            return Err(err);
+        }
+        writer.written = written;
+        handle
+            .progress
+            .add_loaded(&handle.transfer_id, bytes.len() as u64);
+        Ok(())
     }
-    if let Err(err) = guard.file.write_all(&bytes).await {
-        let te = remote_io_err("write remote chunk", err);
-        let msg = te.to_string();
-        state.transfers.finish(&guard.transfer_id, Some(msg.clone()));
-        return Err(format_sftp_command_error(msg, te.is_transport_error()));
+    .await;
+    if let Err(err) = result {
+        // On a failed write do not allow a subsequent finish to publish this file.
+        handle.abort().await;
+        state.sftp.uploads.lock().await.remove(&upload_id);
+        return Err(format_sftp_command_error(
+            err.to_string(),
+            err.is_transport_error(),
+        ));
     }
-    state
-        .transfers
-        .add_loaded(&guard.transfer_id, bytes.len() as u64);
     Ok(())
 }
 
@@ -1550,121 +1516,45 @@ pub async fn sftp_upload_bytes_finish(
         .uploads
         .lock()
         .await
-        .remove(&upload_id)
-        .ok_or_else(|| format!("upload handle not found: {upload_id}"))?;
-
-    let mut guard = handle.lock().await;
+        .get(&upload_id)
+        .cloned()
+        .ok_or_else(|| "upload handle not found".to_string())?;
     if abort.unwrap_or(false) {
-        state
-            .transfers
-            .finish(&guard.transfer_id, Some("upload aborted".into()));
+        handle.abort().await;
+        state.sftp.uploads.lock().await.remove(&upload_id);
         return Ok(());
     }
-    if let Err(err) = guard.file.shutdown().await {
-        let te = remote_io_err("finalize remote file", err);
-        let msg = te.to_string();
-        state.transfers.finish(&guard.transfer_id, Some(msg.clone()));
-        return Err(format_sftp_command_error(msg, te.is_transport_error()));
-    }
-    state.transfers.finish(&guard.transfer_id, None);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn get_sftp_download_url(
-    state: State<'_, AppState>,
-    profile_id: String,
-    remote_path: String,
-    suggested_name: Option<String>,
-) -> Result<String, String> {
-    if state.proxy_base_url.is_empty() {
-        return Err("local proxy server is not available".into());
-    }
-    let mut url = url::Url::parse(&format!("{}/api/sftp/download", state.proxy_base_url))
-        .map_err(|e| e.to_string())?;
-    {
-        let mut qp = url.query_pairs_mut();
-        qp.append_pair("session", &profile_id);
-        qp.append_pair("path", &remote_path);
-        qp.append_pair("token", &state.api_token);
-        if let Some(name) = suggested_name.filter(|s| !s.trim().is_empty()) {
-            qp.append_pair("name", &name);
+    // Take ownership before sealing. No chunk or second finish can use the
+    // writer once finalization starts, and cancellation does not wait on it.
+    let (mut staged, written) = {
+        let mut writer = handle.writer.lock().await;
+        let staged = writer
+            .staged
+            .take()
+            .ok_or("upload is already finalizing or aborted")?;
+        (staged, writer.written)
+    };
+    let result = async {
+        if handle.total_size.is_some_and(|total| total != written) {
+            return Err(TransferError::InvalidInput(
+                "upload did not match declared size".into(),
+            ));
         }
+        staged.verify_size(written).await?;
+        handle.check_generation().await?;
+        handle.progress.begin_commit(&handle.transfer_id).await?;
+        staged.commit_with_ssh(&handle.transport.connection).await
     }
-    Ok(url.to_string())
-}
-
-#[tauri::command]
-pub async fn sftp_download_bytes(
-    state: State<'_, AppState>,
-    profile_id: String,
-    remote_path: String,
-    max_bytes: Option<u64>,
-) -> Result<DownloadBytesResponse, String> {
-    let limit = max_bytes.unwrap_or(DEFAULT_DOWNLOAD_BYTES_LIMIT);
-    let rpath = remote_path.clone();
-    let data = state
-        .sftp
-        .run_with_reconnect(&profile_id, TransferError::is_transport_error, |t| {
-            let rpath = rpath.clone();
-            async move {
-                let meta = t
-                    .sftp
-                    .metadata(&rpath)
-                    .await
-                    .map_err(|e| sftp_err(format!("stat {rpath}"), e))?;
-                if meta.is_dir() {
-                    return Err(TransferError::InvalidInput(
-                        "cannot download a directory directly as bytes".into(),
-                    ));
-                }
-                let expected_size = meta.size.unwrap_or(0);
-                if expected_size > limit {
-                    return Err(TransferError::InvalidInput(format!(
-                        "remote file size ({expected_size} bytes) exceeds browser download limit ({limit} bytes); please transfer into a local folder instead"
-                    )));
-                }
-
-                let mut file = t
-                    .sftp
-                    .open(&rpath)
-                    .await
-                    .map_err(|e| sftp_err(format!("open {rpath}"), e))?;
-                let mut data = Vec::with_capacity(expected_size.min(4 * 1024 * 1024) as usize);
-                let mut buf = vec![0u8; DOWNLOAD_CHUNK_SIZE];
-                loop {
-                    let n = file
-                        .read(&mut buf)
-                        .await
-                        .map_err(|e| remote_io_err(format!("read {rpath}"), e))?;
-                    if n == 0 {
-                        break;
-                    }
-                    if (data.len() as u64).saturating_add(n as u64) > limit {
-                        return Err(TransferError::InvalidInput(format!(
-                            "remote file exceeded browser download limit ({limit} bytes)"
-                        )));
-                    }
-                    data.extend_from_slice(&buf[..n]);
-                }
-                Ok(data)
-            }
-        })
-        .await
-        .map_err(SftpOpError::into_command_string)?;
-
-    let name = remote_path
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("download")
-        .to_string();
-    let size = data.len() as u64;
-    Ok(DownloadBytesResponse {
-        name,
-        data_b64: BASE64.encode(&data),
-        size,
-    })
+    .await;
+    if result.is_err() {
+        staged.cleanup().await;
+    }
+    handle.progress.finish(
+        &handle.transfer_id,
+        result.as_ref().err().map(ToString::to_string),
+    );
+    state.sftp.uploads.lock().await.remove(&upload_id);
+    result.map_err(|err| format_sftp_command_error(err.to_string(), err.is_transport_error()))
 }
 
 #[tauri::command]
@@ -1690,10 +1580,11 @@ pub async fn sftp_copy_remote(
         out
     })?;
 
-    match copy_remote_to_remote_once(
+    match copy_remote_file_once(
         &src_t.sftp,
         &src_path,
         &dst_t.sftp,
+        Some(&dst_t.connection),
         &dst_path,
         &transfer_id,
         &state.transfers,
@@ -1702,10 +1593,8 @@ pub async fn sftp_copy_remote(
     {
         Ok(()) => Ok(()),
         Err(err) if err.is_transport_error() && !state.transfers.is_cancelled(&transfer_id) => {
-            let src_dead =
-                src_t.is_closed() || !src_t.probe_alive(COPY_REMOTE_PROBE_TIMEOUT).await;
-            let dst_dead =
-                dst_t.is_closed() || !dst_t.probe_alive(COPY_REMOTE_PROBE_TIMEOUT).await;
+            let src_dead = src_t.is_closed() || !src_t.probe_alive(COPY_REMOTE_PROBE_TIMEOUT).await;
+            let dst_dead = dst_t.is_closed() || !dst_t.probe_alive(COPY_REMOTE_PROBE_TIMEOUT).await;
             let (reconnect_src, reconnect_dst) = if !src_dead && !dst_dead {
                 (true, true)
             } else {
@@ -1752,10 +1641,11 @@ pub async fn sftp_copy_remote(
                 }
             };
 
-            match copy_remote_to_remote_once(
+            match copy_remote_file_once(
                 &new_src.sftp,
                 &src_path,
                 &new_dst.sftp,
+                Some(&new_dst.connection),
                 &dst_path,
                 &transfer_id,
                 &state.transfers,
@@ -1791,9 +1681,11 @@ pub async fn sftp_archive_tools(
 ) -> Result<ArchiveTools, String> {
     state
         .sftp
-        .run_with_reconnect(&profile_id, TransferError::is_transport_error, |t| async move {
-            detect_remote_tools(&t.connection).await
-        })
+        .run_with_reconnect(
+            &profile_id,
+            TransferError::is_transport_error,
+            |t| async move { detect_remote_tools(&t.connection).await },
+        )
         .await
         .map_err(SftpOpError::into_command_string)
 }
@@ -2167,7 +2059,8 @@ mod tests {
 
     #[test]
     fn format_sftp_command_error_marks_transport_lost_without_corrupting_json() {
-        let marked = format_sftp_command_error("sftp error: list /home/user: session closed".into(), true);
+        let marked =
+            format_sftp_command_error("sftp error: list /home/user: session closed".into(), true);
         let parsed: serde_json::Value = serde_json::from_str(&marked).unwrap();
         assert_eq!(
             parsed["error"].as_str(),

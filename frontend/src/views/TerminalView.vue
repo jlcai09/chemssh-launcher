@@ -189,13 +189,42 @@
                 @keydown.enter.prevent.stop="goSftpPath"
               />
             </div>
+            <div class="terminal-sftp-columns" role="row">
+              <button
+                type="button"
+                class="terminal-sftp-col is-name"
+                :class="{ 'is-active': sftpSortBy === 'name' }"
+                @click="toggleSftpSort('name')"
+              >
+                <span>{{ t('sftp.name') }}</span>
+                <span v-if="sftpSortBy === 'name'" class="terminal-sftp-sort-arrow">{{ sftpSortDir === 'asc' ? '▲' : '▼' }}</span>
+              </button>
+              <button
+                type="button"
+                class="terminal-sftp-col is-size"
+                :class="{ 'is-active': sftpSortBy === 'size' }"
+                @click="toggleSftpSort('size')"
+              >
+                <span>{{ t('sftp.size') }}</span>
+                <span v-if="sftpSortBy === 'size'" class="terminal-sftp-sort-arrow">{{ sftpSortDir === 'asc' ? '▲' : '▼' }}</span>
+              </button>
+              <button
+                type="button"
+                class="terminal-sftp-col is-time"
+                :class="{ 'is-active': sftpSortBy === 'mod_time' }"
+                @click="toggleSftpSort('mod_time')"
+              >
+                <span>{{ t('sftp.modified') }}</span>
+                <span v-if="sftpSortBy === 'mod_time'" class="terminal-sftp-sort-arrow">{{ sftpSortDir === 'asc' ? '▲' : '▼' }}</span>
+              </button>
+            </div>
             <div v-if="sftpPanelError" class="terminal-sftp-hint is-error">
               {{ t('terminal.sftpLoadFailed', { error: sftpPanelError }) }}
             </div>
-            <div v-else-if="sftpPanelLoading && !sftpEntries.length && !sftpParentPath" class="terminal-sftp-hint">
+            <div v-else-if="sftpPanelLoading && !sortedSftpEntries.length && !sftpParentPath" class="terminal-sftp-hint">
               {{ t('terminal.sftpLoading') }}
             </div>
-            <div v-else-if="!sftpEntries.length && !sftpParentPath" class="terminal-sftp-hint">
+            <div v-else-if="!sortedSftpEntries.length && !sftpParentPath" class="terminal-sftp-hint">
               {{ t('terminal.sftpEmpty') }}
             </div>
             <div
@@ -216,9 +245,11 @@
               >
                 <span class="terminal-sftp-entry-icon"><el-icon><FolderOpened /></el-icon></span>
                 <span class="terminal-sftp-entry-name">..</span>
+                <span class="terminal-sftp-entry-size" />
+                <span class="terminal-sftp-entry-time" />
               </button>
               <button
-                v-for="(entry, index) in sftpEntries"
+                v-for="(entry, index) in sortedSftpEntries"
                 :key="entry.path || entry.name"
                 type="button"
                 class="terminal-sftp-entry"
@@ -234,7 +265,8 @@
                   <el-icon><FolderOpened v-if="entry.is_dir" /><Document v-else /></el-icon>
                 </span>
                 <span class="terminal-sftp-entry-name">{{ entry.name }}</span>
-                <span v-if="!entry.is_dir" class="terminal-sftp-entry-size">{{ formatBytes(entry.size) }}</span>
+                <span class="terminal-sftp-entry-size">{{ entry.is_dir ? '' : formatBytes(entry.size) }}</span>
+                <span class="terminal-sftp-entry-time" :title="entry.mod_time || ''">{{ formatSftpTime(entry.mod_time) }}</span>
               </button>
             </div>
             <div class="terminal-sftp-footer" :title="sftpStatsText">{{ sftpStatsText }}</div>
@@ -441,6 +473,7 @@
           </el-tooltip>
         </div>
       </footer>
+      <NativeDownloadList class="terminal-downloads" :jobs="terminalDownloadJobs" />
     </div>
     <div
       v-if="tabMenu.visible"
@@ -573,20 +606,26 @@ import {
 import { t } from '../i18n'
 import { onProfilesChanged } from '../profileEvents'
 import { isTerminalDirectory, terminalUploadDirectory } from '../terminalDirectory'
+import NativeDownloadList from '../NativeDownloadList.vue'
+import { downloadActive, nativeDownloads } from '../nativeDownloads'
+import { notifyDownloadBatch } from '../downloadNotifications'
 import {
-  downloadRemoteFileViaTauri,
   isTauriRuntime,
+  pickTauriDownloadTargets,
   probeTauriTerminalSessions,
-  uploadFormViaTauri
+  uploadFormViaTauri,
+  type TauriDownloadSource,
 } from '../tauriBridge'
 
 const props = defineProps<{ active: boolean }>()
+const terminalDownloadJobs = computed(() => nativeDownloads.jobs.value.filter(job => downloadActive(job) || job.state === 'failed').slice(0, 20))
 
 const TERMINAL_PROFILE_KEY = 'chemssh-launcher.terminal-profile'
 const SIDEBAR_WIDTH_KEY = 'chemssh-launcher.terminal-sidebar-width'
 const SERVER_HEIGHT_KEY = 'chemssh-launcher.terminal-server-height'
 const SERVER_COLLAPSED_KEY = 'chemssh-launcher.terminal-server-collapsed'
 const SFTP_SYNC_KEY = 'chemssh-launcher.terminal-sftp-sync'
+const SFTP_SORT_KEY = 'chemssh-launcher.terminal-sftp-sort'
 const SIDEBAR_WIDTH_DEFAULT = 224
 const SIDEBAR_WIDTH_MIN = 172
 const SIDEBAR_WIDTH_MAX = 560
@@ -802,6 +841,77 @@ function loadSavedServerHeight(): number {
 const serverSectionStyle = computed(() => {
   if (serverSectionCollapsed.value || !sftpPanelOpen.value) return undefined
   return { flex: `0 0 ${serverSectionHeight.value}px` }
+})
+
+type SftpSortField = 'name' | 'size' | 'mod_time'
+const sftpSortBy = ref<SftpSortField>('name')
+const sftpSortDir = ref<'asc' | 'desc'>('asc')
+
+;(function loadSavedSftpSort() {
+  try {
+    const raw = localStorage.getItem(SFTP_SORT_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as { by?: string; dir?: string }
+    if (parsed.by === 'name' || parsed.by === 'size' || parsed.by === 'mod_time') {
+      sftpSortBy.value = parsed.by
+    }
+    if (parsed.dir === 'asc' || parsed.dir === 'desc') {
+      sftpSortDir.value = parsed.dir
+    }
+  } catch {
+    // ignore invalid stored sort preference
+  }
+})()
+
+function toggleSftpSort(field: SftpSortField) {
+  if (sftpSortBy.value === field) {
+    sftpSortDir.value = sftpSortDir.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    sftpSortBy.value = field
+    sftpSortDir.value = field === 'name' ? 'asc' : 'desc'
+  }
+  try {
+    localStorage.setItem(SFTP_SORT_KEY, JSON.stringify({ by: sftpSortBy.value, dir: sftpSortDir.value }))
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function parseEntryTime(raw?: string): number {
+  if (!raw) return 0
+  const ts = Date.parse(raw)
+  return Number.isFinite(ts) ? ts : 0
+}
+
+function formatSftpTime(raw?: string): string {
+  if (!raw) return ''
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const now = new Date()
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  }
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+const sortedSftpEntries = computed<FileEntry[]>(() => {
+  const entries = sftpEntries.value
+  const field = sftpSortBy.value
+  const factor = sftpSortDir.value === 'asc' ? 1 : -1
+  return [...entries].sort((left, right) => {
+    if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1
+    let cmp = 0
+    if (field === 'size') {
+      cmp = (left.size || 0) - (right.size || 0)
+    } else if (field === 'mod_time') {
+      cmp = parseEntryTime(left.mod_time) - parseEntryTime(right.mod_time)
+    } else {
+      cmp = left.name.localeCompare(right.name)
+    }
+    if (cmp !== 0) return cmp * factor
+    return left.name.localeCompare(right.name)
+  })
 })
 
 const sftpSelectedEntries = computed<FileEntry[]>(() => {
@@ -1041,7 +1151,7 @@ function handleSftpEntryClick(entry: FileEntry, index: number, event: MouseEvent
   const tab = activeTab.value
   if (!tab) return
   const path = sftpEntryPath(tab, entry)
-  const entries = tab.sftp.entries
+  const entries = sortedSftpEntries.value
   if (event.shiftKey && tab.sftp.anchorPath) {
     const anchorIdx = entries.findIndex(item => sftpEntryPath(tab, item) === tab.sftp.anchorPath)
     if (anchorIdx >= 0) {
@@ -1172,18 +1282,18 @@ async function downloadSftpSelection() {
   const files = sftpSelectedEntries.value.filter(entry => !entry.is_dir)
   if (files.length === 0) return
   try {
+    if (isTauriRuntime()) {
+      await queueTerminalDownloads(tab, files.map(entry => ({ path: sftpEntryPath(tab, entry), name: entry.name, size: entry.size })))
+      return
+    }
     const sessionID = await connectSftp(tab)
     for (const entry of files) {
       const path = sftpEntryPath(tab, entry)
-      if (isTauriRuntime()) {
-        await downloadRemoteFileViaTauri(sessionID, path, entry.name)
-      } else {
-        window.open(
-          `/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(path)}`,
-          '_blank',
-          'noopener'
-        )
-      }
+      window.open(
+        `/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(path)}`,
+        '_blank',
+        'noopener'
+      )
     }
   } catch (error) {
     ElMessage.error(errorMessage(error))
@@ -1567,7 +1677,7 @@ function startSftpEntryDrag(entry: FileEntry, event: DragEvent) {
   event.dataTransfer.effectAllowed = 'copy'
   event.dataTransfer.setData('text/plain', path)
   const sessionID = runtimeFor(tab)?.sftpSessionID || ''
-  if (!sessionID || entry.is_dir) return
+  if (isTauriRuntime() || !sessionID || entry.is_dir) return
   const url = `${window.location.origin}/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(path)}`
   event.dataTransfer.setData(
     'DownloadURL',
@@ -2472,7 +2582,7 @@ async function shutdownTab(tab: TerminalTab) {
   const sftpID = runtime.sftpSessionID
   runtime.sftpSessionID = ''
   runtime.sftpProfileID = ''
-  if (sftpID) await postJSON('/api/sftp/disconnect', { session: sftpID }).catch(() => undefined)
+  if (sftpID) disconnectSftpWhenDownloadsFinish(sftpID)
   runtime.disposed = true
   if (runtime.resizeTimer !== null) window.clearTimeout(runtime.resizeTimer)
   try {
@@ -2736,7 +2846,11 @@ async function disconnectSftp(tab: TerminalTab) {
   runtime.sftpProfileID = ''
   runtime.sftpSyncedFiles.clear()
   if (!id) return
-  await postJSON('/api/sftp/disconnect', { session: id }).catch(() => undefined)
+  disconnectSftpWhenDownloadsFinish(id)
+}
+
+function disconnectSftpWhenDownloadsFinish(id: string) {
+  void nativeDownloads.waitForSession(id).then(() => postJSON('/api/sftp/disconnect', { session: id })).catch(() => undefined)
 }
 
 function releaseSftpIfIdle(tab: TerminalTab) {
@@ -3051,6 +3165,15 @@ function downloadPathsFromArgv(cwd: string, argv: string[]) {
   })
 }
 
+async function queueTerminalDownloads(tab: TerminalTab, sources: readonly TauriDownloadSource[]) {
+  const targets = await pickTauriDownloadTargets(sources)
+  if (!targets) return
+  const sessionId = await connectSftp(tab)
+  const runtime = runtimeFor(tab)
+  if (!runtime || runtime.disposed || runtime.sftpSessionID !== sessionId) return
+  notifyDownloadBatch(nativeDownloads.enqueue({ sessionId, sourceName: tabTitle(tab), sources, targets }), targets)
+}
+
 async function downloadFromShell(tab: TerminalTab, cwd: string, argv: string[]) {
   const paths = downloadPathsFromArgv(cwd, argv)
   if (!paths.length) {
@@ -3058,13 +3181,12 @@ async function downloadFromShell(tab: TerminalTab, cwd: string, argv: string[]) 
     return
   }
   try {
+    if (isTauriRuntime()) {
+      await queueTerminalDownloads(tab, paths.map(path => ({ path })))
+      return
+    }
     const sessionID = await connectSftp(tab)
     for (const remotePath of paths) {
-      if (isTauriRuntime()) {
-        await downloadRemoteFileViaTauri(sessionID, remotePath)
-        if (paths.length > 1) await new Promise<void>(resolve => window.setTimeout(resolve, 300))
-        continue
-      }
       const res = await fetch(
         `/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(remotePath)}`,
         { headers: withLauncherToken() }
@@ -3223,6 +3345,8 @@ function handleSessionEnded(tab: TerminalTab, id: string, autoReconnectOnWake: b
   tab.status = 'idle'
   runtime.sessionID = ''
   runtime.pendingInput = ''
+  runtime.outputStop?.()
+  runtime.outputStop = null
   resetStreamState(tab)
   resetSftpPanelData(tab)
   writeNotice(tab, t('terminal.sessionEnded'))
@@ -3236,15 +3360,14 @@ function handleSessionEnded(tab: TerminalTab, id: string, autoReconnectOnWake: b
   }
 }
 
-// Output arrives over the shared app events channel. One websocket carries
-// every terminal, so opening more tabs no longer consumes one HTTP connection
-// each; the hub replays buffered output when the channel reconnects.
+// The desktop uses a binary output socket with IPC replay. Browser mode uses
+// the multiplexed app events channel.
 function attachTerminalOutput(tab: TerminalTab, id: string) {
   const runtime = runtimeFor(tab)
   if (!runtime) return
   runtime.outputStop?.()
   let sentCd = false
-  const decoder = new TextDecoder()
+  let decoder = new TextDecoder()
   runtime.outputStop = appEvents.watchTerminal(id, {
     onData: bytes => {
       if (!sentCd) {
@@ -3259,6 +3382,8 @@ function attachTerminalOutput(tab: TerminalTab, id: string) {
       consumeTerminalOutput(tab, decoder.decode(bytes, { stream: true }))
     },
     onGap: () => {
+      decoder = new TextDecoder()
+      runtime.controlBuffer = ''
       writeNotice(tab, t('terminal.outputGap'))
     },
     onExit: () => {
@@ -3526,3 +3651,11 @@ onBeforeUnmount(() => {
   tabs.value = []
 })
 </script>
+
+<style scoped>
+.terminal-downloads {
+  grid-row: 5;
+  color: var(--el-text-color-regular);
+  background: var(--el-bg-color);
+}
+</style>

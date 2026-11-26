@@ -1,35 +1,25 @@
-use std::io;
+use std::{io, time::Duration};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use http::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE};
 use http::{HeaderValue, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
-use serde::Deserialize;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::chemssh_proxy::{empty_body, header_str, json_error, query_param, ProxyBody};
+use crate::chemssh_proxy::{ProxyBody, empty_body, header_str, json_error, query_param};
 use crate::commands::terminal::RawTerminalEvent;
 use crate::state::AppState;
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-const MAX_WS_FRAME_BYTES: usize = 2 * 1024 * 1024;
-const WS_OP_CONT: u8 = 0x0;
-const WS_OP_TEXT: u8 = 0x1;
+const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_OUTPUT_BATCH: usize = 16;
 const WS_OP_BINARY: u8 = 0x2;
 const WS_OP_CLOSE: u8 = 0x8;
 const WS_OP_PING: u8 = 0x9;
 const WS_OP_PONG: u8 = 0xA;
-
-#[derive(Deserialize)]
-struct TerminalControlMsg {
-    #[serde(rename = "type")]
-    kind: String,
-    cols: Option<u32>,
-    rows: Option<u32>,
-}
 
 /// Pure-Rust SHA-1 (RFC 3174) used solely for the RFC 6455 Sec-WebSocket-Accept handshake.
 fn sha1_digest(data: &[u8]) -> [u8; 20] {
@@ -147,108 +137,92 @@ pub(crate) async fn write_ws_frame<W: AsyncWrite + Unpin>(
     writer.flush().await
 }
 
-pub(crate) async fn read_ws_frame<R: AsyncRead + Unpin>(
-    reader: &mut R,
-) -> io::Result<Option<(u8, Vec<u8>)>> {
-    let mut frag_opcode: Option<u8> = None;
-    let mut frag_buf: Vec<u8> = Vec::new();
+/// The terminal socket only accepts WebSocket protocol control frames. Keep
+/// partial bytes on the reader so the output branch can interrupt this future.
+struct ControlReader {
+    frame: [u8; 2 + 4 + 125],
+    used: usize,
+}
 
-    loop {
-        let mut first_two = [0u8; 2];
-        match reader.read_exact(&mut first_two).await {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof && frag_opcode.is_none() => {
+impl ControlReader {
+    fn new() -> Self {
+        Self {
+            frame: [0; 2 + 4 + 125],
+            used: 0,
+        }
+    }
+
+    async fn read<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+    ) -> io::Result<Option<(u8, Vec<u8>)>> {
+        while self.used < 2 {
+            let n = reader.read(&mut self.frame[self.used..2]).await?;
+            if n == 0 && self.used == 0 {
                 return Ok(None);
             }
-            Err(err) => return Err(err),
+            if n == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            self.used += n;
         }
 
-        let fin = (first_two[0] & 0x80) != 0;
-        let opcode = first_two[0] & 0x0f;
-        let masked = (first_two[1] & 0x80) != 0;
-        if !masked {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "client websocket frame must be masked",
-            ));
-        }
-
-        let len7 = first_two[1] & 0x7f;
-        let payload_len: usize = match len7 {
-            0..=125 => len7 as usize,
-            126 => {
-                let mut ext = [0u8; 2];
-                reader.read_exact(&mut ext).await?;
-                u16::from_be_bytes(ext) as usize
-            }
-            _ => {
-                let mut ext = [0u8; 8];
-                reader.read_exact(&mut ext).await?;
-                let len64 = u64::from_be_bytes(ext);
-                usize::try_from(len64).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "websocket frame length overflow")
-                })?
-            }
-        };
-
-        if payload_len > MAX_WS_FRAME_BYTES
-            || frag_buf.len().saturating_add(payload_len) > MAX_WS_FRAME_BYTES
+        let opcode = self.frame[0] & 0x0f;
+        let len = usize::from(self.frame[1] & 0x7f);
+        if self.frame[0] & 0xf0 != 0x80
+            || self.frame[1] & 0x80 == 0
+            || len > 125
+            || !matches!(opcode, WS_OP_CLOSE | WS_OP_PING | WS_OP_PONG)
+            || (opcode == WS_OP_CLOSE && len == 1)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "websocket frame exceeded 2MB limit",
+                "invalid terminal WebSocket control frame",
             ));
         }
 
-        let mut mask = [0u8; 4];
-        reader.read_exact(&mut mask).await?;
-        let mut payload = vec![0u8; payload_len];
-        if payload_len > 0 {
-            reader.read_exact(&mut payload).await?;
-            for (i, byte) in payload.iter_mut().enumerate() {
-                *byte ^= mask[i & 3];
+        let end = 6 + len;
+        while self.used < end {
+            let n = reader.read(&mut self.frame[self.used..end]).await?;
+            if n == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
             }
+            self.used += n;
         }
-
-        // Control frames (Close/Ping/Pong) may appear between fragmented data frames.
-        if (opcode & 0x08) != 0 {
-            return Ok(Some((opcode, payload)));
-        }
-
-        if opcode == WS_OP_CONT {
-            if frag_opcode.is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unexpected websocket continuation frame",
-                ));
-            }
-            frag_buf.extend_from_slice(&payload);
-            if fin {
-                let final_op = frag_opcode.take().unwrap_or(WS_OP_BINARY);
-                return Ok(Some((final_op, std::mem::take(&mut frag_buf))));
-            }
-            continue;
-        }
-
-        if !fin {
-            if frag_opcode.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "overlapping fragmented websocket frames",
-                ));
-            }
-            frag_opcode = Some(opcode);
-            frag_buf = payload;
-            continue;
-        }
-
-        return Ok(Some((opcode, payload)));
+        let payload = (0..len)
+            .map(|i| self.frame[6 + i] ^ self.frame[2 + (i & 3)])
+            .collect();
+        self.used = 0;
+        Ok(Some((opcode, payload)))
     }
 }
 
-pub async fn handle_terminal_ws(mut req: Request<Incoming>, state: &AppState) -> Response<ProxyBody> {
+async fn write_terminal_batch<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    events: impl IntoIterator<Item = RawTerminalEvent>,
+) -> io::Result<()> {
+    tokio::time::timeout(WS_WRITE_TIMEOUT, async {
+        for event in events {
+            write_ws_frame_unflushed(writer, WS_OP_BINARY, &encode_raw_terminal_frame(&event))
+                .await?;
+        }
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| io::ErrorKind::TimedOut)?
+}
+
+pub async fn handle_terminal_ws(
+    mut req: Request<Incoming>,
+    state: &AppState,
+) -> Response<ProxyBody> {
     let token = query_param(req.uri(), "token").unwrap_or_default();
-    if token.as_bytes().ct_eq(state.api_token.as_bytes()).unwrap_u8() != 1 {
+    if token
+        .as_bytes()
+        .ct_eq(state.api_token.as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return json_error(403, "invalid terminal websocket token", None);
     }
 
@@ -259,16 +233,27 @@ pub async fn handle_terminal_ws(mut req: Request<Incoming>, state: &AppState) ->
     let since: u64 = query_param(req.uri(), "since")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
+    let Some(attempt) = query_param(req.uri(), "attempt")
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+    else {
+        return json_error(400, "terminal websocket attempt is required", None);
+    };
 
     let Some(active) = state.terminals.get(&session_id) else {
-        return json_error(404, format!("terminal session not found: {session_id}"), None);
+        return json_error(
+            404,
+            format!("terminal session not found: {session_id}"),
+            None,
+        );
     };
 
     let upgrade_hdr = header_str(req.headers(), &UPGRADE).unwrap_or("");
     if !upgrade_hdr.eq_ignore_ascii_case("websocket") {
         return json_error(400, "missing Upgrade: websocket header", None);
     }
-    let Some(ws_key) = header_str(req.headers(), &SEC_WEBSOCKET_KEY).filter(|s| !s.trim().is_empty())
+    let Some(ws_key) =
+        header_str(req.headers(), &SEC_WEBSOCKET_KEY).filter(|s| !s.trim().is_empty())
     else {
         return json_error(400, "missing Sec-WebSocket-Key header", None);
     };
@@ -279,102 +264,99 @@ pub async fn handle_terminal_ws(mut req: Request<Incoming>, state: &AppState) ->
         let Ok(upgraded) = upgrade_fut.await else {
             return;
         };
+        let Some(crate::commands::terminal::WsTerminalReplay {
+            lost_through,
+            latest_seq,
+            events,
+            mut rx,
+            mut dropped,
+            _guard,
+        }) = active.attach_ws(since, attempt)
+        else {
+            return; // A delayed older upgrade cannot displace the new subscriber.
+        };
         let io = TokioIo::new(upgraded);
         let (mut rd, mut wr) = tokio::io::split(io);
-        let (backlog, mut rx, _detach_guard) = active.attach_ws(since);
 
-        let mut exited = false;
-        for ev in backlog {
-            let frame = encode_raw_terminal_frame(&ev);
-            if write_ws_frame_unflushed(&mut wr, WS_OP_BINARY, &frame)
-                .await
-                .is_err()
-            {
-                return;
+        // Ready marks the end of replay, even if it was empty. Its bounds and
+        // initial events were captured under the same lock as subscription.
+        let mut ready = [0u8; 17];
+        ready[0] = 0x02;
+        ready[1..9].copy_from_slice(&lost_through.to_be_bytes());
+        ready[9..].copy_from_slice(&latest_seq.to_be_bytes());
+        tokio::select! {
+            biased;
+            _ = &mut dropped => {
+                // Do not drain an overflowing queue. A partial frame cannot be
+                // resumed, so drop the socket and let the client replay.
             }
-            if matches!(ev, RawTerminalEvent::Exit { .. }) {
-                exited = true;
-            }
-        }
-        if wr.flush().await.is_err() || exited {
-            let _ = write_ws_frame(&mut wr, WS_OP_CLOSE, &[]).await;
-            return;
-        }
-
-        loop {
-            tokio::select! {
-                ev_opt = rx.recv() => {
-                    let Some(ev) = ev_opt else { break; };
-                    let frame = encode_raw_terminal_frame(&ev);
-                    if write_ws_frame_unflushed(&mut wr, WS_OP_BINARY, &frame).await.is_err() {
-                        break;
-                    }
-                    let mut should_close = matches!(ev, RawTerminalEvent::Exit { .. });
-                    if !should_close {
-                        while let Ok(more) = rx.try_recv() {
-                            let more_frame = encode_raw_terminal_frame(&more);
-                            if write_ws_frame_unflushed(&mut wr, WS_OP_BINARY, &more_frame).await.is_err() {
-                                should_close = true;
-                                break;
-                            }
-                            if matches!(more, RawTerminalEvent::Exit { .. }) {
-                                should_close = true;
-                                break;
-                            }
-                        }
-                    }
-                    if wr.flush().await.is_err() || should_close {
-                        let _ = write_ws_frame(&mut wr, WS_OP_CLOSE, &[]).await;
-                        break;
-                    }
-                }
-                frame_res = read_ws_frame(&mut rd) => {
-                    match frame_res {
-                        Ok(Some((WS_OP_BINARY, payload))) => {
-                            if !payload.is_empty()
-                                && matches!(
-                                    active.send_input(payload),
-                                    core_ssh::SendInputResult::Closed
-                                )
-                            {
-                                if let Some(ev) = active.push_exit(
-                                    None,
-                                    "terminal session closed".to_string(),
-                                ) {
-                                    let frame = encode_raw_terminal_frame(&ev);
-                                    let _ = write_ws_frame(&mut wr, WS_OP_BINARY, &frame).await;
-                                }
-                                let _ = write_ws_frame(&mut wr, WS_OP_CLOSE, &[]).await;
-                                break;
-                            }
-                        }
-                        Ok(Some((WS_OP_TEXT, payload))) => {
-                            if let Ok(ctrl) = serde_json::from_slice::<TerminalControlMsg>(&payload) {
-                                if ctrl.kind == "resize" {
-                                    if let (Some(cols), Some(rows)) = (ctrl.cols, ctrl.rows) {
-                                        let _ = active.resize(cols, rows);
+            _ = async {
+                let replay_has_exit = matches!(events.last(), Some(RawTerminalEvent::Exit { .. }));
+                let mut backlog = events.into_iter();
+                let mut ready = Some(ready);
+                let mut controls = ControlReader::new();
+                loop {
+                    tokio::select! {
+                        biased;
+                        frame_res = controls.read(&mut rd) => {
+                            match frame_res {
+                                Ok(Some((WS_OP_PING, payload))) => {
+                                    if !matches!(tokio::time::timeout(
+                                        WS_WRITE_TIMEOUT, write_ws_frame(&mut wr, WS_OP_PONG, &payload),
+                                    ).await, Ok(Ok(()))) {
+                                        break;
                                     }
-                                    continue;
                                 }
-                            }
-                            if !payload.is_empty() {
-                                let _ = active.send_input(payload);
+                                Ok(Some((WS_OP_PONG, _))) => {}
+                                Ok(Some((WS_OP_CLOSE, payload))) => {
+                                    let _ = tokio::time::timeout(
+                                        WS_WRITE_TIMEOUT, write_ws_frame(&mut wr, WS_OP_CLOSE, &payload),
+                                    ).await;
+                                    break;
+                                }
+                                _ => break,
                             }
                         }
-                        Ok(Some((WS_OP_PING, payload))) => {
-                            if write_ws_frame(&mut wr, WS_OP_PONG, &payload).await.is_err() {
+                        _ = std::future::ready(()), if backlog.len() > 0 => {
+                            if write_terminal_batch(
+                                &mut wr, backlog.by_ref().take(MAX_OUTPUT_BATCH),
+                            ).await.is_err() {
                                 break;
                             }
                         }
-                        Ok(Some((WS_OP_PONG, _))) => {}
-                        Ok(Some((WS_OP_CLOSE, _))) | Ok(None) | Err(_) => {
-                            let _ = write_ws_frame(&mut wr, WS_OP_CLOSE, &[]).await;
-                            break;
+                        _ = std::future::ready(()), if backlog.len() == 0 && ready.is_some() => {
+                            if !matches!(tokio::time::timeout(
+                                WS_WRITE_TIMEOUT, write_ws_frame(&mut wr, WS_OP_BINARY, &ready.take().unwrap()),
+                            ).await, Ok(Ok(()))) {
+                                break;
+                            }
+                            if replay_has_exit {
+                                let _ = tokio::time::timeout(
+                                    WS_WRITE_TIMEOUT, write_ws_frame(&mut wr, WS_OP_CLOSE, &[]),
+                                ).await;
+                                break;
+                            }
                         }
-                        _ => {}
+                        ev_opt = rx.recv(), if backlog.len() == 0 && ready.is_none() => {
+                            let Some(ev) = ev_opt else { break; };
+                            let queued: Vec<_> = std::iter::once(ev).chain(
+                                std::iter::from_fn(|| rx.try_recv().ok()).take(MAX_OUTPUT_BATCH - 1)
+                            ).collect();
+                            let events: Vec<_> = queued.iter().map(|queued| queued.event.clone()).collect();
+                            let has_exit = matches!(events.last(), Some(RawTerminalEvent::Exit { .. }));
+                            if write_terminal_batch(&mut wr, events).await.is_err() {
+                                break;
+                            }
+                            if has_exit {
+                                let _ = tokio::time::timeout(
+                                    WS_WRITE_TIMEOUT, write_ws_frame(&mut wr, WS_OP_CLOSE, &[]),
+                                ).await;
+                                break;
+                            }
+                        }
                     }
                 }
-            }
+            } => {}
         }
     });
 
@@ -455,27 +437,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_frame_roundtrip_unmasks_client_and_encodes_server() {
+    async fn ws_frame_roundtrip_unmasks_ping_and_encodes_pong() {
         let (mut client, mut server) = tokio::io::duplex(4096);
-        let msg = vec![b'x'; 300];
-        let raw = masked_client_frame(WS_OP_BINARY, &msg);
+        let msg = b"ping-data";
+        let raw = masked_client_frame(WS_OP_PING, msg);
         client.write_all(&raw).await.unwrap();
         client.flush().await.unwrap();
 
-        let (op, decoded) = read_ws_frame(&mut server).await.unwrap().unwrap();
-        assert_eq!(op, WS_OP_BINARY);
+        let (op, decoded) = ControlReader::new()
+            .read(&mut server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(op, WS_OP_PING);
         assert_eq!(decoded, msg);
 
-        write_ws_frame(&mut server, WS_OP_BINARY, b"pong-data")
+        write_ws_frame(&mut server, WS_OP_PONG, b"pong-data")
             .await
             .unwrap();
         let (srv_op, srv_payload) = read_server_ws_frame(&mut client).await.unwrap();
-        assert_eq!(srv_op, WS_OP_BINARY);
+        assert_eq!(srv_op, WS_OP_PONG);
         assert_eq!(srv_payload, b"pong-data");
     }
 
     #[tokio::test]
-    async fn end_to_end_terminal_ws_rejects_bad_token_and_streams_binary_io() {
+    async fn pending_ping_survives_a_turn_of_output_work() {
+        let (mut client, mut server) = tokio::io::duplex(128);
+        let ping = masked_client_frame(WS_OP_PING, b"hello");
+        let mut controls = ControlReader::new();
+        client.write_all(&ping[..3]).await.unwrap();
+        tokio::select! {
+            biased;
+            result = controls.read(&mut server) => panic!("partial ping completed: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        client.write_all(&ping[3..]).await.unwrap();
+        assert_eq!(
+            controls.read(&mut server).await.unwrap(),
+            Some((WS_OP_PING, b"hello".to_vec()))
+        );
+    }
+
+    async fn connect_terminal_ws(addr: &str, token: &str, since: u64, attempt: u64) -> TcpStream {
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET /api/terminal-ws?session=term-1&token={token}&since={since}&attempt={attempt} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        sock.write_all(req.as_bytes()).await.unwrap();
+        let mut head_buf = Vec::new();
+        loop {
+            let mut b = [0u8; 1];
+            sock.read_exact(&mut b).await.unwrap();
+            head_buf.push(b[0]);
+            if head_buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&head_buf);
+        assert!(head.starts_with("HTTP/1.1 101"), "expected 101, got {head}");
+        assert!(head.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+        sock
+    }
+
+    #[tokio::test]
+    async fn end_to_end_terminal_ws_rejects_bad_token_and_streams_output() {
         let tmp = TempDir::new().unwrap();
         let state = Arc::new(AppState::new_custom(
             tmp.path().to_path_buf(),
@@ -484,7 +509,7 @@ mod tests {
             tmp.path().join("cache"),
             Arc::new(MemoryStore::new()),
         ));
-        let (active, mut input_rx, mut resize_rx) = state.terminals.insert_mock("term-1".into());
+        let (active, _input_rx, _resize_rx) = state.terminals.insert_mock("term-1".into());
         active.push_raw_output(b"early-banner".to_vec());
 
         let (listener, base_url) = bind_proxy_listener().unwrap();
@@ -507,48 +532,29 @@ mod tests {
             assert!(head.starts_with("HTTP/1.1 403"), "unexpected head: {head}");
         }
 
-        // 2. Valid upgrade receives backlog + streams live binary I/O and resize.
-        let mut sock = TcpStream::connect(&addr).await.unwrap();
-        let req = format!(
-            "GET /api/terminal-ws?session=term-1&token={}&since=0 HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
-            state.api_token
-        );
-        sock.write_all(req.as_bytes()).await.unwrap();
+        // 2. Valid upgrade receives backlog and streams live binary output.
+        let mut sock = connect_terminal_ws(&addr, &state.api_token, 0, 1).await;
 
-        let mut head_buf = Vec::new();
-        loop {
-            let mut b = [0u8; 1];
-            sock.read_exact(&mut b).await.unwrap();
-            head_buf.push(b[0]);
-            if head_buf.ends_with(b"\r\n\r\n") {
-                break;
-            }
-        }
-        let head = String::from_utf8_lossy(&head_buf);
-        assert!(head.starts_with("HTTP/1.1 101"), "expected 101, got {head}");
-        assert!(head.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
-
-        // Backlog frame
         let (op1, f1) = read_server_ws_frame(&mut sock).await.unwrap();
         assert_eq!(op1, WS_OP_BINARY);
         assert_eq!(f1[0], 0x00);
         assert_eq!(u64::from_be_bytes(f1[1..9].try_into().unwrap()), 1);
         assert_eq!(&f1[9..], b"early-banner");
+        // Ready reports replay bounds after the complete backlog.
+        let (op, ready) = read_server_ws_frame(&mut sock).await.unwrap();
+        assert_eq!(op, WS_OP_BINARY);
+        assert_eq!(
+            ready,
+            [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
 
-        // Send binary keystrokes and JSON resize
-        sock.write_all(&masked_client_frame(WS_OP_BINARY, b"ls -la\r"))
+        sock.write_all(&masked_client_frame(WS_OP_PING, b"still here"))
             .await
             .unwrap();
-        sock.write_all(&masked_client_frame(
-            WS_OP_TEXT,
-            br#"{"type":"resize","cols":132,"rows":40}"#,
-        ))
-        .await
-        .unwrap();
-        sock.flush().await.unwrap();
-
-        assert_eq!(input_rx.recv().await.unwrap(), b"ls -la\r");
-        assert_eq!(resize_rx.recv().await.unwrap(), (132, 40));
+        assert_eq!(
+            read_server_ws_frame(&mut sock).await.unwrap(),
+            (WS_OP_PONG, b"still here".to_vec())
+        );
 
         // Push live output and exit
         active.push_raw_output(b"file1.txt\r\n".to_vec());
@@ -562,5 +568,24 @@ mod tests {
         let (op3, f3) = read_server_ws_frame(&mut sock).await.unwrap();
         assert_eq!(op3, WS_OP_BINARY);
         assert_eq!(f3, [0x01, 0, 0, 0, 0, 0, 0, 0, 3]);
+
+        // A reconnect from sequence 2 receives only the retained exit, and
+        // must still receive Ready before the server closes that socket.
+        let mut resumed = connect_terminal_ws(&addr, &state.api_token, 2, 2).await;
+        assert_eq!(
+            read_server_ws_frame(&mut resumed).await.unwrap(),
+            (WS_OP_BINARY, f3)
+        );
+        assert_eq!(
+            read_server_ws_frame(&mut resumed).await.unwrap(),
+            (
+                WS_OP_BINARY,
+                vec![0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]
+            ),
+        );
+        assert_eq!(
+            read_server_ws_frame(&mut resumed).await.unwrap(),
+            (WS_OP_CLOSE, vec![])
+        );
     }
 }

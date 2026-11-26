@@ -308,6 +308,31 @@ impl DragJobRegistry {
             })
             .unwrap_or(0)
     }
+
+    /// Cancels all non-terminal drag jobs and wakes any paused waiters.
+    pub fn cancel_all(&self, reason: Option<&str>) -> usize {
+        let Ok(mut guard) = self.inner.lock() else {
+            return 0;
+        };
+        let msg = reason.unwrap_or("drag cancelled");
+        let now = now_millis();
+        let mut count = 0;
+        let mut next_rev = guard.revision;
+        for entry in guard.jobs.values_mut() {
+            if !is_terminal_state(&entry.job.state) {
+                next_rev += 1;
+                entry.job.state = "cancelled".into();
+                entry.job.paused = false;
+                entry.job.error = msg.to_string();
+                entry.job.ended_at = Some(now);
+                entry.job.revision = next_rev;
+                entry.notify.notify_waiters();
+                count += 1;
+            }
+        }
+        guard.revision = next_rev;
+        count
+    }
 }
 
 fn trim_history_locked(inner: &mut RegistryInner) {
@@ -322,5 +347,28 @@ fn trim_history_locked(inner: &mut RegistryInner) {
             break;
         };
         inner.jobs.remove(&remove_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_all_cancels_active_jobs_and_leaves_terminal_jobs() {
+        let reg = DragJobRegistry::new();
+        reg.add("j1", "s1", vec!["/a".into()]).unwrap();
+        reg.add("j2", "s1", vec!["/b".into()]).unwrap();
+        reg.update_state("j2", "done", None);
+        assert_eq!(reg.active_count(), 1);
+
+        let cancelled = reg.cancel_all(Some("application closing"));
+        assert_eq!(cancelled, 1);
+        assert_eq!(reg.active_count(), 0);
+        let j1 = reg.get("j1").unwrap();
+        assert_eq!(j1.state, "cancelled");
+        assert_eq!(j1.error, "application closing");
+        let j2 = reg.get("j2").unwrap();
+        assert_eq!(j2.state, "done");
     }
 }

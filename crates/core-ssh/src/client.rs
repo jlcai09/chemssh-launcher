@@ -9,7 +9,7 @@ use russh::keys::{
     load_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate,
 };
 use russh::{ChannelMsg, ChannelOpenFailure, MethodKind, Sig};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{RawSftpSession, SftpSession};
 use serde::{Deserialize, Serialize};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -730,7 +730,7 @@ impl SshConnection {
         fetch_identity_over_stream(channel.into_stream(), remote_host, remote_port, token).await
     }
 
-    pub async fn open_sftp(&self) -> Result<SftpSession, SshError> {
+    async fn open_sftp_channel(&self) -> Result<russh::Channel<client::Msg>, SshError> {
         let channel = self
             .handle
             .channel_open_session()
@@ -740,9 +740,21 @@ impl SshConnection {
             .request_subsystem(true, "sftp")
             .await
             .map_err(|e| SshError::Sftp(format!("request sftp subsystem: {e}")))?;
+        Ok(channel)
+    }
+
+    pub async fn open_sftp(&self) -> Result<SftpSession, SshError> {
+        let channel = self.open_sftp_channel().await?;
         SftpSession::new(channel.into_stream())
             .await
             .map_err(|e| SshError::Sftp(format!("init sftp session: {e}")))
+    }
+
+    /// Open a separate SFTP protocol channel for extensions the high-level client
+    /// does not expose. The caller must negotiate it with `RawSftpSession::init`.
+    pub async fn open_raw_sftp(&self) -> Result<RawSftpSession, SshError> {
+        let channel = self.open_sftp_channel().await?;
+        Ok(RawSftpSession::new(channel.into_stream()))
     }
 
     pub async fn start_local_tunnel(

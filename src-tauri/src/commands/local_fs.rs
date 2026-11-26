@@ -38,45 +38,54 @@ pub fn local_rename_cmd(from: String, to: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn local_delete_cmd(path: String) -> Result<(), String> {
-    let target = PathBuf::from(path);
-    #[cfg(target_os = "windows")]
-    {
-        if win_native::move_to_trash(&target).is_ok() {
-            return Ok(());
+pub async fn local_delete_cmd(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let target = PathBuf::from(path);
+        #[cfg(target_os = "windows")]
+        {
+            if win_native::move_to_trash(&target).is_ok() {
+                return Ok(());
+            }
         }
-    }
-    local_delete(&target).map_err(|e| e.to_string())
+        local_delete(&target).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("local delete task join error: {e}"))?
 }
 
 #[tauri::command]
-pub fn local_copy_cmd(
+pub async fn local_copy_cmd(
     state: State<'_, AppState>,
     src: String,
     dst: String,
     transfer_id: Option<String>,
 ) -> Result<(), String> {
-    let src_path = PathBuf::from(&src);
-    let dst_path = PathBuf::from(&dst);
-    let tid = transfer_id.unwrap_or_default();
-    let total = std::fs::metadata(&src_path).map(|m| m.len()).unwrap_or(0);
-    if !tid.is_empty() {
-        let _ = state.transfers.begin(&tid, total, false);
-    }
-    match local_copy(&src_path, &dst_path) {
-        Ok(()) => {
-            if !tid.is_empty() {
-                state.transfers.finish(&tid, None);
-            }
-            Ok(())
+    let transfers = std::sync::Arc::clone(&state.transfers);
+    tokio::task::spawn_blocking(move || {
+        let src_path = PathBuf::from(&src);
+        let dst_path = PathBuf::from(&dst);
+        let tid = transfer_id.unwrap_or_default();
+        let total = std::fs::metadata(&src_path).map(|m| m.len()).unwrap_or(0);
+        if !tid.is_empty() {
+            let _ = transfers.begin(&tid, total, false);
         }
-        Err(err) => {
-            if !tid.is_empty() {
-                state.transfers.finish(&tid, Some(err.to_string()));
+        match local_copy(&src_path, &dst_path) {
+            Ok(()) => {
+                if !tid.is_empty() {
+                    transfers.finish(&tid, None);
+                }
+                Ok(())
             }
-            Err(err.to_string())
+            Err(err) => {
+                if !tid.is_empty() {
+                    transfers.finish(&tid, Some(err.to_string()));
+                }
+                Err(err.to_string())
+            }
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("local copy task join error: {e}"))?
 }
 
 #[tauri::command]

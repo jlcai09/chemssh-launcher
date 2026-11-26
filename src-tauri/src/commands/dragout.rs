@@ -9,8 +9,8 @@ use tauri::ipc::Channel;
 use tauri::{State, WebviewWindow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use win_native::{
-    is_windows_native_supported, start_shell_file_drag, DragDropOutcome, DragJob, DragJobRegistry,
-    FileProgress,
+    is_windows_native_supported, start_shell_file_drag_delayed, DragDropOutcome, DragJob,
+    DragJobRegistry, FileProgress,
 };
 
 use crate::state::AppState;
@@ -24,6 +24,8 @@ pub struct DragOutRequest {
     pub id: String,
     pub session: String,
     pub paths: Vec<String>,
+    #[serde(default)]
+    pub marker: String,
     #[serde(default)]
     pub staged_local_paths: Vec<String>,
 }
@@ -64,6 +66,13 @@ pub fn has_active_work(state: State<'_, AppState>) -> ActiveWorkSummary {
         active_transfers: state.transfers.active_count(),
         active_drag_jobs: state.drag_jobs.active_count(),
     }
+}
+
+#[tauri::command]
+pub fn force_close_app(app: tauri::AppHandle, state: State<'_, AppState>) {
+    state.transfers.cancel_all(Some("application closing"));
+    state.drag_jobs.cancel_all(Some("application closing"));
+    app.exit(0);
 }
 
 fn sanitize_stage_name(name: &str) -> String {
@@ -332,52 +341,13 @@ pub async fn start_native_drag_out(
 
     let initial = state
         .drag_jobs
-        .add(request.id.clone(), request.session.clone(), request.paths.clone())
+        .add(
+            request.id.clone(),
+            request.session.clone(),
+            request.paths.clone(),
+        )
         .map_err(|e| e.to_string())?;
     let _ = on_event.send(initial);
-
-    if let Some(updated) = state.drag_jobs.update_state(&request.id, "caching", None) {
-        let _ = on_event.send(updated);
-    }
-
-    let (stage_dir_opt, staged): (Option<PathBuf>, Vec<PathBuf>) =
-        if !request.staged_local_paths.is_empty() {
-            (
-                None,
-                request
-                    .staged_local_paths
-                    .into_iter()
-                    .map(PathBuf::from)
-                    .collect(),
-            )
-        } else {
-            match stage_remote_paths(
-                &state,
-                &request.session,
-                &request.paths,
-                &request.id,
-                &on_event,
-            )
-            .await
-            {
-                Ok((dir, files)) => (Some(dir), files),
-                Err(err) => {
-                    let is_cancel = err.to_ascii_lowercase().contains("cancel");
-                    let next_state = if is_cancel { "cancelled" } else { "error" };
-                    if let Some(term) = state
-                        .drag_jobs
-                        .update_state(&request.id, next_state, Some(&err))
-                    {
-                        let _ = on_event.send(term);
-                    }
-                    return Err(err);
-                }
-            }
-        };
-
-    if let Some(delivering) = state.drag_jobs.update_state(&request.id, "delivering", None) {
-        let _ = on_event.send(delivering);
-    }
 
     let hwnd_raw: isize = {
         #[cfg(target_os = "windows")]
@@ -393,15 +363,73 @@ pub async fn start_native_drag_out(
 
     let registry = Arc::clone(&state.drag_jobs);
     let job_id = request.id.clone();
+    let marker = request.marker.clone();
+    let prestaged: Vec<PathBuf> = request
+        .staged_local_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let app_state = state.inner().clone();
+    let session_id = request.session.clone();
+    let remote_paths = request.paths.clone();
+    let stage_dir_slot: Arc<std::sync::Mutex<Option<PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let stage_dir_for_cb = Arc::clone(&stage_dir_slot);
+    let rt_handle = tokio::runtime::Handle::current();
+    let event_for_cb = on_event.clone();
+    let reg_for_cb = Arc::clone(&registry);
+    let job_id_for_cb = job_id.clone();
 
-    let outcome = tokio::task::spawn_blocking(move || start_shell_file_drag(hwnd_raw, &staged))
-        .await
-        .map_err(|e| format!("drag task join error: {e}"))?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("ole-drag-out".into())
+        .spawn(move || {
+            let res = start_shell_file_drag_delayed(hwnd_raw, &marker, move || {
+                if !prestaged.is_empty() {
+                    return Ok(prestaged);
+                }
+                if let Some(updated) = reg_for_cb.update_state(&job_id_for_cb, "caching", None) {
+                    let _ = event_for_cb.send(updated);
+                }
+                match rt_handle.block_on(stage_remote_paths(
+                    &app_state,
+                    &session_id,
+                    &remote_paths,
+                    &job_id_for_cb,
+                    &event_for_cb,
+                )) {
+                    Ok((dir, files)) => {
+                        if let Ok(mut guard) = stage_dir_for_cb.lock() {
+                            *guard = Some(dir);
+                        }
+                        if let Some(delivering) =
+                            reg_for_cb.update_state(&job_id_for_cb, "delivering", None)
+                        {
+                            let _ = event_for_cb.send(delivering);
+                        }
+                        Ok(files)
+                    }
+                    Err(err) => Err(err),
+                }
+            });
+            let _ = tx.send(res);
+        })
+        .map_err(|e| format!("failed to spawn drag thread: {e}"))?;
+
+    let outcome = rx.await.map_err(|e| format!("drag task join error: {e}"))?;
+
+    let stage_dir_opt = stage_dir_slot.lock().ok().and_then(|mut g| g.take());
 
     match outcome {
         Ok(DragDropOutcome::Dropped) => {
-            if let Some(done) = registry.update_state(&job_id, "done", None) {
-                let _ = on_event.send(done);
+            // Only mark "done" when external staging actually ran; internal drops
+            // handle their own transfer/move via CF_UNICODETEXT without staging.
+            if stage_dir_opt.is_some() {
+                if let Some(done) = registry.update_state(&job_id, "done", None) {
+                    let _ = on_event.send(done);
+                }
+            } else if let Some(cancelled) = registry.update_state(&job_id, "cancelled", None) {
+                let _ = on_event.send(cancelled);
             }
             Ok(DragDropOutcome::Dropped)
         }

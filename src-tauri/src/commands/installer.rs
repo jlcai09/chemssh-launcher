@@ -236,7 +236,11 @@ impl ProxyGuard {
     async fn start(connection: &SshConnection, profile: &Profile) -> (Self, Option<String>) {
         if !profile.proxy_active() {
             return (
-                Self { channel: None, env: Vec::new(), local_url: None },
+                Self {
+                    channel: None,
+                    env: Vec::new(),
+                    local_url: None,
+                },
                 None,
             );
         }
@@ -245,13 +249,23 @@ impl ProxyGuard {
             Ok(channel) => {
                 let env = proxy_env_pairs(&channel.proxy_url, &lp.no_proxy);
                 (
-                    Self { channel: Some(channel), env, local_url: Some(lp.url()) },
+                    Self {
+                        channel: Some(channel),
+                        env,
+                        local_url: Some(lp.url()),
+                    },
                     None,
                 )
             }
             Err(err) => (
-                Self { channel: None, env: Vec::new(), local_url: Some(lp.url()) },
-                Some(format!("local proxy channel unavailable, continuing without it: {err}")),
+                Self {
+                    channel: None,
+                    env: Vec::new(),
+                    local_url: Some(lp.url()),
+                },
+                Some(format!(
+                    "local proxy channel unavailable, continuing without it: {err}"
+                )),
             ),
         }
     }
@@ -273,9 +287,10 @@ async fn connect(
     }
     let state_clone = state.clone();
     let profile_clone = profile.clone();
-    let creds = tokio::task::spawn_blocking(move || load_ssh_credentials(&state_clone, &profile_clone))
-        .await
-        .map_err(|e| format!("load credentials task failed: {e}"))??;
+    let creds =
+        tokio::task::spawn_blocking(move || load_ssh_credentials(&state_clone, &profile_clone))
+            .await
+            .map_err(|e| format!("load credentials task failed: {e}"))??;
     let verifier = KnownHostsVerifier::new(
         &state.known_hosts_path,
         &profile.ssh_host,
@@ -329,10 +344,7 @@ async fn fetch_manifest(
              else exit 127; fi"
         );
         match connection
-            .exec_command_timeout(
-                &format!("sh -c {}", shell_quote(&remote_cmd)),
-                exec_timeout,
-            )
+            .exec_command_timeout(&format!("sh -c {}", shell_quote(&remote_cmd)), exec_timeout)
             .await
         {
             Ok(out) if out.exit_code == Some(0) => match Manifest::parse(&out.stdout) {
@@ -435,7 +447,12 @@ async fn prepare(
 
     match result {
         Ok((probe, manifest, manifest_via_proxy_prefix)) => {
-            let action = plan(probe.record.as_ref(), probe.venv_ok, &manifest, force_repair);
+            let action = plan(
+                probe.record.as_ref(),
+                probe.venv_ok,
+                &manifest,
+                force_repair,
+            );
             Ok(Prepared {
                 connection,
                 profile,
@@ -473,7 +490,8 @@ async fn run_script_streaming(
             forward_job.push_chunk(&chunk);
         }
     });
-    let shell_cmd = "sh -c 'if command -v bash >/dev/null 2>&1; then exec bash -s; else exec /bin/sh -s; fi'";
+    let shell_cmd =
+        "sh -c 'if command -v bash >/dev/null 2>&1; then exec bash -s; else exec /bin/sh -s; fi'";
     let result = tokio::time::timeout(
         INSTALL_TIMEOUT,
         connection.exec_streaming_stdin(shell_cmd, script.as_bytes(), tx),
@@ -494,7 +512,11 @@ async fn download_locally_and_upload(
     job: &Arc<InstallerJob>,
 ) -> Result<String, String> {
     let archive = prep.manifest.archive().map_err(|e| e.to_string())?;
-    let urls = archive_urls(&prep.manifest.tag, &archive.name, prep.options.proxy_prefix());
+    let urls = archive_urls(
+        &prep.manifest.tag,
+        &archive.name,
+        prep.options.proxy_prefix(),
+    );
     let local_path: PathBuf = std::env::temp_dir().join(format!(
         "chemssh-installer-{}-{}",
         std::process::id(),
@@ -556,10 +578,17 @@ async fn download_locally_and_upload(
             .await
             .map_err(|e| e.to_string())?;
         if out.exit_code != Some(0) {
-            return Err(format!("could not create {upload_dir}: {}", out.stderr.trim()));
+            return Err(format!(
+                "could not create {upload_dir}: {}",
+                out.stderr.trim()
+            ));
         }
         let target = format!("{upload_dir}/{}", archive.name);
-        let sftp = prep.connection.open_sftp().await.map_err(|e| e.to_string())?;
+        let sftp = prep
+            .connection
+            .open_sftp()
+            .await
+            .map_err(|e| e.to_string())?;
         let mut remote_file = sftp
             .open_with_flags(
                 &target,
@@ -598,7 +627,10 @@ async fn download_locally_and_upload(
 async fn run_job(prep: Prepared, job: Arc<InstallerJob>) {
     let outcome = run_job_inner(&prep, &job).await;
     match outcome {
-        Ok(()) => job.finish("done", format!("ChemSSH {} is ready", prep.manifest.version)),
+        Ok(()) => job.finish(
+            "done",
+            format!("ChemSSH {} is ready", prep.manifest.version),
+        ),
         Err(err) => {
             job.push_line(format!("[installer] ERROR: {err}"));
             job.finish("failed", err);
@@ -609,7 +641,11 @@ async fn run_job(prep: Prepared, job: Arc<InstallerJob>) {
 
 async fn run_job_inner(prep: &Prepared, job: &Arc<InstallerJob>) -> Result<(), String> {
     let archive = prep.manifest.archive().map_err(|e| e.to_string())?.clone();
-    let urls = archive_urls(&prep.manifest.tag, &archive.name, prep.options.proxy_prefix());
+    let urls = archive_urls(
+        &prep.manifest.tag,
+        &archive.name,
+        prep.options.proxy_prefix(),
+    );
     let pre_start = if prep.options.ignore_pre_start {
         ""
     } else {
@@ -619,7 +655,9 @@ async fn run_job_inner(prep: &Prepared, job: &Arc<InstallerJob>) -> Result<(), S
         job.push_line(format!("[installer] {warning}"));
     }
     if prep.manifest_via_proxy_prefix {
-        job.push_line("[installer] notice: release manifest was fetched via the configured download proxy");
+        job.push_line(
+            "[installer] notice: release manifest was fetched via the configured download proxy",
+        );
     }
     job.push_line(format!(
         "[installer] {} ChemSSH {} in {}",
@@ -708,24 +746,29 @@ pub async fn installer_run(
     mode: Option<String>,
     host_key_policy: Option<HostKeyPolicy>,
 ) -> Result<InstallerCheck, String> {
-    if state.installer.get(&profile_id).map(|j| j.is_running()).unwrap_or(false) {
+    if state
+        .installer
+        .get(&profile_id)
+        .map(|j| j.is_running())
+        .unwrap_or(false)
+    {
         return Err("an install or update is already running for this profile".into());
     }
-    if state.sessions.is_profile_running(&profile_id).await {
-        return Err("stop the running ChemSSH session of this profile before installing or updating".into());
-    }
+    let session_gate = state.sessions.lock_for_install(&profile_id).await?;
     let force_repair = mode.as_deref() == Some("repair");
-    let prep = prepare(&state, &profile_id, options, host_key_policy, force_repair, 6).await?;
+    let prep = prepare(
+        &state,
+        &profile_id,
+        options,
+        host_key_policy,
+        force_repair,
+        6,
+    )
+    .await?;
     let check = prep.check();
     if prep.action == Action::UpToDate {
         prep.release().await;
         return Ok(check);
-    }
-    if state.sessions.is_profile_running(&profile_id).await {
-        prep.release().await;
-        return Err(
-            "stop the running ChemSSH session of this profile before installing or updating".into(),
-        );
     }
     let job = match state.installer.begin(&profile_id) {
         Ok(job) => job,
@@ -734,7 +777,10 @@ pub async fn installer_run(
             return Err(err);
         }
     };
-    tokio::spawn(run_job(prep, job));
+    tokio::spawn(async move {
+        let _session_gate = session_gate;
+        run_job(prep, job).await;
+    });
     Ok(check)
 }
 
@@ -777,7 +823,9 @@ pub fn installer_apply_profile(
 
 fn profile_commands(existing_pre_start: &str, dir_expr: &str) -> (String, String) {
     let cd_line = format!("cd \"{dir_expr}/app\"");
-    let mut pre_start = existing_pre_start.trim_end_matches(['\r', '\n']).to_string();
+    let mut pre_start = existing_pre_start
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
     if !pre_start.lines().any(|l| l.trim() == cd_line) {
         if !pre_start.is_empty() {
             pre_start.push('\n');

@@ -78,7 +78,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import en from 'element-plus/es/locale/lang/en'
 import { Connection, Folder, FolderOpened, House, Lock, Search, Setting } from '@element-plus/icons-vue'
@@ -89,7 +89,7 @@ import SftpView from './views/SftpView.vue'
 import ShellView from './views/ShellView.vue'
 import TerminalView from './views/TerminalView.vue'
 import { api, postJSON, withLauncherToken } from './api'
-import { isTauriRuntime } from './tauriBridge'
+import { forceCloseApp, isTauriRuntime, listenCloseRequested } from './tauriBridge'
 import { locale, t } from './i18n'
 
 type RouteName = 'launcher' | 'sftp' | 'backend' | 'shell' | 'terminal' | 'wait'
@@ -142,6 +142,8 @@ const routeTitle = computed(() => {
 })
 const browserClientID = `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 let heartbeatTimer: number | null = null
+let unlistenCloseRequested: (() => void) | null = null
+let closeConfirmOpen = false
 
 const paletteOpen = ref(false)
 const paletteQuery = ref('')
@@ -300,10 +302,40 @@ onMounted(async () => {
   heartbeatTimer = window.setInterval(sendHeartbeat, 5000)
   window.addEventListener('pagehide', notifyBrowserClientClosed)
   window.addEventListener('keydown', handleAppShortcut, true)
+  if (!embedded && isTauriRuntime()) {
+    try {
+      unlistenCloseRequested = await listenCloseRequested(summary => {
+        if (closeConfirmOpen) return
+        closeConfirmOpen = true
+        const count = Math.max(1, (summary?.active_transfers || 0) + (summary?.active_drag_jobs || 0))
+        void ElMessageBox.confirm(
+          t('app.closeConfirmMessage', { count }),
+          t('app.closeConfirmTitle'),
+          {
+            type: 'warning',
+            confirmButtonText: t('app.closeConfirmOk'),
+            cancelButtonText: t('app.closeConfirmCancel'),
+            distinguishCancelAndClose: true
+          }
+        )
+          .then(() => forceCloseApp())
+          .catch(() => undefined)
+          .finally(() => {
+            closeConfirmOpen = false
+          })
+      })
+    } catch {
+      // ignore listener setup failures in non-Tauri environments
+    }
+  }
 })
 
 onBeforeUnmount(() => {
   if (heartbeatTimer !== null) window.clearInterval(heartbeatTimer)
+  if (unlistenCloseRequested) {
+    unlistenCloseRequested()
+    unlistenCloseRequested = null
+  }
   window.removeEventListener('pagehide', notifyBrowserClientClosed)
   window.removeEventListener('keydown', handleAppShortcut, true)
   notifyBrowserClientClosed()

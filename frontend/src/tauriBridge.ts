@@ -8,10 +8,9 @@ import type { NativeDragAction, NativeDragJob } from './nativeDrag'
 import type { TerminalSink } from './appEvents'
 
 export interface TauriTerminalEvent {
-  kind: 'output' | 'flow_control' | 'exit'
-  seq?: number
+  kind: 'output' | 'exit'
+  seq: number
   data_b64?: string
-  paused?: boolean
   exit_code?: number | null
 }
 
@@ -191,29 +190,75 @@ function encodeBase64Bytes(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-type QueuedTerminalFrame =
-  | { kind: 'output'; bytes: Uint8Array }
-  | { kind: 'exit' }
-
 interface TerminalStreamBuffer {
   sink: TerminalSink | null
-  queued: QueuedTerminalFrame[]
-  exited: boolean
-  lastSeq: number
-  channelDelivered: boolean
+  output: TerminalOutputCursor
+  wsUrl?: string
   ws: WebSocket | null
+  wsReady: boolean
+  generation: number
+  attempt: number
+  failures: number
+  retryAt: number
+  connectDeadline: number
+  readyAt: number
+  lastPollAt: number
+  watchdogAt: number
+  replayed: boolean
+  stalledAtSeq: number | null
 }
 
 const terminalStreams = new Map<string, TerminalStreamBuffer>()
 let terminalPollTimer: number | null = null
 let terminalPollInFlight = false
-const sharedTextEncoder = new TextEncoder()
+const TERMINAL_FALLBACK_POLL_MS = 25
+const TERMINAL_PUSH_WATCHDOG_MS = 1000
+const TERMINAL_WS_CONNECT_TIMEOUT_MS = 5000
+const TERMINAL_WS_STABLE_MS = 3000
+const TERMINAL_WS_RETRY_BASE_MS = 250
+const TERMINAL_WS_RETRY_MAX_MS = 5000
+// Match the backend's replay ring bounds; pre-Ready data is never delivered
+// until the socket has supplied the corresponding authoritative replay bounds.
+const TERMINAL_WS_REPLAY_EVENTS = 4096
+const TERMINAL_WS_REPLAY_BYTES = 2 * 1024 * 1024
 
-export interface TerminalWsDecodedFrame {
-  kind: 'output' | 'exit'
-  seq: number
-  bytes?: Uint8Array
+type TerminalReplayBatch = {
+  lost_through: number
+  latest_seq: number
+  events: TauriTerminalEvent[]
 }
+
+export interface TerminalOutputCursor {
+  lastSeq: number
+  exited: boolean
+}
+
+export function acceptTerminalOutput(
+  cursor: TerminalOutputCursor,
+  seq: number,
+  kind: 'output' | 'exit',
+  sink: TerminalSink,
+  getBytes?: () => Uint8Array,
+): 'accepted' | 'duplicate' | 'gap' {
+  if (!Number.isSafeInteger(seq) || seq < 1) return 'gap'
+  if (seq <= cursor.lastSeq || cursor.exited) return 'duplicate'
+  if (seq !== cursor.lastSeq + 1) return 'gap'
+  if (kind === 'exit') {
+    cursor.lastSeq = seq
+    cursor.exited = true
+    sink.onExit()
+  } else if (getBytes) {
+    const bytes = getBytes()
+    if (bytes.byteLength) sink.onData(bytes)
+    cursor.lastSeq = seq
+  }
+  return 'accepted'
+}
+
+export type TerminalWsDecodedFrame =
+  | { kind: 'output'; seq: number; bytes: Uint8Array }
+  | { kind: 'exit'; seq: number }
+  | { kind: 'ready'; lostThrough: number; latestSeq: number }
 
 export function decodeTerminalWsFrame(data: ArrayBuffer): TerminalWsDecodedFrame | null {
   if (!(data instanceof ArrayBuffer) || data.byteLength < 9) return null
@@ -221,11 +266,18 @@ export function decodeTerminalWsFrame(data: ArrayBuffer): TerminalWsDecodedFrame
   const dv = new DataView(data)
   const tag = view[0]
   const seq = Number(dv.getBigUint64(1, false))
-  if (tag === 0) {
+  if (!Number.isSafeInteger(seq)) return null
+  if (tag === 0 && seq > 0) {
     return { kind: 'output', seq, bytes: view.subarray(9) }
   }
-  if (tag === 1) {
+  if (tag === 1 && seq > 0 && data.byteLength === 9) {
     return { kind: 'exit', seq }
+  }
+  if (tag === 2 && data.byteLength === 17) {
+    const latestSeq = Number(dv.getBigUint64(9, false))
+    if (Number.isSafeInteger(latestSeq) && seq <= latestSeq) {
+      return { kind: 'ready', lostThrough: seq, latestSeq }
+    }
   }
   return null
 }
@@ -284,205 +336,303 @@ export function createTerminalInputQueue(
 
 const terminalInputQueue = createTerminalInputQueue(async (sessionId, data) => {
   try {
-    const res = await invoke<unknown>('send_terminal_input', { sessionId, data })
-    if (
-      res === 'Closed' ||
-      (typeof res === 'object' && res !== null && (res as { accepted?: boolean }).accepted === false)
-    ) {
-      const buf = terminalStreams.get(sessionId)
-      if (buf && !buf.exited) {
-        deliverTerminalFrame(buf, 'exit', undefined, () => new Uint8Array(0), false)
-      }
-    }
+    const result = await invoke<'sent' | 'closed'>('send_terminal_input', { sessionId, data })
+    if (result !== 'closed') return
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    if (msg.includes('terminal session not found')) {
-      const buf = terminalStreams.get(sessionId)
-      if (buf && !buf.exited) {
-        deliverTerminalFrame(buf, 'exit', undefined, () => new Uint8Array(0), false)
-      }
-      return
+    if (!msg.includes('terminal session not found')) throw err
+  }
+  terminalInputQueue.clear(sessionId)
+  const buf = terminalStreams.get(sessionId)
+  if (buf) {
+    // Reconcile before notifying exit so retained final output is not discarded.
+    if (buf.ws) failTerminalWebSocket(buf)
+    else {
+      buf.generation++
+      buf.replayed = false
+      buf.lastPollAt = 0
+      scheduleTerminalPump()
     }
-    throw err
   }
 })
 
 export function sendTauriTerminalText(sessionId: string, text: string): void {
-  if (!sessionId || !text) return
-  const buf = terminalStreams.get(sessionId)
-  if (
-    buf?.ws &&
-    buf.ws.readyState === WebSocket.OPEN &&
-    !terminalInputQueue.hasInFlight(sessionId)
-  ) {
-    buf.ws.send(sharedTextEncoder.encode(text))
-    return
-  }
+  if (!sessionId || !text || terminalStreams.get(sessionId)?.output.exited) return
   terminalInputQueue.enqueue(sessionId, text)
 }
 
-function stopPollTimerIfIdle(): void {
-  if (terminalPollTimer === null) return
-  for (const buf of terminalStreams.values()) {
-    if (!buf.exited && !buf.channelDelivered) return
+function detachTerminalWebSocket(buf: TerminalStreamBuffer): void {
+  const ws = buf.ws
+  buf.generation++ // Fence old socket callbacks and IPC responses.
+  buf.ws = null
+  buf.wsReady = false
+  buf.stalledAtSeq = null
+  if (ws) {
+    ws.onmessage = ws.onclose = ws.onerror = null
+    ws.close()
   }
-  if (typeof window !== 'undefined') {
-    window.clearInterval(terminalPollTimer)
+}
+
+function canUseTerminalWebSocket(buf: TerminalStreamBuffer): boolean {
+  return Boolean(buf.wsUrl) && typeof WebSocket !== 'undefined'
+}
+
+function failTerminalWebSocket(buf: TerminalStreamBuffer): void {
+  const now = Date.now()
+  if (buf.wsReady && now - buf.readyAt >= TERMINAL_WS_STABLE_MS) buf.failures = 0
+  detachTerminalWebSocket(buf)
+  const delay = Math.min(TERMINAL_WS_RETRY_MAX_MS, TERMINAL_WS_RETRY_BASE_MS * 2 ** buf.failures)
+  buf.failures = Math.min(buf.failures + 1, 5)
+  buf.retryAt = now + Math.round(delay * (0.8 + Math.random() * 0.2))
+  buf.replayed = false
+  buf.lastPollAt = 0
+  scheduleTerminalPump()
+}
+
+function forgetTerminalStream(sessionId: string, buf: TerminalStreamBuffer): void {
+  if (terminalStreams.get(sessionId) !== buf) return
+  terminalInputQueue.clear(sessionId)
+  terminalStreams.delete(sessionId)
+  detachTerminalWebSocket(buf)
+  scheduleTerminalPump()
+}
+
+function finishUnknownTerminal(sessionId: string, buf: TerminalStreamBuffer): void {
+  // The backend is gone and can no longer prove which output was retained.
+  // Notify exit without inventing an ordered event or a loss range.
+  const sink = buf.sink
+  buf.output.exited = true
+  forgetTerminalStream(sessionId, buf)
+  sink?.onExit()
+}
+
+function applyTerminalReplayBounds(buf: TerminalStreamBuffer, lostThrough: number, latestSeq: number): boolean {
+  if (!Number.isSafeInteger(lostThrough) || !Number.isSafeInteger(latestSeq)
+      || lostThrough < 0 || lostThrough > latestSeq) return false
+  if (lostThrough > buf.output.lastSeq) {
+    // Only an authoritative ring snapshot may authorize a jump over missing output.
+    buf.sink?.onGap?.()
+    buf.output.lastSeq = lostThrough
   }
-  terminalPollTimer = null
+  return true
 }
 
 function deliverTerminalFrame(
-  buf: TerminalStreamBuffer,
-  kind: 'output' | 'exit',
-  seq: number | undefined,
-  getBytes: () => Uint8Array,
-  fromPush = false,
-): void {
-  if (fromPush) {
-    const firstDelivery = !buf.channelDelivered
-    buf.channelDelivered = true
-    if (firstDelivery) {
-      stopPollTimerIfIdle()
-    }
-  }
-  if (typeof seq === 'number') {
-    if (seq <= buf.lastSeq) return
-    buf.lastSeq = seq
-  }
-  if (!buf.sink) {
-    buf.queued.push(kind === 'exit' ? { kind: 'exit' } : { kind: 'output', bytes: getBytes() })
-    return
-  }
-  if (kind === 'output') {
-    const bytes = getBytes()
-    if (bytes.byteLength > 0) buf.sink.onData(bytes)
-  } else {
-    buf.exited = true
-    buf.sink.onExit()
-  }
-}
-
-function dispatchTerminalEvent(
-  buf: TerminalStreamBuffer,
-  ev: TauriTerminalEvent,
-  fromChannel = false,
-) {
-  if (ev.kind === 'output' && ev.data_b64) {
-    const b64 = ev.data_b64
-    deliverTerminalFrame(buf, 'output', ev.seq, () => decodeBase64Bytes(b64), fromChannel)
-  } else if (ev.kind === 'exit') {
-    deliverTerminalFrame(buf, 'exit', ev.seq, () => new Uint8Array(0), fromChannel)
-  }
-}
-
-function attachTerminalWebSocket(
   sessionId: string,
   buf: TerminalStreamBuffer,
-  wsUrl: string,
-): void {
-  if (typeof WebSocket === 'undefined' || !wsUrl) return
-  const sep = wsUrl.includes('?') ? '&' : '?'
-  const ws = new WebSocket(`${wsUrl}${sep}since=${buf.lastSeq}`)
+  kind: 'output' | 'exit',
+  seq: number,
+  getBytes?: () => Uint8Array,
+): boolean {
+  const sink = buf.sink
+  if (!sink) return false
+  const result = acceptTerminalOutput(buf.output, seq, kind, sink, getBytes)
+  if (buf.output.exited) forgetTerminalStream(sessionId, buf)
+  return result !== 'gap'
+}
+
+function attachTerminalWebSocket(sessionId: string, buf: TerminalStreamBuffer): void {
+  if (!canUseTerminalWebSocket(buf) || buf.ws) return
+  let ws: WebSocket
+  try {
+    const url = new URL(buf.wsUrl!)
+    url.searchParams.set('since', String(buf.output.lastSeq))
+    url.searchParams.set('attempt', String(++buf.attempt))
+    ws = new WebSocket(url)
+  } catch {
+    failTerminalWebSocket(buf)
+    return
+  }
   ws.binaryType = 'arraybuffer'
   buf.ws = ws
+  buf.connectDeadline = Date.now() + TERMINAL_WS_CONNECT_TIMEOUT_MS
+  const requestedSeq = buf.output.lastSeq
+  type OutputFrame = Exclude<TerminalWsDecodedFrame, { kind: 'ready' }>
+  const backlog: OutputFrame[] = []
+  let backlogBytes = 0
+  const deliver = (frame: OutputFrame) => deliverTerminalFrame(sessionId, buf, frame.kind, frame.seq,
+    frame.kind === 'output' ? () => frame.bytes : undefined)
   ws.onmessage = event => {
-    if (!(event.data instanceof ArrayBuffer)) return
+    if (terminalStreams.get(sessionId) !== buf || buf.ws !== ws || !buf.sink) return
     const decoded = decodeTerminalWsFrame(event.data)
-    if (!decoded) return
-    if (decoded.kind === 'output') {
-      const bytes = decoded.bytes ?? new Uint8Array(0)
-      deliverTerminalFrame(buf, 'output', decoded.seq, () => bytes, true)
-    } else {
-      deliverTerminalFrame(buf, 'exit', decoded.seq, () => new Uint8Array(0), true)
+    try {
+      if (decoded?.kind === 'ready' && !buf.wsReady) {
+        const { lostThrough, latestSeq } = decoded
+        let expected = Math.max(requestedSeq, lostThrough)
+        const valid = expected <= latestSeq && backlog.every((frame, i) =>
+          frame.seq === ++expected && (frame.kind !== 'exit' || i === backlog.length - 1))
+        if (!valid || expected !== latestSeq) {
+          failTerminalWebSocket(buf)
+          return
+        }
+        // Ready follows the whole bounded backlog. Fence IPC before delivering
+        // it; already-delivered overlap is deduplicated using the same cursor.
+        buf.generation++
+        buf.wsReady = true
+        buf.readyAt = Date.now()
+        buf.watchdogAt = buf.readyAt + TERMINAL_PUSH_WATCHDOG_MS
+        if (!applyTerminalReplayBounds(buf, lostThrough, latestSeq)) {
+          failTerminalWebSocket(buf)
+          return
+        }
+        for (const frame of backlog) {
+          if (buf.ws !== ws) break
+          if (!deliver(frame)) {
+            failTerminalWebSocket(buf)
+            return
+          }
+        }
+        backlog.length = 0
+        scheduleTerminalPump()
+        return
+      }
+      if (decoded && decoded.kind !== 'ready') {
+        if (buf.wsReady) {
+          if (deliver(decoded)) return
+        } else {
+          if (decoded.kind === 'output') backlogBytes += decoded.bytes.byteLength
+          if (backlogBytes <= TERMINAL_WS_REPLAY_BYTES && backlog.length < TERMINAL_WS_REPLAY_EVENTS) {
+            backlog.push(decoded)
+            return
+          }
+        }
+      }
+    } catch {
+      // Retry from the last frame actually delivered to the sink.
     }
+    if (buf.ws === ws) failTerminalWebSocket(buf)
   }
-  ws.onclose = () => {
-    if (buf.ws === ws) buf.ws = null
-    if (!buf.exited && terminalStreams.get(sessionId) === buf) {
-      // Loopback WS dropped (e.g. after OS sleep/wake): re-enable polling fallback
-      // so any pending output or Exit event is delivered immediately.
-      buf.channelDelivered = false
-      ensureTerminalPollLoop()
-    }
+  ws.onclose = ws.onerror = () => {
+    if (terminalStreams.get(sessionId) === buf && buf.ws === ws) failTerminalWebSocket(buf)
   }
-  ws.onerror = () => {
-    if (buf.ws === ws) buf.ws = null
-    if (!buf.exited && terminalStreams.get(sessionId) === buf) {
-      buf.channelDelivered = false
-      ensureTerminalPollLoop()
-    }
-  }
+}
+
+function terminalPollDue(buf: TerminalStreamBuffer): number {
+  if (buf.wsReady) return buf.watchdogAt
+  return buf.lastPollAt ? buf.lastPollAt + TERMINAL_FALLBACK_POLL_MS : 0
 }
 
 async function pollTerminalEventsOnce(): Promise<void> {
   if (terminalPollInFlight) return
-  const cursors: Record<string, number> = {}
-  let pending = false
-  for (const [sessionId, buf] of terminalStreams.entries()) {
-    if (!buf.exited && !buf.channelDelivered) {
-      cursors[sessionId] = buf.lastSeq
-      pending = true
-    }
+  const now = Date.now()
+  const requests = new Map<string, { buf: TerminalStreamBuffer; generation: number; since: number; metadata_only: boolean }>()
+  for (const [sessionId, buf] of terminalStreams) {
+    if (!buf.sink || buf.output.exited || terminalPollDue(buf) > now) continue
+    requests.set(sessionId, { buf, generation: buf.generation, since: buf.output.lastSeq, metadata_only: buf.wsReady })
+    buf.lastPollAt = now
+    buf.watchdogAt = now + TERMINAL_PUSH_WATCHDOG_MS
   }
-  if (!pending) {
-    if (terminalPollTimer !== null) {
-      window.clearInterval(terminalPollTimer)
-      terminalPollTimer = null
-    }
-    return
-  }
+  if (!requests.size) return
   terminalPollInFlight = true
   try {
-    const batches = await invoke<Record<string, TauriTerminalEvent[]>>('poll_terminal_events', {
-      cursors,
+    const batches = await invoke<Record<string, TerminalReplayBatch | null>>('poll_terminal_events', {
+      cursors: Object.fromEntries(Array.from(requests, ([id, { since, metadata_only }]) => [id, { since, metadata_only }])),
     })
-    for (const [sessionId, events] of Object.entries(batches || {})) {
-      const buf = terminalStreams.get(sessionId)
-      if (!buf || !Array.isArray(events)) continue
-      for (const ev of events) {
-        dispatchTerminalEvent(buf, ev, false)
+    for (const [sessionId, { buf, generation, since, metadata_only }] of requests) {
+      if (terminalStreams.get(sessionId) !== buf || !buf.sink || buf.generation !== generation || buf.output.exited) continue
+      const batch = batches[sessionId]
+      if (batch === null) {
+        // Give a healthy socket a final watchdog interval to deliver retained EOF.
+        if (!metadata_only) finishUnknownTerminal(sessionId, buf)
+        else if (buf.stalledAtSeq === buf.output.lastSeq) failTerminalWebSocket(buf)
+        else buf.stalledAtSeq = buf.output.lastSeq
+        continue
       }
+      if (!batch) continue
+      if (metadata_only) {
+        // Idle shells need no recovery. Only fence an apparently stalled socket
+        // after two watchdog samples with pending data and no cursor progress.
+        const cursor = buf.output.lastSeq
+        if (batch.latest_seq <= cursor || cursor > since) buf.stalledAtSeq = null
+        else if (buf.stalledAtSeq === cursor) failTerminalWebSocket(buf)
+        else buf.stalledAtSeq = cursor
+        continue
+      }
+      if (!applyTerminalReplayBounds(buf, batch.lost_through, batch.latest_seq)) continue
+      let ordered = true
+      for (const ev of batch.events) {
+        if (terminalStreams.get(sessionId) !== buf || buf.generation !== generation) break
+        try {
+          if (deliverTerminalFrame(sessionId, buf, ev.kind, ev.seq,
+            ev.kind === 'output' ? () => decodeBase64Bytes(ev.data_b64 ?? '') : undefined)) continue
+        } catch {
+          // A failed frame must not move the replay cursor.
+        }
+        ordered = false
+        break
+      }
+      if (buf.generation !== generation) continue
+      if (!ordered) continue
+      const caughtUp = buf.output.lastSeq >= batch.latest_seq
+      const advanced = buf.output.lastSeq > since
+      // Don't require a quiet producer: a successful ordered page permits a
+      // retry while IPC keeps making progress until WS finishes its own replay.
+      if (caughtUp || advanced) buf.replayed = true
+      if (!caughtUp && advanced) buf.lastPollAt = 0
     }
   } catch (err) {
     console.error('[tauriBridge] poll_terminal_events failed:', err)
   } finally {
     terminalPollInFlight = false
+    scheduleTerminalPump()
   }
 }
 
-function ensureTerminalPollLoop(): void {
+function scheduleTerminalPump(): void {
   if (typeof window === 'undefined') return
-  if (terminalPollTimer !== null) return
-  terminalPollTimer = window.setInterval(() => {
+  if (terminalPollTimer !== null) window.clearTimeout(terminalPollTimer)
+  terminalPollTimer = null
+  let due = Infinity
+  for (const buf of terminalStreams.values()) {
+    if (!buf.sink || buf.output.exited) continue
+    if (!terminalPollInFlight) due = Math.min(due, terminalPollDue(buf))
+    if (buf.ws && !buf.wsReady) due = Math.min(due, buf.connectDeadline)
+    else if (!buf.ws && buf.replayed && canUseTerminalWebSocket(buf)) due = Math.min(due, buf.retryAt)
+  }
+  if (!Number.isFinite(due)) return
+  terminalPollTimer = window.setTimeout(() => {
+    terminalPollTimer = null
+    const now = Date.now()
+    for (const [sessionId, buf] of terminalStreams) {
+      if (!buf.sink || buf.output.exited) continue
+      if (buf.ws && !buf.wsReady && now >= buf.connectDeadline) failTerminalWebSocket(buf)
+      if (!buf.ws && buf.replayed && now >= buf.retryAt) attachTerminalWebSocket(sessionId, buf)
+    }
     void pollTerminalEventsOnce()
-  }, 25)
+    scheduleTerminalPump()
+  }, Math.max(0, due - Date.now()))
+}
+
+function newTerminalStream(wsUrl?: string): TerminalStreamBuffer {
+  return {
+    sink: null, output: { lastSeq: 0, exited: false }, wsUrl, ws: null, wsReady: false,
+    generation: 0, attempt: 0, failures: 0, retryAt: 0, connectDeadline: 0, readyAt: 0,
+    lastPollAt: 0, watchdogAt: 0, replayed: false, stalledAtSeq: null,
+  }
 }
 
 export function attachTauriTerminalSink(sessionId: string, sink: TerminalSink): () => void {
   let buf = terminalStreams.get(sessionId)
   if (!buf) {
-    buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false, ws: null }
+    buf = newTerminalStream()
     terminalStreams.set(sessionId, buf)
   }
+  if (buf.sink && buf.sink !== sink) detachTerminalWebSocket(buf)
   buf.sink = sink
-  const pending = buf.queued.splice(0, buf.queued.length)
-  for (const item of pending) {
-    if (item.kind === 'output') {
-      if (item.bytes.byteLength > 0) sink.onData(item.bytes)
-    } else {
-      buf.exited = true
-      sink.onExit()
-    }
-  }
-  if (!buf.exited && !buf.channelDelivered) {
-    ensureTerminalPollLoop()
-    void pollTerminalEventsOnce()
+  if (buf.output.exited) {
+    sink.onExit()
+  } else {
+    if (!buf.attempt) attachTerminalWebSocket(sessionId, buf)
+    scheduleTerminalPump()
   }
   return () => {
     const current = terminalStreams.get(sessionId)
-    if (current && current.sink === sink) {
+    if (current?.sink === sink) {
       current.sink = null
+      current.lastPollAt = 0
+      current.replayed = false
+      detachTerminalWebSocket(current)
+      scheduleTerminalPump()
     }
   }
 }
@@ -856,7 +1006,7 @@ export function resolveTauriCommand(
     }
   }
   if (pathname === '/api/sftp/download-local' && verb === 'POST') {
-    const remotePath = body.remote_path ?? ''
+    const remotePath = body.remote_path ?? body.path ?? ''
     const localPath = body.relative_path
       ? joinTargetPath(body.local_path ?? '.', body.relative_path, 'local')
       : (body.local_path ?? '')
@@ -867,7 +1017,6 @@ export function resolveTauriCommand(
         remotePath,
         localPath,
         transferId: body.transfer_id ?? '',
-        resume: Boolean(body.resume),
       },
     }
   }
@@ -992,10 +1141,6 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
   ) {
     return { ok: true } as unknown as T
   }
-  if (pathname === '/api/transfer-control' && verb === 'POST' && body.action === 'reset') {
-    return { ok: true } as unknown as T
-  }
-
   // Raw JSON import from file text
   if (pathname === '/api/backend/import' && verb === 'POST') {
     const rawJson =
@@ -1007,18 +1152,8 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
     return invoke<T>('import_profiles', { rawJson })
   }
 
-  // Terminal open requires attaching a `Channel<TauriTerminalEvent>`
+  // Open only creates the shell. Output can be attached from sequence zero.
   if (pathname === '/api/session/shell/open' && verb === 'POST') {
-    const channel = new Channel<TauriTerminalEvent>()
-    const earlyQueue: TauriTerminalEvent[] = []
-    let boundBuf: TerminalStreamBuffer | null = null
-    channel.onmessage = ev => {
-      if (boundBuf) {
-        dispatchTerminalEvent(boundBuf, ev, true)
-      } else {
-        earlyQueue.push(ev)
-      }
-    }
     const res = await invoke<{
       id: string
       proxy_url?: string
@@ -1031,21 +1166,8 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
       cols: body.cols ?? 120,
       rows: body.rows ?? 32,
       hostKeyPolicy: resolveHostKeyPolicy(body),
-      onEvent: channel,
     })
-    let buf = terminalStreams.get(res.id)
-    if (!buf) {
-      buf = { sink: null, queued: [], exited: false, lastSeq: 0, channelDelivered: false, ws: null }
-      terminalStreams.set(res.id, buf)
-    }
-    boundBuf = buf
-    for (const ev of earlyQueue) {
-      dispatchTerminalEvent(buf, ev, true)
-    }
-    if (res.ws_url) {
-      attachTerminalWebSocket(res.id, buf, res.ws_url)
-    }
-    ensureTerminalPollLoop()
+    terminalStreams.set(res.id, newTerminalStream(res.ws_url))
     return res as unknown as T
   }
 
@@ -1053,28 +1175,19 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
     const sessionId = String(body.session ?? body.id ?? '')
     const cols = Number(body.cols ?? 120)
     const rows = Number(body.rows ?? 32)
-    const buf = terminalStreams.get(sessionId)
-    if (buf?.ws && buf.ws.readyState === WebSocket.OPEN) {
-      buf.ws.send(JSON.stringify({ type: 'resize', cols, rows }))
-      return { ok: true } as unknown as T
-    }
     await invoke('resize_terminal', { sessionId, cols, rows })
     return { ok: true } as unknown as T
   }
 
   if (pathname === '/api/session/shell/close' && verb === 'POST') {
     const sessionId = body.session ?? body.id ?? ''
-    terminalInputQueue.clear(sessionId)
     const existing = terminalStreams.get(sessionId)
-    if (existing?.ws) {
-      try {
-        existing.ws.close()
-      } catch {
-        // ignore close errors
-      }
-      existing.ws = null
+    if (existing) {
+      existing.sink = null
+      forgetTerminalStream(sessionId, existing)
+    } else {
+      terminalInputQueue.clear(sessionId)
     }
-    terminalStreams.delete(sessionId)
     await invoke('close_terminal', { sessionId })
     return { ok: true } as unknown as T
   }
@@ -1166,32 +1279,6 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
   return rawResult as T
 }
 
-export async function openTauriTerminalChannel(
-  profileId: string,
-  onEvent: (event: TauriTerminalEvent) => void,
-  cols = 120,
-  rows = 32,
-  hostKeyPolicy?: string,
-): Promise<string> {
-  const channel = new Channel<TauriTerminalEvent>()
-  channel.onmessage = onEvent
-  const res = await invoke<{ id: string }>('open_terminal', {
-    profileId,
-    cols,
-    rows,
-    hostKeyPolicy: hostKeyPolicy ?? null,
-    onEvent: channel,
-  })
-  return res.id
-}
-
-export function sendTauriTerminalInput(sessionId: string, dataB64: string) {
-  return invoke<{ accepted: boolean; flow_paused: boolean }>('send_terminal_input', {
-    sessionId,
-    dataB64,
-  })
-}
-
 export async function probeTauriTerminalSessions(sessionIds?: string[]): Promise<string[]> {
   if (!isTauriRuntime()) return []
   const dead = await invoke<string[]>('probe_terminal_sessions', {
@@ -1213,8 +1300,7 @@ export interface SessionLogCursor {
 }
 
 /**
- * Deduplicates session log batches arriving from both Tauri Channel push and
- * `poll_session_logs` fallback so lines are delivered once and in order.
+ * Advances the session log cursor and applies snapshots when the log ring resets.
  */
 export function createSessionLogCursor(
   onBatch: (lines: string[], isInitialReplay: boolean) => void,
@@ -1267,75 +1353,24 @@ export function subscribeTauriSessionLogs(
   onBatch: (lines: string[], isInitialReplay: boolean) => void,
 ): () => void {
   let disposed = false
-  let first = true
-  let channelLive = false
-  let pollInFlight = false
   let pollTimer: number | null = null
+  const cursor = createSessionLogCursor(onBatch)
 
-  const cursor = createSessionLogCursor((lines, isReplay) => {
-    if (!disposed) onBatch(lines, isReplay)
-  })
-
-  const pollOnce = async () => {
-    if (disposed || pollInFlight) return
-    pollInFlight = true
+  const poll = async () => {
     try {
       const res = await invoke<TauriSessionLogPollResponse>('poll_session_logs', {
         profileId,
         afterSeq: cursor.lastSeq(),
       })
-      if (disposed || !res) return
-      const lines = Array.isArray(res.lines) ? res.lines : []
-      cursor.apply(lines, Boolean(res.reset), typeof res.last_seq === 'number' ? res.last_seq : undefined)
+      if (!disposed && res) cursor.apply(res.lines, res.reset, res.last_seq)
     } catch {
-      // Fallback to legacy get_session_logs if poll_session_logs is unavailable.
-      try {
-        const legacy = await invoke<string[]>('get_session_logs', { profileId })
-        if (!disposed && Array.isArray(legacy) && legacy.length > 0) {
-          cursor.apply(legacy, true)
-        }
-      } catch {
-        // Ignore transient IPC errors; next poll tick will retry.
-      }
+      // Retry a transient IPC failure with the same cursor.
     } finally {
-      pollInFlight = false
+      if (!disposed) pollTimer = window.setTimeout(() => void poll(), 500)
     }
   }
 
-  const schedulePoll = () => {
-    if (disposed) return
-    const delayMs = channelLive ? 2500 : 500
-    pollTimer = window.setTimeout(() => {
-      pollTimer = null
-      void pollOnce().finally(schedulePoll)
-    }, delayMs)
-  }
-
-  const channel = new Channel<
-    string[] | { profile_id?: string; lines?: string[]; is_replay?: boolean; last_seq?: number }
-  >()
-  channel.onmessage = payload => {
-    if (disposed) return
-    const isObj = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
-    const isInitial = isObj && typeof payload.is_replay === 'boolean' ? payload.is_replay : first
-    first = false
-    const lines = Array.isArray(payload)
-      ? payload
-      : Array.isArray(payload?.lines)
-        ? payload.lines
-        : []
-    const lastSeq = isObj && typeof payload.last_seq === 'number' ? payload.last_seq : undefined
-    if (!isInitial && lines.length > 0) {
-      channelLive = true
-    }
-    cursor.apply(lines, isInitial, lastSeq)
-  }
-
-  // Always fetch initial snapshot via standard invoke so iframe Channel issues
-  // can never leave the log panel blank, then keep polling as a safety net.
-  void pollOnce().finally(schedulePoll)
-  void invoke('stream_session_logs', { profileId, onEvent: channel }).catch(() => undefined)
-
+  void poll()
   return () => {
     disposed = true
     if (pollTimer !== null) {
@@ -1347,12 +1382,26 @@ export function subscribeTauriSessionLogs(
 
 export type TauriTransferProgressItem = TransferProgressSnapshot & { id: string }
 
-export async function subscribeTauriTransferProgress(
+function newIpcId(prefix: string): string {
+  return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`
+}
+
+export function subscribeTauriTransferProgress(
   onSnapshot: (items: TauriTransferProgressItem[]) => void,
-): Promise<void> {
+): () => void {
+  const subscriptionId = newIpcId('progress')
   const channel = new Channel<TauriTransferProgressItem[]>()
   channel.onmessage = onSnapshot
-  await invoke('stream_transfer_progress', { onEvent: channel })
+  const started = invoke('stream_transfer_progress', { onEvent: channel, subscriptionId })
+    .catch(() => undefined) // Periodic snapshots cover IPC channel failures.
+  let disposed = false
+  return () => {
+    if (disposed) return
+    disposed = true
+    channel.onmessage = () => {}
+    // If the last watcher left during registration, order the stop after it.
+    void started.then(() => invoke('stop_transfer_progress', { subscriptionId })).catch(() => undefined)
+  }
 }
 
 export function pollTauriTransferProgress(): Promise<TauriTransferProgressItem[]> {
@@ -1369,6 +1418,10 @@ export async function listenCloseRequested(
   return listen<ActiveWorkSummary>('app://close-requested', event => {
     handler(event.payload)
   })
+}
+
+export function forceCloseApp(): Promise<void> {
+  return invoke('force_close_app')
 }
 
 /**
@@ -1405,6 +1458,7 @@ export function installTauriNativeDragBridge(): void {
           id: string
           session: string
           paths: string[]
+          marker?: string
           staged_local_paths?: string[]
         }
         const channel = new Channel<NativeDragJob>()
@@ -1417,6 +1471,7 @@ export function installTauriNativeDragBridge(): void {
               id: parsed.id,
               session: parsed.session,
               paths: parsed.paths,
+              marker: parsed.marker ?? '',
               staged_local_paths: parsed.staged_local_paths ?? [],
             },
             onEvent: channel,
@@ -1489,49 +1544,41 @@ export async function uploadFormViaTauri(
   }
 }
 
-export async function downloadRemoteFileViaTauri(
-  sessionId: string,
-  remotePath: string,
-  suggestedName?: string,
-): Promise<void> {
-  // Prefer streaming via the local loopback HTTP proxy so WebView2 records the
-  // download in its native Downloads flyout with live progress and no size cap.
-  try {
-    const downloadUrl = await invoke<string>('get_sftp_download_url', {
-      profileId: sessionId,
-      remotePath,
-      suggestedName: suggestedName || null,
-    })
-    if (downloadUrl) {
-      const targetDoc = (window.top || window).document
-      const frame = targetDoc.createElement('iframe')
-      frame.style.display = 'none'
-      frame.src = downloadUrl
-      targetDoc.body.appendChild(frame)
-      window.setTimeout(() => frame.remove(), 60_000)
-      return
-    }
-  } catch {
-    // Fall back to in-memory bytes download if the local proxy is unavailable.
-  }
+export interface TauriDownloadSource {
+  path: string
+  name?: string
+  size?: number
+}
 
-  const res = await invoke<{ name: string; data_b64: string; size: number }>(
-    'sftp_download_bytes',
-    {
-      profileId: sessionId,
-      remotePath,
-    },
-  )
-  const bytes = decodeBase64Bytes(res.data_b64)
-  const copy = new Uint8Array(bytes.byteLength)
-  copy.set(bytes)
-  const blob = new Blob([copy.buffer])
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = suggestedName || res.name || fileBaseName(remotePath) || 'download'
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+export interface TauriDownloadTarget {
+  local_path: string
+  renamed: boolean
+}
+
+export async function pickTauriDownloadTargets(sources: readonly TauriDownloadSource[]): Promise<TauriDownloadTarget[] | null> {
+  const suggestedNames = sources.map(source => source.name || fileBaseName(source.path) || 'download')
+  if (!suggestedNames.length) return null
+  if (suggestedNames.length > 1) {
+    return invoke<TauriDownloadTarget[] | null>('pick_sftp_download_dir', { suggestedNames })
+  }
+  const localPath = await invoke<string | null>('pick_sftp_download_path', { suggestedName: suggestedNames[0] })
+  return localPath ? [{ local_path: localPath, renamed: false }] : null
+}
+
+export function newTauriDownloadId(): string {
+  return newIpcId('download')
+}
+
+export async function runTauriDownload(
+  sessionId: string, remotePath: string, localPath: string, transferId: string, overwrite: boolean,
+): Promise<void> {
+  try {
+    await invoke('sftp_download_local', { profileId: sessionId, remotePath, localPath, transferId, overwrite })
+  } catch (err) {
+    throw new Error(parseTauriInvokeError(err).message)
+  }
+}
+
+export async function cancelTauriDownload(id: string): Promise<TransferProgressSnapshot> {
+  return invoke<TransferProgressSnapshot>('control_transfer', { id, action: 'cancel' })
 }

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5174",
     "tauri": "tauri",
-    "test": "pnpm run test:native-drag && pnpm run test:transfer-progress && pnpm run test:app-events && pnpm run test:terminal-flow-control && pnpm run test:tauri-bridge",
+    "test": "pnpm run test:native-drag && pnpm run test:native-downloads && pnpm run test:transfer-progress && pnpm run test:app-events && pnpm run test:terminal-flow-control && pnpm run test:tauri-bridge",
+    "test:native-downloads": "node --experimental-strip-types --test tests/nativeDownloads.test.mjs",
     "test:tauri-bridge": "node --experimental-strip-types --test tests/tauriBridge.test.mjs",
     "test:native-drag": "node --experimental-strip-types --test tests/nativeDrag.test.mjs",
     "build": "vue-tsc --noEmit && vite build",

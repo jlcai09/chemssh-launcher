@@ -193,7 +193,14 @@ impl ChemSshBridgeManager {
             return build_capabilities(false, false, false, "", "", false);
         };
         let is_local = profile.is_local();
-        build_capabilities(true, true, !is_local, &profile.id, &workspace_root, is_local)
+        build_capabilities(
+            true,
+            true,
+            !is_local,
+            &profile.id,
+            &workspace_root,
+            is_local,
+        )
     }
 
     pub(crate) async fn open_file(
@@ -209,15 +216,13 @@ impl ChemSshBridgeManager {
                 "chemssh service is not available; start forwarding first",
             ));
         };
-        let (profile, workspace_root) =
-            resolve_bridge_context(state, Some(sess), true).await?;
+        let (profile, workspace_root) = resolve_bridge_context(state, Some(sess), true).await?;
 
         if profile.is_local() {
             let local_path = validate_bridge_local_path(raw_path, &workspace_root)?;
             let local_str = local_path.display().to_string();
             if text_mode {
-                open_text_file_in_system(&local_path)
-                    .map_err(|e| BridgeHttpError::new(502, e))?;
+                open_text_file_in_system(&local_path).map_err(|e| BridgeHttpError::new(502, e))?;
                 state
                     .sessions
                     .push_log(
@@ -252,8 +257,13 @@ impl ChemSshBridgeManager {
             .await?;
         let cleaned_remote = validate_bridge_remote_path(&cleaned_remote, &workspace_root)?;
 
-        let cache_path = match cache_sftp_file_for_open(state, &sftp_session_id, &cleaned_remote)
-            .await
+        let cache_path = match cache_sftp_file_for_open(
+            state,
+            &sftp_session_id,
+            &cleaned_remote,
+            Some(&workspace_root),
+        )
+        .await
         {
             Ok(p) => p,
             Err(err) => {
@@ -271,17 +281,6 @@ impl ChemSshBridgeManager {
             }
         };
 
-        state
-            .sftp_sync
-            .register(
-                Arc::clone(&state.sftp),
-                Arc::clone(&state.launcher_logs),
-                sftp_session_id,
-                cleaned_remote.clone(),
-                cache_path.clone(),
-            )
-            .await;
-
         let local_str = cache_path.display().to_string();
         if text_mode {
             open_text_file_in_system(&cache_path).map_err(|e| BridgeHttpError::new(502, e))?;
@@ -291,7 +290,9 @@ impl ChemSshBridgeManager {
                     &profile.id,
                     &profile.name,
                     &state.launcher_logs,
-                    format!("ChemSSH bridge open text cached file: {cleaned_remote} -> {local_str}"),
+                    format!(
+                        "ChemSSH bridge open text cached file: {cleaned_remote} -> {local_str}"
+                    ),
                 )
                 .await;
         } else {
@@ -374,7 +375,8 @@ impl ChemSshBridgeManager {
                         sftp_session_id,
                         workspace_root: existing_ws,
                     }) => {
-                        if existing_ws == cleaned_ws && state.sftp.is_connected(&sftp_session_id).await
+                        if existing_ws == cleaned_ws
+                            && state.sftp.is_connected(&sftp_session_id).await
                         {
                             inner.last_profile_id = Some(profile.id.clone());
                             Action::Reuse(sftp_session_id)
@@ -459,7 +461,9 @@ impl ChemSshBridgeManager {
             Ok(sid) => sid,
             Err(err) => {
                 let berr = BridgeHttpError::new(502, err);
-                let _ = self.finish_flight(&profile.id, flight, Err(berr.clone())).await;
+                let _ = self
+                    .finish_flight(&profile.id, flight, Err(berr.clone()))
+                    .await;
                 return Err(berr);
             }
         };
@@ -472,7 +476,9 @@ impl ChemSshBridgeManager {
                 503,
                 "active ChemSSH session changed while opening bridge SFTP session",
             );
-            let _ = self.finish_flight(&profile.id, flight, Err(berr.clone())).await;
+            let _ = self
+                .finish_flight(&profile.id, flight, Err(berr.clone()))
+                .await;
             return Err(berr);
         }
 
@@ -686,30 +692,29 @@ async fn resolve_bridge_context(
 
     let token = sess.security_token().map(str::to_string);
     if profile.is_local() {
-        let identity = match fetch_local_identity(
-            &profile.local_host,
-            profile.local_port,
-            token.as_deref(),
-        )
-        .await
-        {
-            Ok(id) => id,
-            Err(err) => {
-                state
-                    .sessions
-                    .push_log(
-                        &profile.id,
-                        &profile.name,
-                        &state.launcher_logs,
-                        format!("warning: could not read local ChemSSH identity for bridge: {err}"),
-                    )
-                    .await;
-                if !require_workspace {
-                    return Ok((profile, String::new()));
+        let identity =
+            match fetch_local_identity(&profile.local_host, profile.local_port, token.as_deref())
+                .await
+            {
+                Ok(id) => id,
+                Err(err) => {
+                    state
+                        .sessions
+                        .push_log(
+                            &profile.id,
+                            &profile.name,
+                            &state.launcher_logs,
+                            format!(
+                                "warning: could not read local ChemSSH identity for bridge: {err}"
+                            ),
+                        )
+                        .await;
+                    if !require_workspace {
+                        return Ok((profile, String::new()));
+                    }
+                    return Err(BridgeHttpError::new(503, err.to_string()));
                 }
-                return Err(BridgeHttpError::new(503, err.to_string()));
-            }
-        };
+            };
 
         let ws = clean_local_workspace(&identity.workspace_root);
         if ws.is_empty() {
@@ -976,9 +981,11 @@ fn sftp_error_status(err: &str) -> u16 {
     let lower = err.to_ascii_lowercase();
     if lower.contains("exceeds") || lower.contains("too large") {
         413
-    } else if lower.contains("directory") {
+    } else if lower.contains("outside the chemssh workspace") {
+        403
+    } else if lower.contains("directory") || lower.contains("not a regular file") {
         400
-    } else if lower.contains("not connected") {
+    } else if lower.contains("not connected") || lower.contains("session was disconnected") {
         503
     } else {
         502
@@ -1018,8 +1025,7 @@ mod tests {
                 .unwrap_err();
         assert_eq!(traversal.status, 403);
 
-        let relative =
-            validate_bridge_remote_path("input.inp", "/home/user/project").unwrap_err();
+        let relative = validate_bridge_remote_path("input.inp", "/home/user/project").unwrap_err();
         assert_eq!(relative.status, 400);
 
         let missing_root =

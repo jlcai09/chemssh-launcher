@@ -169,11 +169,19 @@ pub struct ClearCacheResponse {
 }
 
 #[tauri::command]
-pub fn clear_cache(state: State<'_, AppState>) -> Result<ClearCacheResponse, String> {
+pub async fn clear_cache(state: State<'_, AppState>) -> Result<ClearCacheResponse, String> {
+    let (removed, kept) = state
+        .sftp_sync
+        .clear_clean_cache(&state.sftp_cache_dir)
+        .await?;
     let mut messages = Vec::new();
-    if state.sftp_cache_dir.exists() {
-        std::fs::remove_dir_all(&state.sftp_cache_dir).map_err(|e| e.to_string())?;
-        messages.push(format!("Removed {}", state.sftp_cache_dir.display()));
+    if removed > 0 {
+        messages.push(format!("Clean SFTP edit cache entries removed: {removed}."));
+    }
+    if kept > 0 {
+        messages.push(format!(
+            "Cache entries retained because they may contain active or unsynced edits: {kept}."
+        ));
     }
     Ok(ClearCacheResponse {
         info: build_backend_info(&state),
@@ -245,7 +253,8 @@ async fn webview_download_dialog(app: &AppHandle, open: bool) -> bool {
         return false;
     }
     tokio::task::spawn_blocking(move || {
-        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(false)
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or(false)
     })
     .await
     .unwrap_or(false)

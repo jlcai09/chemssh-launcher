@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::client::SshClientHandler;
 use crate::SshError;
@@ -11,6 +12,7 @@ use crate::SshError;
 pub struct LocalTunnel {
     pub local_addr: SocketAddr,
     stop_tx: watch::Sender<bool>,
+    task: JoinHandle<()>,
 }
 
 impl LocalTunnel {
@@ -34,51 +36,44 @@ impl LocalTunnel {
             .map_err(|e| SshError::Tunnel(format!("resolve local tunnel addr: {e}")))?;
 
         let (stop_tx, mut stop_rx) = watch::channel(false);
-
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
+            let mut streams = JoinSet::new();
             loop {
                 tokio::select! {
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() {
-                            break;
-                        }
-                    }
+                    biased;
+                    _ = stop_rx.changed() => break,
+                    _ = streams.join_next(), if !streams.is_empty() => {},
                     accepted = listener.accept() => {
-                        let Ok((mut tcp_stream, peer_addr)) = accepted else {
-                            break;
-                        };
-                        let handle_clone = Arc::clone(&handle);
+                        let Ok((mut tcp_stream, peer_addr)) = accepted else { break };
+                        let handle = Arc::clone(&handle);
                         let target_host = remote_host.clone();
-                        tokio::spawn(async move {
-                            let origin_ip = peer_addr.ip().to_string();
-                            let origin_port = peer_addr.port() as u32;
-                            let Ok(channel) = handle_clone
-                                .channel_open_direct_tcpip(
-                                    target_host,
-                                    remote_port as u32,
-                                    origin_ip,
-                                    origin_port,
-                                )
-                                .await
-                            else {
-                                return;
-                            };
+                        streams.spawn(async move {
+                            let Ok(channel) = handle.channel_open_direct_tcpip(
+                                target_host, remote_port as u32, peer_addr.ip().to_string(), peer_addr.port() as u32,
+                            ).await else { return };
                             let mut ssh_stream = channel.into_stream();
                             let _ = copy_bidirectional(&mut tcp_stream, &mut ssh_stream).await;
                         });
                     }
                 }
             }
+            drop(listener);
+            streams.shutdown().await;
         });
-
         Ok(Self {
             local_addr,
             stop_tx,
+            task,
         })
     }
 
     pub fn stop(&self) {
-        let _ = self.stop_tx.send(true);
+        self.stop_tx.send_replace(true);
+    }
+
+    pub async fn close(mut self) {
+        self.stop();
+        let _ = (&mut self.task).await;
     }
 }
 

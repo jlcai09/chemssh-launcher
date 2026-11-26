@@ -3256,6 +3256,46 @@ body,
   outline: 0;
 }
 
+.terminal-sftp-columns {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 54px 72px;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px 3px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.terminal-sftp-col {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.terminal-sftp-col.is-size,
+.terminal-sftp-col.is-time {
+  justify-content: flex-end;
+}
+
+.terminal-sftp-col:hover,
+.terminal-sftp-col.is-active {
+  color: var(--text);
+}
+
+.terminal-sftp-sort-arrow {
+  font-size: 9px;
+  line-height: 1;
+}
+
 .terminal-sftp-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -3270,7 +3310,7 @@ body,
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) 54px 72px;
   align-items: center;
   gap: 6px;
   padding: 5px 7px;
@@ -3312,10 +3352,15 @@ body,
   white-space: nowrap;
 }
 
-.terminal-sftp-entry-size {
+.terminal-sftp-entry-size,
+.terminal-sftp-entry-time {
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .hidden-file-input {

@@ -19,7 +19,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, watch, Mutex, OwnedMutexGuard};
 use url::Url;
 
 use crate::state::{AppState, LauncherLogStore};
@@ -27,6 +27,8 @@ use crate::state::{AppState, LauncherLogStore};
 const MAX_LOG_LINES: usize = 2000;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(90);
 const HEALTH_INTERVAL: Duration = Duration::from_millis(400);
+const CLEANUP_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const LIVENESS_INTERVAL: Duration = Duration::from_secs(3);
 const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_millis(700);
 static NEXT_OPEN_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -123,7 +125,10 @@ pub(crate) fn profile_proxy_slug(profile: &Profile) -> String {
 }
 
 pub(crate) fn profile_proxy_prefix(profile: &Profile) -> String {
-    format!("/{}/chemssh", encode_path_segment(&profile_proxy_slug(profile)))
+    format!(
+        "/{}/chemssh",
+        encode_path_segment(&profile_proxy_slug(profile))
+    )
 }
 
 pub(crate) fn normalized_proxy_path(path: &str) -> String {
@@ -289,8 +294,31 @@ impl ProfileLogBuffer {
     }
 }
 
+struct ProfileOperation {
+    gate: Arc<Mutex<()>>,
+    cancel_start: watch::Sender<u64>,
+}
+
+impl Default for ProfileOperation {
+    fn default() -> Self {
+        Self {
+            gate: Arc::new(Mutex::new(())),
+            cancel_start: watch::channel(0).0,
+        }
+    }
+}
+
+impl ProfileOperation {
+    fn cancel(&self) {
+        self.cancel_start
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+}
+
 #[derive(Default)]
 pub struct SessionManager {
+    operations: Mutex<HashMap<String, Arc<ProfileOperation>>>,
+    shutting_down: AtomicBool,
     sessions: Mutex<HashMap<String, Arc<ActiveSession>>>,
     active_profile_id: Mutex<Option<String>>,
     profile_logs: Mutex<HashMap<String, ProfileLogBuffer>>,
@@ -300,6 +328,47 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    async fn operation(&self, profile_id: &str) -> Arc<ProfileOperation> {
+        self.operations
+            .lock()
+            .await
+            .entry(profile_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    pub(crate) async fn lock_for_install(
+        &self,
+        profile_id: &str,
+    ) -> Result<OwnedMutexGuard<()>, String> {
+        let op = self.operation(profile_id).await;
+        let guard = op
+            .gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "another operation is in progress".to_string())?;
+        if self.shutting_down.load(Ordering::SeqCst) || self.is_profile_running(profile_id).await {
+            return Err("stop the active ChemSSH session before installing".into());
+        }
+        Ok(guard)
+    }
+
+    pub(crate) async fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        for op in self.operations.lock().await.values() {
+            op.cancel();
+        }
+        for session in self.sessions.lock().await.values() {
+            session.stop_requested.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn stop_operation(&self, profile_id: &str) -> OwnedMutexGuard<()> {
+        let op = self.operation(profile_id).await;
+        op.cancel();
+        op.gate.clone().lock_owned().await
+    }
+
     /// True while the profile has a ChemSSH session that is starting or running.
     pub(crate) async fn is_profile_running(&self, profile_id: &str) -> bool {
         let session = self.sessions.lock().await.get(profile_id).cloned();
@@ -530,50 +599,32 @@ impl SessionManager {
 
     /// Stops launcher-owned tunnels, reverse proxies, bridge files, SSH connections, and local
     /// child processes during application exit without terminating remote ChemSSH servers.
-    pub async fn stop_all_on_exit(&self) {
-        let active_sessions: Vec<Arc<ActiveSession>> = {
-            let mut guard = self.sessions.lock().await;
-            guard.drain().map(|(_, s)| s).collect()
-        };
-        for session in active_sessions {
-            session.stop_requested.store(true, Ordering::SeqCst);
-            match &session.backend {
-                SessionBackend::Remote {
-                    connection,
-                    tunnel,
-                    reverse_proxy,
-                    proxy_bridge_path,
-                    remote_process,
-                    ..
-                } => {
-                    if let Some(proc_handle) = remote_process.lock().await.take() {
-                        drop(proc_handle);
-                    }
-                    if let Some(t) = tunnel.lock().await.take() {
-                        t.stop();
-                    }
-                    if let Some(mut rp) = reverse_proxy.lock().await.take() {
-                        rp.close().await;
-                    }
-                    if let Some(bridge_path) = proxy_bridge_path.lock().await.take() {
-                        if let Ok(sftp) = connection.open_sftp().await {
-                            let _ = remove_proxy_bridge(&sftp, &bridge_path).await;
+    pub async fn stop_all_on_exit(self: &Arc<Self>) {
+        self.begin_shutdown().await;
+        let operations = self.operations.lock().await.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        for (profile_id, op) in operations {
+            let manager = Arc::clone(self);
+            tasks.spawn(async move {
+                let _guard = op.gate.lock().await;
+                // Startup may have registered the session while shutdown was
+                // waiting for this profile's operation to finish.
+                let Some(session) = manager.sessions.lock().await.get(&profile_id).cloned() else {
+                    return;
+                };
+                session.stop_requested.store(true, Ordering::SeqCst);
+                match &session.backend {
+                    SessionBackend::Remote { .. } => cleanup_remote_backend(&session, false).await,
+                    SessionBackend::Local { child, .. } => {
+                        if let Some(mut child) = child.lock().await.take() {
+                            let _ = child.kill().await;
                         }
                     }
-                    connection.disconnect().await;
                 }
-                SessionBackend::Local { child, .. } => {
-                    if let Some(mut proc_child) = child.lock().await.take() {
-                        let _ = proc_child.kill().await;
-                    }
-                }
-            }
-            let mut st = session.status.lock().await;
-            st.running = false;
-            st.forwarding = false;
-            st.forwarding_active = false;
-            st.phase = "stopped".into();
+                reset_status(&mut *session.status.lock().await, "stopped", None);
+            });
         }
+        while tasks.join_next().await.is_some() {}
     }
 }
 
@@ -659,10 +710,7 @@ pub async fn test_profile_connection(
     profile_id: String,
     host_key_policy: Option<HostKeyPolicy>,
 ) -> Result<ConnectionTestResult, String> {
-    let profile = state
-        .profiles
-        .get(&profile_id)
-        .map_err(|e| e.to_string())?;
+    let profile = state.profiles.get(&profile_id).map_err(|e| e.to_string())?;
     if profile.is_local() {
         return Ok(ConnectionTestResult {
             ok: true,
@@ -694,12 +742,20 @@ pub async fn start_session(
     profile_id: String,
     host_key_policy: Option<HostKeyPolicy>,
 ) -> Result<SessionStatus, String> {
-    let profile = state
-        .profiles
-        .get(&profile_id)
-        .map_err(|e| e.to_string())?;
+    let profile = state.profiles.get(&profile_id).map_err(|e| e.to_string())?;
     profile.validate().map_err(|e| e.to_string())?;
 
+    let op = state.sessions.operation(&profile.id).await;
+    let mut cancel = op.cancel_start.subscribe();
+    let Ok(guard) = op.gate.clone().try_lock_owned() else {
+        return match state.sessions.status(&profile.id).await {
+            Some(st) if st.phase == "starting" => Ok(st),
+            _ => Err("another session or installation operation is in progress".into()),
+        };
+    };
+    if state.sessions.shutting_down.load(Ordering::SeqCst) {
+        return Err("application is closing".into());
+    }
     let existing = state
         .sessions
         .sessions
@@ -707,27 +763,49 @@ pub async fn start_session(
         .await
         .get(&profile.id)
         .cloned();
-
     if let Some(session) = existing {
         let snapshot = session.status.lock().await.clone();
-        // A start that is still bringing the tunnel up must not be raced by a second one.
-        if snapshot.running && snapshot.phase == "starting" {
-            state.sessions.activate(&profile.id).await;
-            return Ok(snapshot);
-        }
         if snapshot.running {
-            return resume_or_reuse_session(&state, &profile, session).await;
+            if session.profile() != &profile {
+                return Err(
+                    "profile settings changed; stop the existing session before using new settings"
+                        .into(),
+                );
+            }
+            if snapshot.phase == "starting" {
+                state.sessions.activate(&profile.id).await;
+                return Ok(snapshot);
+            }
+            return resume_or_reuse_session(&state, session.profile(), Arc::clone(&session)).await;
         }
     }
 
     let security_token = load_security_token(&state, &profile)?;
     state.sessions.clear_failure(&profile.id).await;
-
     if profile.is_local() {
-        start_local_session(&state, profile, security_token).await
+        start_local_session(&state, profile, security_token, &mut cancel).await
     } else {
-        start_remote_session(&state, profile, security_token, host_key_policy).await
+        start_remote_session(
+            &state,
+            profile,
+            security_token,
+            host_key_policy,
+            guard,
+            cancel,
+        )
+        .await
     }
+}
+
+const STARTUP_SSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn bounded_startup_ssh<T>(
+    future: impl std::future::Future<Output = Result<T, SshError>>,
+) -> Result<T, String> {
+    tokio::time::timeout(STARTUP_SSH_TIMEOUT, future)
+        .await
+        .map_err(|_| "SSH startup operation timed out".to_string())?
+        .map_err(|err| err.to_string())
 }
 
 async fn resume_or_reuse_session(
@@ -737,8 +815,8 @@ async fn resume_or_reuse_session(
 ) -> Result<SessionStatus, String> {
     state.sessions.activate(&profile.id).await;
 
-    let currently_forwarding = session.status.lock().await.forwarding_active;
-    if currently_forwarding || profile.is_local() {
+    let snapshot = session.status.lock().await.clone();
+    if snapshot.forwarding_active && snapshot.phase == "ready" {
         let mut st = session.status.lock().await;
         st.open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
         st.url = session_proxy_url(&state.proxy_base_url, profile, st.open_seq);
@@ -754,6 +832,25 @@ async fn resume_or_reuse_session(
                 "[session] reusing active ChemSSH session",
             )
             .await;
+        return Ok(snapshot);
+    }
+
+    // A failed startup probe is retryable over the current tunnel; a paused
+    // local session only needs to enable proxy routing again.
+    if snapshot.forwarding_active || profile.is_local() {
+        let snapshot = {
+            let mut status = session.status.lock().await;
+            prepare_health_attempt(&mut status, state, profile);
+            status.clone()
+        };
+        let token = session.security_token().map(str::to_owned);
+        spawn_health_check_task(
+            state.clone(),
+            session,
+            profile.clone(),
+            token,
+            snapshot.open_seq,
+        );
         return Ok(snapshot);
     }
 
@@ -778,6 +875,17 @@ async fn resume_or_reuse_session(
         return Ok(st);
     };
 
+    let new_tunnel = connection
+        .start_local_tunnel(
+            &profile.local_host,
+            profile.local_port,
+            profile.remote_host.clone(),
+            profile.remote_port,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    *tunnel.lock().await = Some(new_tunnel);
+
     let mut extra_warnings = Vec::new();
     let mut local_proxy_update: Option<LocalProxyStatus> = None;
     if profile.proxy_active() && reverse_proxy.lock().await.is_none() {
@@ -786,15 +894,20 @@ async fn resume_or_reuse_session(
             enabled: true,
             ..Default::default()
         };
-        match connection.start_reverse_proxy(lp.address()).await {
+        match bounded_startup_ssh(connection.start_reverse_proxy(lp.address())).await {
             Ok(ch) => {
                 let url = ch.proxy_url.clone();
                 lps.active = true;
                 lps.proxy_url = Some(url.clone());
-                match connection.open_sftp().await {
+                match bounded_startup_ssh(connection.open_sftp()).await {
                     Ok(sftp) => {
-                        match write_proxy_bridge(&sftp, profile.remote_port, &url, &lp.no_proxy)
-                            .await
+                        match bounded_startup_ssh(write_proxy_bridge(
+                            &sftp,
+                            profile.remote_port,
+                            &url,
+                            &lp.no_proxy,
+                        ))
+                        .await
                         {
                             Ok(path) => {
                                 lps.bridge = true;
@@ -825,26 +938,9 @@ async fn resume_or_reuse_session(
         local_proxy_update = Some(lps);
     }
 
-    let new_tunnel = connection
-        .start_local_tunnel(
-            &profile.local_host,
-            profile.local_port,
-            profile.remote_host.clone(),
-            profile.remote_port,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    *tunnel.lock().await = Some(new_tunnel);
-
     let snapshot = {
         let mut st = session.status.lock().await;
-        st.forwarding = true;
-        st.forwarding_active = true;
-        st.open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
-        st.url = session_proxy_url(&state.proxy_base_url, profile, st.open_seq);
-        st.local_url = profile.browser_url();
-        st.phase = "starting".into();
-        st.last_error = None;
+        prepare_health_attempt(&mut st, state, profile);
         for w in extra_warnings {
             st.warnings.push(w);
         }
@@ -869,6 +965,7 @@ async fn resume_or_reuse_session(
         Arc::clone(&session),
         profile.clone(),
         security_token.clone(),
+        snapshot.open_seq,
     );
 
     Ok(snapshot)
@@ -878,14 +975,19 @@ async fn start_local_session(
     state: &AppState,
     profile: Profile,
     security_token: Option<String>,
+    cancel: &mut watch::Receiver<u64>,
 ) -> Result<SessionStatus, String> {
     state
         .chemssh_bridge
-        .close_for_profile(&profile.id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .close_for_profile(
+            &profile.id,
+            &state.sftp,
+            &state.sftp_sync,
+            &state.launcher_logs,
+        )
         .await;
     let browser_url = profile.browser_url();
-    let (health_url, health_opts) =
-        build_health_check_target(&profile, security_token.as_deref());
+    let (health_url, health_opts) = build_health_check_target(&profile, security_token.as_deref());
 
     let mut warnings = profile.warnings();
     if let Some(pw) = port_warning(&profile) {
@@ -903,10 +1005,12 @@ async fn start_local_session(
         .await;
 
     // Probe first for 700ms so an already-running local ChemSSH server is reused cleanly.
-    if probe_once(&health_url, LOCAL_PROBE_TIMEOUT, &health_opts)
-        .await
-        .is_ok()
-    {
+    let healthy = tokio::select! {
+        biased;
+        _ = cancel.changed() => return Err("session start canceled".into()),
+        res = probe_once(&health_url, LOCAL_PROBE_TIMEOUT, &health_opts) => res.is_ok(),
+    };
+    if healthy {
         state
             .sessions
             .push_log(
@@ -956,10 +1060,11 @@ async fn start_local_session(
         state.sessions.activate(&profile.id).await;
         tokio::spawn(refresh_session_identity_and_warm_bridge(
             state.clone(),
-            active,
+            Arc::clone(&active),
             profile,
             security_token,
         ));
+        spawn_liveness_monitor(state.clone(), active);
         return Ok(ready_status);
     }
 
@@ -981,7 +1086,12 @@ async fn start_local_session(
 
     let local_cmd = assemble_local_command(&profile);
     let mut cmd = build_local_shell_command(&local_cmd);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if cancel.has_changed().unwrap_or(true) || state.sessions.shutting_down.load(Ordering::SeqCst) {
+        return Err("session start canceled".into());
+    }
+    cmd.kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -1046,7 +1156,12 @@ async fn start_local_session(
     for w in &warnings {
         state
             .sessions
-            .push_log(&profile.id, &profile.name, &state.launcher_logs, format!("[warn] {w}"))
+            .push_log(
+                &profile.id,
+                &profile.name,
+                &state.launcher_logs,
+                format!("[warn] {w}"),
+            )
             .await;
     }
 
@@ -1145,7 +1260,9 @@ async fn start_local_session(
         Arc::clone(&active),
         profile,
         security_token,
+        initial_status.open_seq,
     );
+    spawn_liveness_monitor(state.clone(), active);
 
     Ok(initial_status)
 }
@@ -1155,10 +1272,17 @@ async fn start_remote_session(
     profile: Profile,
     security_token: Option<String>,
     host_key_policy: Option<HostKeyPolicy>,
+    guard: OwnedMutexGuard<()>,
+    mut cancel: watch::Receiver<u64>,
 ) -> Result<SessionStatus, String> {
     state
         .chemssh_bridge
-        .close_for_profile(&profile.id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .close_for_profile(
+            &profile.id,
+            &state.sftp,
+            &state.sftp_sync,
+            &state.launcher_logs,
+        )
         .await;
     state
         .sessions
@@ -1212,7 +1336,12 @@ async fn start_remote_session(
         host_key_policy.unwrap_or(HostKeyPolicy::Strict),
     );
 
-    let connection = match SshConnection::connect(&profile, &creds, verifier).await {
+    let connect_result = tokio::select! {
+        biased;
+        _ = cancel.changed() => return Err("session start canceled".into()),
+        result = SshConnection::connect(&profile, &creds, verifier) => result,
+    };
+    let connection = match connect_result {
         Ok(conn) => Arc::new(conn),
         Err(err) => {
             state
@@ -1282,7 +1411,12 @@ async fn start_remote_session(
     for w in &warnings {
         state
             .sessions
-            .push_log(&profile.id, &profile.name, &state.launcher_logs, format!("[warn] {w}"))
+            .push_log(
+                &profile.id,
+                &profile.name,
+                &state.launcher_logs,
+                format!("[warn] {w}"),
+            )
             .await;
     }
 
@@ -1294,46 +1428,17 @@ async fn start_remote_session(
         .insert(profile.id.clone(), Arc::clone(&active));
     state.sessions.activate(&profile.id).await;
 
-    tokio::spawn(finish_remote_startup(
-        Arc::clone(&active),
-        state.clone(),
-        profile,
-        security_token,
-    ));
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _guard = guard;
+        finish_remote_startup(active, state, profile, security_token, cancel).await;
+    });
 
     Ok(initial_status)
 }
 
 async fn fail_remote_startup(active: &Arc<ActiveSession>, state: &AppState, msg: String) {
-    if active.stop_requested.load(Ordering::SeqCst) {
-        return;
-    }
-    state
-        .chemssh_bridge
-        .close_for_profile(
-            &active.profile_id,
-            &state.sftp,
-            &state.sftp_sync,
-            &state.launcher_logs,
-        )
-        .await;
-    state.sessions.set_failure(&active.profile_id, msg.clone()).await;
-    state
-        .sessions
-        .push_log(
-            &active.profile_id,
-            &active.profile_name,
-            &state.launcher_logs,
-            format!("[error] {msg}"),
-        )
-        .await;
-    cleanup_remote_backend(active).await;
-    let mut st = active.status.lock().await;
-    st.running = false;
-    st.forwarding = false;
-    st.forwarding_active = false;
-    st.phase = "failed".into();
-    st.last_error = Some(msg);
+    finish_failed_session_locked(state, active, msg).await;
 }
 
 async fn finish_remote_startup(
@@ -1341,6 +1446,7 @@ async fn finish_remote_startup(
     state: AppState,
     profile: Profile,
     security_token: Option<String>,
+    mut cancel: watch::Receiver<u64>,
 ) {
     let sessions = Arc::clone(&state.sessions);
     let logs = Arc::clone(&state.launcher_logs);
@@ -1356,6 +1462,9 @@ async fn finish_remote_startup(
         return;
     };
 
+    if cancel.has_changed().unwrap_or(true) || active.stop_requested.load(Ordering::SeqCst) {
+        return;
+    }
     // Optional local network proxy: failure must degrade with warning, never fail the session.
     let mut proxy_env = Vec::new();
     if profile.proxy_active() {
@@ -1365,7 +1474,7 @@ async fn finish_remote_startup(
             ..Default::default()
         };
         let mut new_warnings: Vec<String> = Vec::new();
-        match connection.start_reverse_proxy(lp.address()).await {
+        match bounded_startup_ssh(connection.start_reverse_proxy(lp.address())).await {
             Ok(channel) => {
                 let proxy_url = channel.proxy_url.clone();
                 proxy_env = proxy_env_pairs(&proxy_url, &lp.no_proxy);
@@ -1379,10 +1488,15 @@ async fn finish_remote_startup(
                         format!("local proxy active at {proxy_url}"),
                     )
                     .await;
-                match connection.open_sftp().await {
+                match bounded_startup_ssh(connection.open_sftp()).await {
                     Ok(sftp) => {
-                        match write_proxy_bridge(&sftp, profile.remote_port, &proxy_url, &lp.no_proxy)
-                            .await
+                        match bounded_startup_ssh(write_proxy_bridge(
+                            &sftp,
+                            profile.remote_port,
+                            &proxy_url,
+                            &lp.no_proxy,
+                        ))
+                        .await
                         {
                             Ok(path) => {
                                 local_proxy_status.bridge = true;
@@ -1419,13 +1533,18 @@ async fn finish_remote_startup(
         st.warnings.extend(new_warnings);
         st.local_proxy = local_proxy_status;
     }
-    if active.stop_requested.load(Ordering::SeqCst) {
+    if cancel.has_changed().unwrap_or(true) || active.stop_requested.load(Ordering::SeqCst) {
         return;
     }
 
     // Probe remote port with `--check-port` before starting a new remote ChemSSH instance.
     let mut reusable_remote = false;
-    match connection.run_check_port_command(&profile, &proxy_env).await {
+    let result = tokio::select! {
+        biased;
+        _ = cancel.changed() => return,
+        result = connection.run_check_port_command(&profile, &proxy_env) => result,
+    };
+    match result {
         Ok(check) if check.reusable => {
             reusable_remote = true;
             sessions
@@ -1439,7 +1558,12 @@ async fn finish_remote_startup(
         }
         Ok(check) if !check.output.is_empty() => {
             sessions
-                .push_log(&profile.id, &profile.name, &logs, format!("[check-port] {}", check.output))
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &logs,
+                    format!("[check-port] {}", check.output),
+                )
                 .await;
         }
         Ok(_) => {
@@ -1454,11 +1578,16 @@ async fn finish_remote_startup(
         }
         Err(err) => {
             sessions
-                .push_log(&profile.id, &profile.name, &logs, format!("[check-port] skipped: {err}"))
+                .push_log(
+                    &profile.id,
+                    &profile.name,
+                    &logs,
+                    format!("[check-port] skipped: {err}"),
+                )
                 .await;
         }
     }
-    if active.stop_requested.load(Ordering::SeqCst) {
+    if cancel.has_changed().unwrap_or(true) || active.stop_requested.load(Ordering::SeqCst) {
         return;
     }
 
@@ -1492,8 +1621,11 @@ async fn finish_remote_startup(
         }
     }
 
+    if cancel.has_changed().unwrap_or(true) || active.stop_requested.load(Ordering::SeqCst) {
+        return;
+    }
     if !reusable_remote {
-        match connection.start_remote_chemssh(&profile, &proxy_env).await {
+        match bounded_startup_ssh(connection.start_remote_chemssh(&profile, &proxy_env)).await {
             Ok((handle, mut out_rx, exit_rx)) => {
                 *remote_process.lock().await = Some(handle);
 
@@ -1519,7 +1651,7 @@ async fn finish_remote_startup(
                         return;
                     }
                     match exit_res {
-                        Ok(Ok(Some(0))) | Ok(Ok(None)) => {
+                        Ok(Ok(Some(0))) => {
                             // Clean exit (for example backgrounded/reused remote service): keep tunnel & session alive.
                             watch_state
                                 .sessions
@@ -1533,10 +1665,14 @@ async fn finish_remote_startup(
                         }
                         other => {
                             let msg = match other {
-                                Ok(Ok(Some(code))) => format!("remote command exited with status {code}"),
+                                Ok(Ok(Some(code))) => {
+                                    format!("remote command exited with status {code}")
+                                }
                                 Ok(Err(reason)) => format!("remote command terminated: {reason}"),
                                 Err(_) => "remote command monitor dropped".to_string(),
-                                Ok(Ok(None)) => unreachable!(),
+                                Ok(Ok(None)) => {
+                                    "SSH channel closed without a remote exit status".into()
+                                }
                             };
                             watch_state
                                 .sessions
@@ -1547,10 +1683,7 @@ async fn finish_remote_startup(
                                     format!("[session] {msg}"),
                                 )
                                 .await;
-                            let already_ready = watch_session.status.lock().await.phase == "ready";
-                            if !already_ready {
-                                fail_remote_startup(&watch_session, &watch_state, msg).await;
-                            }
+                            finish_failed_session(&watch_state, &watch_session, msg).await;
                         }
                     }
                 });
@@ -1565,7 +1698,44 @@ async fn finish_remote_startup(
         return;
     }
 
-    spawn_health_check_task(state, Arc::clone(&active), profile, security_token);
+    let open_seq = active.status.lock().await.open_seq;
+    spawn_health_check_task(
+        state.clone(),
+        Arc::clone(&active),
+        profile,
+        security_token,
+        open_seq,
+    );
+    spawn_liveness_monitor(state, active);
+}
+
+fn prepare_health_attempt(status: &mut SessionStatus, state: &AppState, profile: &Profile) {
+    status.forwarding = true;
+    status.forwarding_active = true;
+    status.open_seq = NEXT_OPEN_SEQ.fetch_add(1, Ordering::SeqCst);
+    status.url = session_proxy_url(&state.proxy_base_url, profile, status.open_seq);
+    status.local_url = profile.browser_url();
+    status.phase = "starting".into();
+    status.last_error = None;
+}
+
+fn reset_status(status: &mut SessionStatus, phase: &str, error: Option<String>) {
+    status.running = false;
+    status.forwarding = false;
+    status.forwarding_active = false;
+    status.phase = phase.into();
+    status.last_error = error;
+    status.local_proxy = LocalProxyStatus {
+        enabled: status.local_proxy.enabled,
+        ..Default::default()
+    };
+}
+
+fn is_current_health_attempt(status: &SessionStatus, seq: u64) -> bool {
+    status.running
+        && status.forwarding_active
+        && status.phase == "starting"
+        && status.open_seq == seq
 }
 
 fn spawn_health_check_task(
@@ -1573,26 +1743,33 @@ fn spawn_health_check_task(
     session: Arc<ActiveSession>,
     profile: Profile,
     security_token: Option<String>,
+    open_seq: u64,
 ) {
     tokio::spawn(async move {
-        let display_url = profile.health_url();
+        let op = state.sessions.operation(&profile.id).await;
+        let mut cancel = op.cancel_start.subscribe();
         let (health_url, health_opts) =
             build_health_check_target(&profile, security_token.as_deref());
-        match wait_for_url_with_options(
-            &health_url,
-            HEALTH_TIMEOUT,
-            HEALTH_INTERVAL,
-            &health_opts,
-        )
-        .await
+        let result = tokio::select! {
+            biased;
+            _ = cancel.changed() => return,
+            res = wait_for_url_with_options(&health_url, HEALTH_TIMEOUT, HEALTH_INTERVAL, &health_opts) => res,
+        };
+        let guard = op.gate.lock().await;
+        if session.stop_requested.load(Ordering::SeqCst)
+            || !state.sessions.is_same_session(&session).await
         {
+            return;
+        }
+        let mut status = session.status.lock().await;
+        if !is_current_health_attempt(&status, open_seq) {
+            return;
+        }
+        match result {
             Ok(()) => {
-                let mut st = session.status.lock().await;
-                if st.running {
-                    st.phase = "ready".into();
-                    st.last_error = None;
-                }
-                drop(st);
+                status.phase = "ready".into();
+                status.last_error = None;
+                drop(status);
                 state.sessions.clear_failure(&profile.id).await;
                 state
                     .sessions
@@ -1600,9 +1777,10 @@ fn spawn_health_check_task(
                         &profile.id,
                         &profile.name,
                         &state.launcher_logs,
-                        format!("[session] ready at {display_url}"),
+                        format!("[session] ready at {}", profile.health_url()),
                     )
                     .await;
+                drop(guard);
                 tokio::spawn(refresh_session_identity_and_warm_bridge(
                     state,
                     session,
@@ -1612,12 +1790,9 @@ fn spawn_health_check_task(
             }
             Err(err) => {
                 let msg = err.to_string();
-                let mut st = session.status.lock().await;
-                if st.running {
-                    st.phase = "failed".into();
-                    st.last_error = Some(msg.clone());
-                }
-                drop(st);
+                status.phase = "failed".into();
+                status.last_error = Some(msg.clone());
+                drop(status);
                 state.sessions.set_failure(&profile.id, msg.clone()).await;
                 state
                     .sessions
@@ -1628,6 +1803,104 @@ fn spawn_health_check_task(
                         format!("[warn] health check: {msg}"),
                     )
                     .await;
+            }
+        }
+    });
+}
+
+async fn finish_failed_session(state: &AppState, session: &Arc<ActiveSession>, msg: String) {
+    let op = state.sessions.operation(&session.profile_id).await;
+    let _guard = op.gate.lock().await;
+    finish_failed_session_locked(state, session, msg).await;
+}
+
+async fn finish_failed_session_locked(state: &AppState, session: &Arc<ActiveSession>, msg: String) {
+    if session.stop_requested.load(Ordering::SeqCst)
+        || !state.sessions.is_same_session(session).await
+        || !session.status.lock().await.running
+    {
+        return;
+    }
+    session.stop_requested.store(true, Ordering::SeqCst);
+    reset_status(
+        &mut *session.status.lock().await,
+        "failed",
+        Some(msg.clone()),
+    );
+    state
+        .sessions
+        .set_failure(&session.profile_id, msg.clone())
+        .await;
+    state
+        .sessions
+        .push_log(
+            &session.profile_id,
+            &session.profile_name,
+            &state.launcher_logs,
+            format!("[error] {msg}"),
+        )
+        .await;
+    let _ = tokio::time::timeout(
+        CLEANUP_IO_TIMEOUT,
+        state.chemssh_bridge.close_for_profile(
+            &session.profile_id,
+            &state.sftp,
+            &state.sftp_sync,
+            &state.launcher_logs,
+        ),
+    )
+    .await;
+    cleanup_remote_backend(session, true).await;
+}
+
+fn spawn_liveness_monitor(state: AppState, session: Arc<ActiveSession>) {
+    tokio::spawn(async move {
+        let mut failures = 0;
+        loop {
+            tokio::time::sleep(LIVENESS_INTERVAL).await;
+            if session.stop_requested.load(Ordering::SeqCst)
+                || !state.sessions.is_same_session(&session).await
+            {
+                return;
+            }
+            if session
+                .remote_connection()
+                .is_some_and(|connection| connection.is_closed())
+            {
+                finish_failed_session(&state, &session, "SSH connection closed".into()).await;
+                return;
+            }
+            let snapshot = session.status.lock().await.clone();
+            if !snapshot.running {
+                return;
+            }
+            if snapshot.phase != "ready" {
+                failures = 0;
+                continue;
+            }
+            let (url, options) =
+                build_health_check_target(session.profile(), session.security_token());
+            let result = probe_once(&url, LOCAL_PROBE_TIMEOUT, &options).await;
+            let op = state.sessions.operation(&session.profile_id).await;
+            let _guard = op.gate.lock().await;
+            let current = session.status.lock().await.clone();
+            if current.phase != "ready" || current.open_seq != snapshot.open_seq {
+                failures = 0;
+                continue;
+            }
+            if result.is_ok() {
+                failures = 0;
+                continue;
+            }
+            failures += 1;
+            if failures >= 3 {
+                finish_failed_session_locked(
+                    &state,
+                    &session,
+                    "ChemSSH is no longer reachable".into(),
+                )
+                .await;
+                return;
             }
         }
     });
@@ -1695,14 +1968,20 @@ async fn refresh_session_identity_and_warm_bridge(
             &profile.id,
             &profile.name,
             &state.launcher_logs,
-            format!("{scope} OK: pid {}, version {}", identity.pid, identity.project_version),
+            format!(
+                "{scope} OK: pid {}, version {}",
+                identity.pid, identity.project_version
+            ),
         )
         .await;
 
     if !profile.is_local() && !identity.workspace_root.trim().is_empty() {
-        state
-            .chemssh_bridge
-            .spawn_warm_sftp(state.clone(), session, profile, identity.workspace_root);
+        state.chemssh_bridge.spawn_warm_sftp(
+            state.clone(),
+            session,
+            profile,
+            identity.workspace_root,
+        );
     }
 }
 
@@ -1739,7 +2018,7 @@ fn spawn_pipe_log_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     });
 }
 
-async fn cleanup_remote_backend(session: &ActiveSession) {
+async fn cleanup_remote_backend(session: &ActiveSession, stop_process: bool) {
     let SessionBackend::Remote {
         connection,
         tunnel,
@@ -1753,20 +2032,32 @@ async fn cleanup_remote_backend(session: &ActiveSession) {
     };
 
     if let Some(proc_handle) = remote_process.lock().await.take() {
-        proc_handle.stop();
-    }
-    if let Some(t) = tunnel.lock().await.take() {
-        t.stop();
-    }
-    if let Some(mut rp) = reverse_proxy.lock().await.take() {
-        rp.close().await;
-    }
-    if let Some(bridge_path) = proxy_bridge_path.lock().await.take() {
-        if let Ok(sftp) = connection.open_sftp().await {
-            let _ = remove_proxy_bridge(&sftp, &bridge_path).await;
+        if stop_process {
+            proc_handle.stop();
         }
     }
-    connection.disconnect().await;
+    if let Some(t) = tunnel.lock().await.take() {
+        t.close().await;
+    }
+    let proxy = reverse_proxy.lock().await.take();
+    let path = proxy_bridge_path.lock().await.take();
+    let close_proxy = async {
+        if let Some(mut proxy) = proxy {
+            proxy.close().await;
+        }
+    };
+    let remove_bridge = async {
+        if let Some(path) = path {
+            if let Ok(sftp) = connection.open_sftp().await {
+                let _ = remove_proxy_bridge(&sftp, &path).await;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(CLEANUP_IO_TIMEOUT, async {
+        tokio::join!(close_proxy, remove_bridge);
+    })
+    .await;
+    let _ = tokio::time::timeout(Duration::from_millis(250), connection.disconnect()).await;
 }
 
 async fn kill_local_pid(pid: u32) {
@@ -1804,6 +2095,8 @@ pub async fn pause_forwarding(
     state: State<'_, AppState>,
     profile_id: String,
 ) -> Result<SessionStatus, String> {
+    let op = state.sessions.operation(&profile_id).await;
+    let _guard = op.gate.lock().await;
     let session = state
         .sessions
         .sessions
@@ -1815,7 +2108,7 @@ pub async fn pause_forwarding(
 
     if let SessionBackend::Remote { tunnel, .. } = &session.backend {
         if let Some(t) = tunnel.lock().await.take() {
-            t.stop();
+            t.close().await;
         }
     }
     let mut status = session.status.lock().await;
@@ -1827,7 +2120,12 @@ pub async fn pause_forwarding(
 
     state
         .chemssh_bridge
-        .close_for_profile(&profile_id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .close_for_profile(
+            &profile_id,
+            &state.sftp,
+            &state.sftp_sync,
+            &state.launcher_logs,
+        )
         .await;
 
     state
@@ -1846,6 +2144,7 @@ pub async fn pause_forwarding(
 /// closes reverse proxy channel, removes remote bridge file, and disconnects SSH.
 #[tauri::command]
 pub async fn stop_session(state: State<'_, AppState>, profile_id: String) -> Result<(), String> {
+    let _guard = state.sessions.stop_operation(&profile_id).await;
     let session = state
         .sessions
         .sessions
@@ -1855,7 +2154,12 @@ pub async fn stop_session(state: State<'_, AppState>, profile_id: String) -> Res
         .cloned();
     state
         .chemssh_bridge
-        .close_for_profile(&profile_id, &state.sftp, &state.sftp_sync, &state.launcher_logs)
+        .close_for_profile(
+            &profile_id,
+            &state.sftp,
+            &state.sftp_sync,
+            &state.launcher_logs,
+        )
         .await;
     let Some(session) = session else {
         return Ok(());
@@ -1889,7 +2193,7 @@ pub async fn stop_session(state: State<'_, AppState>, profile_id: String) -> Res
                     .await;
                 let _ = connection.stop_remote_pid(ident.pid).await;
             }
-            cleanup_remote_backend(&session).await;
+            cleanup_remote_backend(&session, true).await;
         }
         SessionBackend::Local {
             profile,
@@ -1924,10 +2228,7 @@ pub async fn stop_session(state: State<'_, AppState>, profile_id: String) -> Res
     }
 
     let mut status = session.status.lock().await;
-    status.running = false;
-    status.forwarding = false;
-    status.forwarding_active = false;
-    status.phase = "stopped".into();
+    reset_status(&mut status, "stopped", None);
     drop(status);
 
     state
@@ -2042,6 +2343,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn stop_cancels_start_before_waiting_for_its_resources() {
+        let manager = Arc::new(SessionManager::default());
+        let op = manager.operation("profile").await;
+        let startup_guard = op.gate.clone().lock_owned().await;
+        let mut cancellation = op.cancel_start.subscribe();
+        let stop_manager = manager.clone();
+        let stop = tokio::spawn(async move { stop_manager.stop_operation("profile").await });
+        tokio::time::timeout(Duration::from_secs(1), cancellation.changed())
+            .await
+            .expect("stop signaled startup before waiting for the gate")
+            .expect("operation still exists");
+        assert!(!stop.is_finished());
+        drop(startup_guard);
+        let _stop_guard = tokio::time::timeout(Duration::from_secs(1), stop)
+            .await
+            .expect("stop acquired the gate after startup completed")
+            .unwrap();
+        assert!(manager.lock_for_install("profile").await.is_err());
+        assert!(manager.lock_for_install("other-profile").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_session_operations_and_blocks_new_install() {
+        let manager = SessionManager::default();
+        let op = manager.operation("profile").await;
+        let cancellation = op.cancel_start.subscribe();
+        manager.begin_shutdown().await;
+        assert!(cancellation.has_changed().unwrap());
+        assert!(manager.lock_for_install("other-profile").await.is_err());
+    }
+
+    #[tokio::test]
     async fn session_logs_poll_initial_incremental_and_caught_up() {
         let mgr = SessionManager::default();
         let launcher_logs = LauncherLogStore::default();
@@ -2109,7 +2442,13 @@ mod tests {
 
         let (delta, delta_seq, delta_reset) = buf.slice_since((MAX_LOG_LINES + 3) as u64);
         assert!(!delta_reset);
-        assert_eq!(delta, vec![format!("line-{}", MAX_LOG_LINES + 4), format!("line-{}", MAX_LOG_LINES + 5)]);
+        assert_eq!(
+            delta,
+            vec![
+                format!("line-{}", MAX_LOG_LINES + 4),
+                format!("line-{}", MAX_LOG_LINES + 5)
+            ]
+        );
         assert_eq!(delta_seq, (MAX_LOG_LINES + 5) as u64);
     }
 }

@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod local_fs;
 pub mod progress;
+mod sftp_namespace;
 pub mod sftp_ops;
 
 use thiserror::Error;
@@ -15,10 +16,12 @@ pub use local_fs::{
     local_rename, FsEntry,
 };
 pub use progress::{TransferProgress, TransferProgressStore};
+pub use sftp_namespace::sftp_shell_sees_marker;
 pub use sftp_ops::{
-    copy_remote_to_remote, copy_remote_to_remote_once, delete_remote_path,
-    download_file_resumable, download_file_resumable_once, list_remote_dir, upload_file_resumable,
-    upload_file_resumable_once,
+    copy_remote_file_once, copy_remote_to_remote, copy_remote_to_remote_once, delete_remote_path,
+    download_file_attempt, download_file_resumable, download_file_resumable_once, list_remote_dir,
+    upload_file_once,
+    upload_file_resumable, upload_file_resumable_once, RemoteStagedFile,
 };
 
 #[derive(Debug, Error)]
@@ -118,6 +121,7 @@ mod tests {
         assert_eq!(store.begin("t1", 1000, true).unwrap(), 400);
         store.cancel("t1", Some("user cancelled")).unwrap();
 
+        store.finish("t1", None);
         // Cancelled transfer cannot resume.
         assert!(matches!(
             store.begin("t1", 1000, true),
@@ -153,7 +157,10 @@ mod tests {
             seven_zip: false,
         };
         let formats = tools.supported_formats();
-        assert_eq!(formats, vec![FORMAT_TAR_ZST, FORMAT_TAR_GZ, FORMAT_TAR, FORMAT_ZIP]);
+        assert_eq!(
+            formats,
+            vec![FORMAT_TAR_ZST, FORMAT_TAR_GZ, FORMAT_TAR, FORMAT_ZIP]
+        );
 
         let step = build_compress_step(FORMAT_TAR_GZ, "out.tar.gz", &["a.txt".into()]).unwrap();
         assert_eq!(step.argv, vec!["tar", "-czf", "out.tar.gz", "a.txt"]);

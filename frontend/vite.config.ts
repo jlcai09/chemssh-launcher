@@ -43,6 +43,20 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    emptyOutDir: true
+    emptyOutDir: true,
+    // Keep Element Plus in one vendor chunk (splitting its components creates
+    // circular chunk dependencies). Leave a finite budget above its current size.
+    chunkSizeWarningLimit: 850,
+    rollupOptions: {
+      output: {
+        onlyExplicitManualChunks: true,
+        manualChunks(id) {
+          // Keep the two largest UI libraries separate from the application.
+          if (id.includes('/node_modules/@xterm/')) return 'terminal'
+          if (id.includes('/node_modules/element-plus/')) return 'element-plus'
+          if (id.includes('/node_modules/')) return 'vendor'
+        }
+      }
+    }
   }
 })

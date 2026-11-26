@@ -3,6 +3,12 @@
 // six-per-origin HTTP connection budget stays free for short requests instead
 // of being consumed by one stream per terminal tab.
 
+import {
+  attachTauriTerminalSink,
+  pollTauriTransferProgress,
+  sendTauriTerminalText,
+  subscribeTauriTransferProgress,
+} from './tauriBridge.ts'
 import type { TransferProgressSnapshot } from './transferProgress'
 
 function hasTauriInternals(): boolean {
@@ -70,39 +76,20 @@ export class AppEvents {
   private attempts = 0
   private terminals = new Map<string, TerminalWatch>()
   private transfers = new Map<string, Set<(progress: TransferProgressSnapshot) => void>>()
-  private tauriTransferSubscribed = false
+  private tauriTerminalStops = new Set<() => void>()
+  private tauriTransferWatch: { stop?: () => void; pushedAt?: number; revision: number } | null = null
   private tauriTransferPollTimer: number | null = null
   private tauriTransferPollInFlight = false
-  private tauriBridgePromise: Promise<typeof import('./tauriBridge')> | null = null
-  private tauriBridgeModule: typeof import('./tauriBridge') | null = null
-
-  private getTauriBridge(): Promise<typeof import('./tauriBridge')> {
-    if (!this.tauriBridgePromise) {
-      this.tauriBridgePromise = import('./tauriBridge').then(mod => {
-        this.tauriBridgeModule = mod
-        return mod
-      })
-    }
-    return this.tauriBridgePromise
-  }
-
   watchTerminal(session: string, sink: TerminalSink): () => void {
-    if (!session) return () => {}
+    if (this.disposed || !session) return () => {}
     if (hasTauriInternals()) {
-      let detach: (() => void) | null = null
-      let cancelled = false
-      void this.getTauriBridge()
-        .then(({ attachTauriTerminalSink }) => {
-          if (cancelled) return
-          detach = attachTauriTerminalSink(session, sink)
-        })
-        .catch(err => {
-          console.error('[appEvents] watchTerminal bridge failed:', err)
-        })
-      return () => {
-        cancelled = true
-        detach?.()
+      const detach = attachTauriTerminalSink(session, sink)
+      const stop = () => {
+        detach()
+        this.tauriTerminalStops.delete(stop)
       }
+      this.tauriTerminalStops.add(stop)
+      return stop
     }
     this.terminals.set(session, { sink, lastSeq: 0 })
     this.ensureConnected()
@@ -116,20 +103,12 @@ export class AppEvents {
 
   /** True only when handed to an open socket; this is not a remote ACK. */
   sendTerminalInput(session: string, text: string): boolean {
-    if (!session || !text) return false
+    if (this.disposed || !session || !text) return false
     if (hasTauriInternals()) {
-      if (this.tauriBridgeModule) {
-        this.tauriBridgeModule.sendTauriTerminalText(session, text)
-      } else {
-        void this.getTauriBridge()
-          .then(bridge => bridge.sendTauriTerminalText(session, text))
-          .catch(err => {
-            console.error('[appEvents] sendTauriTerminalText failed:', err)
-          })
-      }
+      sendTauriTerminalText(session, text)
       return true
     }
-    return this.sendTerminalBytes(session, base64FromText(text))
+    return this.sendBrowserTerminalBytes(session, base64FromText(text))
   }
 
   private dispatchTauriTransferItems(items: Array<TransferProgressSnapshot & { id: string }>) {
@@ -140,19 +119,33 @@ export class AppEvents {
     }
   }
 
-  private ensureTauriTransferPolling() {
-    if (this.tauriTransferPollTimer !== null || this.transfers.size === 0) return
+  private ensureTauriTransferWatch() {
+    if (this.tauriTransferWatch) return
+    const watch: NonNullable<AppEvents['tauriTransferWatch']> = { revision: 0 }
+    this.tauriTransferWatch = watch
+    watch.stop = subscribeTauriTransferProgress(items => {
+      if (this.tauriTransferWatch !== watch) return
+      watch.pushedAt = Date.now()
+      watch.revision += 1
+      this.dispatchTauriTransferItems(items)
+    })
+    // A synchronous initial callback may stop the watch before registration returns.
+    if (this.tauriTransferWatch !== watch) {
+      watch.stop()
+      return
+    }
+
     const poll = () => {
-      if (this.transfers.size === 0) {
-        this.stopTauriTransferPolling()
-        return
-      }
-      if (this.tauriTransferPollInFlight) return
+      if (this.tauriTransferWatch !== watch || this.tauriTransferPollInFlight) return
+      if (watch.pushedAt !== undefined && Date.now() - watch.pushedAt < 500) return
+      const revision = watch.revision
       this.tauriTransferPollInFlight = true
-      void this.getTauriBridge()
-        .then(({ pollTauriTransferProgress }) => pollTauriTransferProgress())
+      void pollTauriTransferProgress()
         .then(items => {
-          if (Array.isArray(items)) this.dispatchTauriTransferItems(items)
+          // A push delivered during this request is newer than the outstanding snapshot.
+          if (this.tauriTransferWatch === watch && watch.revision === revision && Array.isArray(items)) {
+            this.dispatchTauriTransferItems(items)
+          }
         })
         .catch(() => undefined)
         .finally(() => {
@@ -163,7 +156,10 @@ export class AppEvents {
     this.tauriTransferPollTimer = window.setInterval(poll, 150)
   }
 
-  private stopTauriTransferPolling() {
+  private stopTauriTransferWatch() {
+    const watch = this.tauriTransferWatch
+    this.tauriTransferWatch = null
+    watch?.stop?.()
     if (this.tauriTransferPollTimer !== null) {
       window.clearInterval(this.tauriTransferPollTimer)
       this.tauriTransferPollTimer = null
@@ -171,42 +167,28 @@ export class AppEvents {
   }
 
   watchTransfer(id: string, handler: (progress: TransferProgressSnapshot) => void): () => void {
-    if (!id) return () => {}
+    if (this.disposed || !id) return () => {}
     let handlers = this.transfers.get(id)
+    const firstWatchForId = !handlers
     if (!handlers) {
       handlers = new Set()
       this.transfers.set(id, handlers)
-      if (hasTauriInternals()) {
-        // Poll as a safety net alongside Channel push so iframe Channel quirks
-        // in WebView2 can never freeze transfer progress at 0%.
-        this.ensureTauriTransferPolling()
-        if (!this.tauriTransferSubscribed) {
-          this.tauriTransferSubscribed = true
-          void this.getTauriBridge()
-            .then(({ subscribeTauriTransferProgress }) =>
-              subscribeTauriTransferProgress(items => {
-                this.dispatchTauriTransferItems(items)
-              }),
-            )
-            .catch(err => {
-              this.tauriTransferSubscribed = false
-              console.error('[appEvents] subscribeTauriTransferProgress failed:', err)
-            })
-        }
-      } else {
-        this.ensureConnected()
-        this.send({ type: 'transfer:watch', id })
-      }
     }
     handlers.add(handler)
+    if (hasTauriInternals()) {
+      this.ensureTauriTransferWatch()
+    } else if (firstWatchForId) {
+      this.ensureConnected()
+      this.send({ type: 'transfer:watch', id })
+    }
     return () => {
       const current = this.transfers.get(id)
-      if (!current) return
+      if (current !== handlers || !current) return
       current.delete(handler)
       if (current.size === 0) {
         this.transfers.delete(id)
         if (hasTauriInternals()) {
-          if (this.transfers.size === 0) this.stopTauriTransferPolling()
+          if (this.transfers.size === 0) this.stopTauriTransferWatch()
         } else {
           this.send({ type: 'transfer:unwatch', id })
         }
@@ -222,22 +204,16 @@ export class AppEvents {
       this.reconnectTimer = null
     }
     this.terminals.clear()
+    for (const stop of this.tauriTerminalStops) stop()
     this.transfers.clear()
+    this.stopTauriTransferWatch()
     const socket = this.socket
     this.socket = null
     this.open = false
     socket?.close()
   }
 
-  private sendTerminalBytes(session: string, data: string): boolean {
-    if (hasTauriInternals()) {
-      void this.getTauriBridge()
-        .then(({ sendTauriTerminalInput }) => sendTauriTerminalInput(session, data))
-        .catch(err => {
-          console.error('[appEvents] sendTauriTerminalInput failed:', err)
-        })
-      return true
-    }
+  private sendBrowserTerminalBytes(session: string, data: string): boolean {
     if (this.open && this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ type: 'terminal:input', session, data }))
       return true

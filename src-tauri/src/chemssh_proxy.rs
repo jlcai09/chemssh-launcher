@@ -1,14 +1,17 @@
 use std::convert::Infallible;
-use std::io::Read;
+use std::future::Future;
+use std::io::{self, Read};
 use std::net::TcpListener;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
 use core_config::Profile;
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use http::header::{
-    ACCEPT, ACCEPT_ENCODING, CONNECTION, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LENGTH,
+    ACCEPT, ACCEPT_ENCODING, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH,
     CONTENT_TYPE, COOKIE, HOST, LOCATION, REFERER, SET_COOKIE, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
@@ -17,31 +20,122 @@ use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Body, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::percent_decode_str;
 use rand::RngCore;
 use serde::Serialize;
 use subtle::ConstantTimeEq;
-use tokio::io::{copy_bidirectional, AsyncReadExt};
+use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
+#[cfg(test)]
 use tokio::sync::mpsc;
+use tokio::sync::watch;
+use tokio::time::{self, Sleep};
 use url::Url;
 
 use crate::chemssh_bridge::{BridgeHttpError, ChemSshBridgeOpenRequest};
 use crate::client_identity::ChemSshBridgeClientIdentity;
-use crate::commands::sessions::{
-    profile_proxy_prefix, profile_proxy_slug, ActiveSession,
-};
+use crate::commands::sessions::{profile_proxy_prefix, profile_proxy_slug, ActiveSession};
 use crate::state::AppState;
 
 const LAUNCHER_API_TOKEN_COOKIE: &str = "chemssh_launcher_token";
 const HEADER_LAUNCHER_TOKEN: HeaderName = HeaderName::from_static("x-chemssh-launcher-token");
 const CHEMSSH_PROXY_MAX_RETRIES: usize = 3;
 const CHEMSSH_PROXY_RETRY_BASE_MS: u64 = 200;
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const UPSTREAM_HEADERS_IDLE: Duration = Duration::from_secs(45);
+const UPSTREAM_BODY_IDLE: Duration = Duration::from_secs(60);
+const UPSTREAM_EVENT_STREAM_IDLE: Duration = Duration::from_secs(300);
 const MAX_BRIDGE_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_PROXIED_HTML_BYTES: usize = 16 * 1024 * 1024;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
+
+struct IdleBody {
+    body: ProxyBody,
+    idle: Duration,
+    timer: Option<Pin<Box<Sleep>>>,
+    done: bool,
+}
+
+impl Body for IdleBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+        if let Poll::Ready(frame) = Pin::new(&mut self.body).poll_frame(cx) {
+            self.timer = None;
+            self.done = !matches!(&frame, Some(Ok(_)));
+            return Poll::Ready(frame);
+        }
+        let idle = self.idle;
+        let timer = self
+            .timer
+            .get_or_insert_with(|| Box::pin(time::sleep(idle)));
+        if timer.as_mut().poll(cx).is_ready() {
+            self.done = true;
+            // Release the upstream body promptly so its connection can close.
+            self.body = empty_body();
+            return Poll::Ready(Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "ChemSSH upstream response body stalled",
+            )
+            .into())));
+        }
+        Poll::Pending
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done || self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+fn with_body_idle(body: Incoming, idle: Duration) -> ProxyBody {
+    IdleBody {
+        body: body.map_err(|e| -> BoxError { Box::new(e) }).boxed(),
+        idle,
+        timer: None,
+        done: false,
+    }
+    .boxed()
+}
+
+async fn send_with_header_idle(
+    sender: &mut hyper::client::conn::http1::SendRequest<ProxyBody>,
+    request: Request<ProxyBody>,
+    mut activity: watch::Receiver<()>,
+) -> Result<Result<Response<Incoming>, hyper::Error>, time::error::Elapsed> {
+    let response = sender.send_request(request);
+    tokio::pin!(response);
+    // An active streaming upload can take longer than the header idle budget.
+    // Reset that budget on upload frames, but not while the connection is stalled.
+    loop {
+        match time::timeout(UPSTREAM_HEADERS_IDLE, async {
+            tokio::select! {
+                biased;
+                result = &mut response => Some(result),
+                changed = activity.changed() => {
+                    if changed.is_err() { Some((&mut response).await) } else { None }
+                }
+            }
+        })
+        .await?
+        {
+            Some(result) => return Ok(result),
+            None => continue,
+        }
+    }
+}
 
 // Self-healing guard copied from the Go proxy: a transient dynamic-import failure
 // while ChemSSH finishes booting reloads the iframe once automatically.
@@ -133,7 +227,6 @@ async fn handle_request(req: Request<Incoming>, state: Arc<AppState>) -> Respons
     let path = req.uri().path().to_string();
     match path.as_str() {
         "/api/file-icon" => handle_file_icon(&req, &state),
-        "/api/sftp/download" => handle_sftp_download(&req, &state).await,
         "/api/terminal-ws" => crate::terminal_ws::handle_terminal_ws(req, &state).await,
         "/api/chemssh-bridge/capabilities" => handle_bridge_capabilities(&req, &state).await,
         "/api/chemssh-bridge/client-identity" => handle_bridge_client_identity(&req, &state),
@@ -144,141 +237,6 @@ async fn handle_request(req: Request<Incoming>, state: Arc<AppState>) -> Respons
         }
         _ => proxy_to_chemssh(req, &state).await,
     }
-}
-
-struct ChannelStreamBody {
-    rx: mpsc::Receiver<Result<Bytes, BoxError>>,
-}
-
-impl Body for ChannelStreamBody {
-    type Data = Bytes;
-    type Error = BoxError;
-
-    fn poll_frame(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        match self.rx.poll_recv(cx) {
-            std::task::Poll::Ready(Some(Ok(bytes))) => {
-                std::task::Poll::Ready(Some(Ok(Frame::data(bytes))))
-            }
-            std::task::Poll::Ready(Some(Err(err))) => std::task::Poll::Ready(Some(Err(err))),
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
-
-fn content_disposition_attachment(filename: &str) -> String {
-    let fallback: String = filename
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let fallback = fallback.trim();
-    let fallback = if fallback.is_empty() {
-        "download"
-    } else {
-        fallback
-    };
-    let encoded = utf8_percent_encode(filename, NON_ALPHANUMERIC).to_string();
-    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
-}
-
-/// Streams a remote SFTP file as an HTTP attachment so WebView2 records the
-/// download in its native Downloads flyout with real progress.
-async fn handle_sftp_download(req: &Request<Incoming>, state: &Arc<AppState>) -> Response<ProxyBody> {
-    if req.method() != Method::GET {
-        return json_error(405, "method not allowed", None);
-    }
-    let token = query_param(req.uri(), "token").unwrap_or_default();
-    if token.is_empty()
-        || !bool::from(token.as_bytes().ct_eq(state.api_token.as_bytes()))
-    {
-        return json_error(401, "unauthorized", None);
-    }
-    let profile_id = query_param(req.uri(), "session")
-        .or_else(|| query_param(req.uri(), "profile_id"))
-        .unwrap_or_default();
-    let remote_path = query_param(req.uri(), "path").unwrap_or_default();
-    if profile_id.trim().is_empty() || remote_path.trim().is_empty() {
-        return json_error(400, "missing session or path", None);
-    }
-    let suggested = query_param(req.uri(), "name")
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            remote_path
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("download")
-                .to_string()
-        });
-
-    let session = match state.sftp.get_session(&profile_id).await {
-        Ok(s) => s,
-        Err(err) => return json_error(500, err, None),
-    };
-    let (transport, _) = match session.ensure_live().await {
-        Ok(pair) => pair,
-        Err(err) => return json_error(502, err, None),
-    };
-    let meta = match transport.sftp.metadata(&remote_path).await {
-        Ok(m) => m,
-        Err(err) => return json_error(404, format!("stat {remote_path}: {err}"), None),
-    };
-    let total_size = meta.size;
-    let mut remote_file = match transport.sftp.open(&remote_path).await {
-        Ok(f) => f,
-        Err(err) => return json_error(500, format!("open {remote_path}: {err}"), None),
-    };
-
-    let (tx, rx) = mpsc::channel::<Result<Bytes, BoxError>>(8);
-    let rpath_for_task = remote_path.clone();
-    tokio::spawn(async move {
-        // Keep transport alive for the entire streaming duration.
-        let _keep_alive = transport;
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            match remote_file.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(Ok(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    let _ = tx
-                        .send(Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("read {rpath_for_task}: {err}"),
-                        ))))
-                        .await;
-                    break;
-                }
-            }
-        }
-    });
-
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "application/octet-stream")
-        .header(CONTENT_DISPOSITION, content_disposition_attachment(&suggested))
-        .header("x-content-type-options", "nosniff");
-    if let Some(size) = total_size {
-        builder = builder.header(CONTENT_LENGTH, size.to_string());
-    }
-    let body: ProxyBody = ChannelStreamBody { rx }.boxed();
-    let mut resp = builder
-        .body(body)
-        .unwrap_or_else(|_| Response::new(empty_body()));
-    set_no_store(resp.headers_mut());
-    resp
 }
 
 pub(crate) fn empty_body() -> ProxyBody {
@@ -310,7 +268,11 @@ fn json_response<T: Serialize>(
         .unwrap_or_else(|_| Response::new(empty_body()))
 }
 
-pub(crate) fn json_error(status: u16, message: impl Into<String>, cookie_token: Option<&str>) -> Response<ProxyBody> {
+pub(crate) fn json_error(
+    status: u16,
+    message: impl Into<String>,
+    cookie_token: Option<&str>,
+) -> Response<ProxyBody> {
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let payload = serde_json::json!({ "error": message.into() });
     let mut resp = json_response(code, &payload, cookie_token);
@@ -327,8 +289,14 @@ fn set_no_store(headers: &mut HeaderMap) {
         HeaderName::from_static("cache-control"),
         HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
     );
-    headers.insert(HeaderName::from_static("pragma"), HeaderValue::from_static("no-cache"));
-    headers.insert(HeaderName::from_static("expires"), HeaderValue::from_static("0"));
+    headers.insert(
+        HeaderName::from_static("pragma"),
+        HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        HeaderName::from_static("expires"),
+        HeaderValue::from_static("0"),
+    );
 }
 
 pub(crate) fn query_param(uri: &Uri, key: &str) -> Option<String> {
@@ -393,10 +361,7 @@ async fn handle_bridge_capabilities(
     json_response(StatusCode::OK, &caps, Some(&state.api_token))
 }
 
-fn handle_bridge_client_identity(
-    req: &Request<Incoming>,
-    state: &AppState,
-) -> Response<ProxyBody> {
+fn handle_bridge_client_identity(req: &Request<Incoming>, state: &AppState) -> Response<ProxyBody> {
     if req.method() != Method::GET {
         return json_error(405, "method not allowed", Some(&state.api_token));
     }
@@ -460,7 +425,11 @@ async fn handle_bridge_open_sync_events(
     json_response(StatusCode::OK, &payload, Some(&state.api_token))
 }
 
-async fn read_limited_body(body: Incoming, limit: usize) -> Result<Vec<u8>, String> {
+async fn read_limited_body<B>(body: B, limit: usize) -> Result<Vec<u8>, String>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
     let mut out = Vec::new();
     let mut stream = body;
     while let Some(frame_res) = stream.frame().await {
@@ -499,10 +468,7 @@ pub fn validate_bridge_write_request(headers: &HeaderMap, api_token: &str) -> Re
         }
     }
 
-    if let Some(fetch_site) = headers
-        .get("sec-fetch-site")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(fetch_site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         match fetch_site.trim() {
             "" | "same-origin" | "none" => {}
             _ => return Err("cross-site launcher API request rejected".into()),
@@ -550,10 +516,18 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 async fn proxy_to_chemssh(req: Request<Incoming>, state: &AppState) -> Response<ProxyBody> {
     let Some(session) = resolve_session(&req, state).await else {
-        return json_error(503, "chemssh service is not available; start forwarding first", None);
+        return json_error(
+            503,
+            "chemssh service is not available; start forwarding first",
+            None,
+        );
     };
     if !session.is_forwarding().await {
-        return json_error(503, "chemssh service is not available; start forwarding first", None);
+        return json_error(
+            503,
+            "chemssh service is not available; start forwarding first",
+            None,
+        );
     }
 
     let html_wanted = wants_html(req.headers());
@@ -637,6 +611,7 @@ async fn proxy_to_chemssh(req: Request<Incoming>, state: &AppState) -> Response<
             }
         };
 
+        let (upload_activity, activity) = watch::channel(());
         let upstream_req = build_upstream_request(
             &parts.method,
             &parts.headers,
@@ -647,7 +622,13 @@ async fn proxy_to_chemssh(req: Request<Incoming>, state: &AppState) -> Response<
             html_wanted,
             false,
             match pending_body.take() {
-                Some(b) => b.map_err(|e| -> BoxError { Box::new(e) }).boxed(),
+                Some(b) => b
+                    .map_frame(move |frame| {
+                        let _ = upload_activity.send(());
+                        frame
+                    })
+                    .map_err(|e| -> BoxError { Box::new(e) })
+                    .boxed(),
                 None => empty_body(),
             },
         );
@@ -665,16 +646,20 @@ async fn proxy_to_chemssh(req: Request<Incoming>, state: &AppState) -> Response<
                 if can_retry_after_send && is_retriable_msg(&last_err) {
                     continue;
                 }
-                return json_error(502, format!("proxy ChemSSH handshake failed: {last_err}"), None);
+                return json_error(
+                    502,
+                    format!("proxy ChemSSH handshake failed: {last_err}"),
+                    None,
+                );
             }
         };
 
-        tokio::spawn(async move {
+        let driver = tokio::spawn(async move {
             let _ = conn.await;
         });
 
-        match sender.send_request(upstream_req).await {
-            Ok(upstream_resp) => {
+        match send_with_header_idle(&mut sender, upstream_req, activity).await {
+            Ok(Ok(upstream_resp)) => {
                 return transform_upstream_response(
                     upstream_resp,
                     &state.api_token,
@@ -685,7 +670,8 @@ async fn proxy_to_chemssh(req: Request<Incoming>, state: &AppState) -> Response<
                 )
                 .await;
             }
-            Err(err) => {
+            Ok(Err(err)) => {
+                driver.abort();
                 last_err = err.to_string();
                 if can_retry_after_send && is_retriable_msg(&last_err) {
                     continue;
@@ -698,7 +684,15 @@ async fn proxy_to_chemssh(req: Request<Incoming>, state: &AppState) -> Response<
                         .unwrap_or("/");
                     return loading_page_response(refresh);
                 }
-                return json_error(502, format!("proxy ChemSSH request failed: {last_err}"), None);
+                return json_error(
+                    502,
+                    format!("proxy ChemSSH request failed: {last_err}"),
+                    None,
+                );
+            }
+            Err(_) => {
+                driver.abort();
+                return json_error(504, "ChemSSH upstream response headers stalled", None);
             }
         }
     }
@@ -722,21 +716,26 @@ async fn connect_upstream_with_retry(
     addr: &str,
     single_attempt: bool,
 ) -> Result<TcpStream, String> {
-    let attempts = if single_attempt { 1 } else { CHEMSSH_PROXY_MAX_RETRIES };
+    let attempts = if single_attempt {
+        1
+    } else {
+        CHEMSSH_PROXY_MAX_RETRIES
+    };
     let mut last_err = String::new();
     for attempt in 0..attempts {
         if attempt > 0 {
             let delay = CHEMSSH_PROXY_RETRY_BASE_MS * (1u64 << (attempt - 1));
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
-        match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(err) => {
+        match time::timeout(UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => {
                 last_err = err.to_string();
                 if !is_retriable_msg(&last_err) {
                     break;
                 }
             }
+            Err(_) => last_err = "ChemSSH upstream connection timed out".into(),
         }
     }
     Err(last_err)
@@ -775,21 +774,27 @@ async fn handle_websocket_upgrade(
         Ok(pair) => pair,
         Err(err) => return json_error(502, format!("ChemSSH websocket handshake: {err}"), None),
     };
-    tokio::spawn(async move {
+    let driver = tokio::spawn(async move {
         let _ = conn.with_upgrades().await;
     });
 
-    let mut upstream_resp = match sender.send_request(upstream_req).await {
-        Ok(resp) => resp,
-        Err(err) => return json_error(502, format!("ChemSSH websocket upstream: {err}"), None),
-    };
+    let mut upstream_resp =
+        match time::timeout(UPSTREAM_HEADERS_IDLE, sender.send_request(upstream_req)).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => {
+                driver.abort();
+                return json_error(502, format!("ChemSSH websocket upstream: {err}"), None);
+            }
+            Err(_) => {
+                driver.abort();
+                return json_error(504, "ChemSSH websocket upgrade timed out", None);
+            }
+        };
 
     if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
         let upstream_upgrade = hyper::upgrade::on(&mut upstream_resp);
         tokio::spawn(async move {
-            if let (Ok(client_io), Ok(server_io)) =
-                tokio::join!(client_upgrade, upstream_upgrade)
-            {
+            if let (Ok(client_io), Ok(server_io)) = tokio::join!(client_upgrade, upstream_upgrade) {
                 let mut c = TokioIo::new(client_io);
                 let mut s = TokioIo::new(server_io);
                 let _ = copy_bidirectional(&mut c, &mut s).await;
@@ -801,10 +806,7 @@ async fn handle_websocket_upgrade(
     if resp_parts.status != StatusCode::SWITCHING_PROTOCOLS {
         strip_hop_by_hop_headers(&mut resp_parts.headers, false);
     }
-    Response::from_parts(
-        resp_parts,
-        resp_body.map_err(|e| -> BoxError { Box::new(e) }).boxed(),
-    )
+    Response::from_parts(resp_parts, with_body_idle(resp_body, UPSTREAM_BODY_IDLE))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -856,7 +858,8 @@ fn build_upstream_request(
     if let Some(h) = req.headers_mut() {
         *h = headers;
     }
-    req.body(body).unwrap_or_else(|_| Request::new(empty_body()))
+    req.body(body)
+        .unwrap_or_else(|_| Request::new(empty_body()))
 }
 
 async fn transform_upstream_response(
@@ -888,13 +891,29 @@ async fn transform_upstream_response(
         .unwrap_or(false);
 
     if !is_html {
-        return Response::from_parts(
-            parts,
-            body.map_err(|e| -> BoxError { Box::new(e) }).boxed(),
-        );
+        let idle = if parts
+            .headers
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+            }) {
+            UPSTREAM_EVENT_STREAM_IDLE
+        } else {
+            UPSTREAM_BODY_IDLE
+        };
+        return Response::from_parts(parts, with_body_idle(body, idle));
     }
 
-    let raw = match read_limited_body(body, MAX_PROXIED_HTML_BYTES).await {
+    let raw = match read_limited_body(
+        with_body_idle(body, UPSTREAM_BODY_IDLE),
+        MAX_PROXIED_HTML_BYTES,
+    )
+    .await
+    {
         Ok(b) => b,
         Err(err) => return json_error(502, err, None),
     };
@@ -1234,9 +1253,36 @@ pub fn rewrite_chemssh_location_header(
 }
 
 #[cfg(test)]
+struct ChannelStreamBody {
+    rx: mpsc::Receiver<Result<Bytes, BoxError>>,
+}
+
+#[cfg(test)]
+impl Body for ChannelStreamBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                std::task::Poll::Ready(Some(Ok(Frame::data(bytes))))
+            }
+            std::task::Poll::Ready(Some(Err(err))) => std::task::Poll::Ready(Some(Err(err))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::sessions::{session_proxy_url, ActiveSession, SessionBackend, SessionStatus, LocalProxyStatus};
+    use crate::commands::sessions::{
+        session_proxy_url, ActiveSession, LocalProxyStatus, SessionBackend, SessionStatus,
+    };
     use core_secret::MemoryStore;
     use flate2::write::GzEncoder;
     use flate2::Compression;
@@ -1245,6 +1291,39 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn stalled_upstream_body_reports_timeout_and_ends() {
+        // Keep the sender alive so the source stays pending instead of producing EOF.
+        let (_tx, rx) = mpsc::channel(1);
+        let mut body = IdleBody {
+            body: ChannelStreamBody { rx }.boxed(),
+            idle: Duration::ZERO,
+            timer: None,
+            done: false,
+        };
+        let error = body.frame().await.unwrap().unwrap_err();
+        assert_eq!(error.downcast_ref::<io::Error>().unwrap().kind(), io::ErrorKind::TimedOut);
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn response_body_delivers_available_data_even_after_a_long_consumer_pause() {
+        let (tx, rx) = mpsc::channel(2);
+        let mut body = IdleBody {
+            body: ChannelStreamBody { rx }.boxed(),
+            idle: Duration::ZERO,
+            timer: None,
+            done: false,
+        };
+        for value in [Bytes::from_static(b"first"), Bytes::from_static(b"second")] {
+            tx.send(Ok(value.clone())).await.unwrap();
+            assert_eq!(body.frame().await.unwrap().unwrap().into_data().unwrap(), value);
+            assert!(body.timer.is_none());
+        }
+        drop(tx);
+        assert!(body.frame().await.is_none());
+    }
 
     fn test_profile() -> Profile {
         let mut p = Profile::remote_defaults();
@@ -1368,7 +1447,10 @@ mod tests {
                     if first_line.starts_with("GET /api/terminal/ws") {
                         assert!(first_line.contains("client_id=client_launcher_"));
                         assert!(first_line.contains("token=sec-tok-9"));
-                        assert!(req_text.contains("X-ChemSSH-Client-Id: client_launcher_") || req_text.contains("x-chemssh-client-id: client_launcher_"));
+                        assert!(
+                            req_text.contains("X-ChemSSH-Client-Id: client_launcher_")
+                                || req_text.contains("x-chemssh-client-id: client_launcher_")
+                        );
                         let resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
                         let _ = sock.write_all(resp.as_bytes()).await;
                         let mut ws_buf = [0u8; 64];
@@ -1383,8 +1465,12 @@ mod tests {
                     // HTML page response validating stripped launcher query & injected headers
                     assert!(!first_line.contains("profile_id="));
                     assert!(!first_line.contains("launcher_open_seq="));
-                    let has_cid = req_text.to_ascii_lowercase().contains("x-chemssh-client-id: client_launcher_");
-                    let has_tok = req_text.to_ascii_lowercase().contains("x-chemssh-token: sec-tok-9");
+                    let has_cid = req_text
+                        .to_ascii_lowercase()
+                        .contains("x-chemssh-client-id: client_launcher_");
+                    let has_tok = req_text
+                        .to_ascii_lowercase()
+                        .contains("x-chemssh-token: sec-tok-9");
                     assert!(has_cid && has_tok, "missing injected headers:\n{req_text}");
 
                     let html = r#"<html><head><script src="/assets/app.js"></script></head><body>ok</body></html>"#;

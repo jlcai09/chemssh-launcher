@@ -9,6 +9,7 @@ export interface TransferProgressSnapshot {
   cancelled: boolean
   error: string
   paused: boolean
+  committing?: boolean
   retrying?: boolean
   attempt?: number
   max_attempts?: number
