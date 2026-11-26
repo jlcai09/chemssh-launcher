@@ -216,7 +216,7 @@
                 v-model="commandMode"
                 :options="commandModeOptions"
                 size="small"
-                @change="persistCommandMode"
+                @change="() => persistCommandMode()"
               />
             </div>
             <template v-if="isLocalProfile || commandMode === 'manual'">
@@ -663,7 +663,7 @@ const isDirty = computed(() => {
 
 function applyProfile(profile: Partial<Profile>) {
   Object.assign(current, defaults.value, profile)
-  restoreCommandMode(current.id || '')
+  restoreCommandMode(profile)
   current.kind = current.kind || 'remote'
   current.local_proxy = {
     ...(defaults.value?.local_proxy || { enabled: false, host: '127.0.0.1', port: 7890, no_proxy: 'localhost,127.0.0.1,::1' }),
@@ -712,29 +712,40 @@ function profileSummary(profile: Partial<Profile>) {
 }
 
 const COMMAND_MODE_PREFIX = 'chemssh-launcher:command-mode:'
-const commandMode = ref<'manual' | 'auto'>('manual')
+const commandMode = ref<'auto' | 'manual'>('auto')
 const commandModeOptions = computed(() => [
-  { label: t('launcher.modeManual'), value: 'manual' },
-  { label: t('launcher.modeAutoInstall'), value: 'auto' }
+  { label: t('launcher.modeAutoInstall'), value: 'auto' },
+  { label: t('launcher.modeManual'), value: 'manual' }
 ])
 
-function restoreCommandMode(profileId: string) {
+function restoreCommandMode(profile: Partial<Profile>) {
+  const profileId = profile.id || ''
   if (!profileId) {
-    commandMode.value = 'manual'
+    // New profiles default to auto-install.
+    commandMode.value = 'auto'
     return
   }
   try {
     const saved = localStorage.getItem(COMMAND_MODE_PREFIX + profileId)
-    commandMode.value = saved === 'auto' ? 'auto' : 'manual'
+    if (saved === 'auto' || saved === 'manual') {
+      commandMode.value = saved
+      return
+    }
   } catch {
-    commandMode.value = 'manual'
+    // ignore storage failures
   }
+  // Existing profiles without a saved mode default to manual when they already
+  // have pre-start or start commands configured so users don't have to toggle back.
+  const hasManualCommands = Boolean(
+    (profile.pre_start_commands || '').trim() || (profile.start_command || '').trim()
+  )
+  commandMode.value = hasManualCommands ? 'manual' : 'auto'
 }
 
-function persistCommandMode() {
-  if (!current.id) return
+function persistCommandMode(profileId = current.id) {
+  if (!profileId) return
   try {
-    localStorage.setItem(COMMAND_MODE_PREFIX + current.id, commandMode.value)
+    localStorage.setItem(COMMAND_MODE_PREFIX + profileId, commandMode.value)
   } catch {
     // ignore storage failures
   }
@@ -999,6 +1010,9 @@ async function saveProfile() {
     draftOpen.value = false
     draftSnapshot.value = {}
     draftSecrets.value = { password: '', passphrase: '', securityToken: '' }
+  }
+  if (!saved.kind || saved.kind === 'remote') {
+    persistCommandMode(saved.id)
   }
   applyProfile(saved)
   await loadProfiles()

@@ -29,6 +29,8 @@ use crate::state::AppState;
 
 const MAX_JOB_LINES: usize = 4000;
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(60 * 40);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_EXEC_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------------------------
 // Job bookkeeping
@@ -168,16 +170,18 @@ pub struct InstallerProgress {
 // Local helpers
 // ---------------------------------------------------------------------------------------------
 
-async fn run_local_curl(args: &[String]) -> Result<Vec<u8>, String> {
+async fn run_local_curl(args: &[String], timeout_dur: Duration) -> Result<Vec<u8>, String> {
     let mut cmd = tokio::process::Command::new("curl");
-    cmd.args(args).stdin(std::process::Stdio::null());
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
     #[cfg(windows)]
     {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let output = tokio::time::timeout(Duration::from_secs(900), cmd.output())
+    let output = tokio::time::timeout(timeout_dur, cmd.output())
         .await
-        .map_err(|_| "local curl timed out".to_string())?
+        .map_err(|_| format!("local curl timed out after {}s", timeout_dur.as_secs()))?
         .map_err(|e| format!("could not run local curl: {e}"))?;
     if output.status.success() {
         Ok(output.stdout)
@@ -190,12 +194,20 @@ async fn run_local_curl(args: &[String]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn local_curl_args(url: &str, proxy: Option<&str>, max_time: u32, out: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = ["-fsSL", "--connect-timeout", "10", "--max-time"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    args.push(max_time.to_string());
+fn local_curl_args(
+    url: &str,
+    proxy: Option<&str>,
+    connect_timeout: u32,
+    max_time: u32,
+    out: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-fsSL".into(),
+        "--connect-timeout".into(),
+        connect_timeout.to_string(),
+        "--max-time".into(),
+        max_time.to_string(),
+    ];
     if let Some(proxy) = proxy {
         args.push("-x".into());
         args.push(proxy.to_string());
@@ -259,7 +271,11 @@ async fn connect(
     if profile.is_local() {
         return Err("one-click install needs a remote profile".into());
     }
-    let creds = load_ssh_credentials(state, profile)?;
+    let state_clone = state.clone();
+    let profile_clone = profile.clone();
+    let creds = tokio::task::spawn_blocking(move || load_ssh_credentials(&state_clone, &profile_clone))
+        .await
+        .map_err(|e| format!("load credentials task failed: {e}"))??;
     let verifier = KnownHostsVerifier::new(
         &state.known_hosts_path,
         &profile.ssh_host,
@@ -271,9 +287,13 @@ async fn connect(
         .map_err(format_ssh_error)
 }
 
-async fn exec_script(connection: &SshConnection, script: &str) -> Result<String, String> {
+async fn exec_script(
+    connection: &SshConnection,
+    script: &str,
+    timeout_dur: Duration,
+) -> Result<String, String> {
     let out = connection
-        .exec_with_stdin("/bin/sh -s", script.as_bytes(), Duration::from_secs(60))
+        .exec_with_stdin("/bin/sh -s", script.as_bytes(), timeout_dur)
         .await
         .map_err(|e| e.to_string())?;
     if out.exit_code.unwrap_or(0) != 0 {
@@ -292,23 +312,26 @@ async fn fetch_manifest(
     connection: &SshConnection,
     proxy: &ProxyGuard,
     proxy_prefix: &str,
+    per_try_secs: u32,
 ) -> Result<(Manifest, bool), String> {
     let urls = manifest_urls(proxy_prefix);
     let exports = proxy_exports(&proxy.env).replace('\n', "; ");
     let mut errors = Vec::new();
+    let connect_secs = per_try_secs.min(3).max(1);
+    let exec_timeout = Duration::from_secs((per_try_secs as u64).saturating_add(2));
 
     for (idx, url) in urls.iter().enumerate() {
         let used_proxy_prefix = idx > 0;
         let q = shell_quote(url);
         let remote_cmd = format!(
-            "{exports}if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 8 --max-time 20 {q}; \
-             elif command -v wget >/dev/null 2>&1; then wget -q -T 15 -O - {q}; \
+            "{exports}if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout {connect_secs} --max-time {per_try_secs} {q}; \
+             elif command -v wget >/dev/null 2>&1; then wget -q -T {per_try_secs} --tries=1 -O - {q}; \
              else exit 127; fi"
         );
         match connection
             .exec_command_timeout(
                 &format!("sh -c {}", shell_quote(&remote_cmd)),
-                Duration::from_secs(40),
+                exec_timeout,
             )
             .await
         {
@@ -320,8 +343,14 @@ async fn fetch_manifest(
             Err(e) => errors.push(format!("remote {url}: {e}")),
         }
 
-        let args = local_curl_args(url, proxy.local_url.as_deref(), 30, None);
-        match run_local_curl(&args).await {
+        let args = local_curl_args(
+            url,
+            proxy.local_url.as_deref(),
+            connect_secs,
+            per_try_secs,
+            None,
+        );
+        match run_local_curl(&args, exec_timeout).await {
             Ok(bytes) => match Manifest::parse(&String::from_utf8_lossy(&bytes)) {
                 Ok(m) => return Ok((m, used_proxy_prefix)),
                 Err(e) => errors.push(format!("local {url}: {e}")),
@@ -380,17 +409,26 @@ async fn prepare(
     options: InstallerOptions,
     policy: Option<HostKeyPolicy>,
     force_repair: bool,
+    manifest_per_try_secs: u32,
 ) -> Result<Prepared, String> {
     options.validate().map_err(|e| e.to_string())?;
     let dir = options.dir().map_err(|e| e.to_string())?;
-    let profile = state.profiles.get(profile_id).map_err(|e| e.to_string())?;
+    let profiles_store = Arc::clone(&state.profiles);
+    let pid = profile_id.to_string();
+    let profile = tokio::task::spawn_blocking(move || profiles_store.get(&pid))
+        .await
+        .map_err(|e| format!("load profile task failed: {e}"))?
+        .map_err(|e| e.to_string())?;
     let connection = Arc::new(connect(state, &profile, policy).await?);
     let (mut proxy, proxy_warning) = ProxyGuard::start(&connection, &profile).await;
 
     let proxy_prefix = options.proxy_prefix().to_string();
     let result: Result<(RemoteProbe, Manifest, bool), String> = async {
-        let probe = RemoteProbe::parse(&exec_script(&connection, &build_probe_script(&dir)).await?);
-        let (manifest, via_proxy) = fetch_manifest(&connection, &proxy, &proxy_prefix).await?;
+        let probe = RemoteProbe::parse(
+            &exec_script(&connection, &build_probe_script(&dir), PROBE_EXEC_TIMEOUT).await?,
+        );
+        let (manifest, via_proxy) =
+            fetch_manifest(&connection, &proxy, &proxy_prefix, manifest_per_try_secs).await?;
         Ok((probe, manifest, via_proxy))
     }
     .await;
@@ -466,8 +504,14 @@ async fn download_locally_and_upload(
     let mut downloaded = false;
     for url in &urls {
         job.push_line(format!("[installer] downloading on this computer: {url}"));
-        let args = local_curl_args(url, proxy.as_deref(), 600, Some(&local_path.to_string_lossy()));
-        match run_local_curl(&args).await {
+        let args = local_curl_args(
+            url,
+            proxy.as_deref(),
+            10,
+            600,
+            Some(&local_path.to_string_lossy()),
+        );
+        match run_local_curl(&args, Duration::from_secs(620)).await {
             Ok(_) => {
                 downloaded = true;
                 break;
@@ -632,10 +676,27 @@ pub async fn installer_check(
     options: InstallerOptions,
     host_key_policy: Option<HostKeyPolicy>,
 ) -> Result<InstallerCheck, String> {
-    let prep = prepare(&state, &profile_id, options, host_key_policy, false).await?;
-    let check = prep.check();
-    prep.release().await;
-    Ok(check)
+    let app_state = state.inner().clone();
+    // Run the probe in an isolated background task capped at CHECK_TIMEOUT (10s)
+    // so slow networks or hung remote endpoints never block saving profiles or other UI actions.
+    let task = tokio::spawn(async move {
+        let prep = prepare(&app_state, &profile_id, options, host_key_policy, false, 3).await?;
+        let check = prep.check();
+        prep.release().await;
+        Ok::<InstallerCheck, String>(check)
+    });
+    let abort_handle = task.abort_handle();
+    match tokio::time::timeout(CHECK_TIMEOUT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_err)) => Err(format!("installer check task failed: {join_err}")),
+        Err(_) => {
+            abort_handle.abort();
+            Err(format!(
+                "check timed out after {}s; verify SSH connectivity or configure a download proxy",
+                CHECK_TIMEOUT.as_secs()
+            ))
+        }
+    }
 }
 
 /// `mode` is `auto` (install or update as needed) or `repair` (rebuild the virtualenv).
@@ -654,7 +715,7 @@ pub async fn installer_run(
         return Err("stop the running ChemSSH session of this profile before installing or updating".into());
     }
     let force_repair = mode.as_deref() == Some("repair");
-    let prep = prepare(&state, &profile_id, options, host_key_policy, force_repair).await?;
+    let prep = prepare(&state, &profile_id, options, host_key_policy, force_repair, 6).await?;
     let check = prep.check();
     if prep.action == Action::UpToDate {
         prep.release().await;

@@ -142,21 +142,33 @@ pub(crate) fn delete_profile_impl(state: &AppState, id_or_name: &str) -> Result<
 }
 
 #[tauri::command]
-pub fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
-    state.profiles.list().map_err(|e| e.to_string())
+pub async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
+    let store = state.profiles.clone();
+    tokio::task::spawn_blocking(move || store.list().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("list profiles task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn get_profile(state: State<'_, AppState>, id_or_name: String) -> Result<Profile, String> {
-    state.profiles.get(&id_or_name).map_err(|e| e.to_string())
+pub async fn get_profile(
+    state: State<'_, AppState>,
+    id_or_name: String,
+) -> Result<Profile, String> {
+    let store = state.profiles.clone();
+    tokio::task::spawn_blocking(move || store.get(&id_or_name).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("get profile task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn save_profile(
+pub async fn save_profile(
     state: State<'_, AppState>,
     request: SaveProfileRequest,
 ) -> Result<SaveProfileResponse, String> {
-    save_profile_impl(&state, request)
+    let app_state = state.inner().clone();
+    tokio::task::spawn_blocking(move || save_profile_impl(&app_state, request))
+        .await
+        .map_err(|e| format!("save profile task failed: {e}"))?
 }
 
 #[tauri::command]

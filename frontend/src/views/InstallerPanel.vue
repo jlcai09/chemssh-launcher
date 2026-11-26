@@ -12,10 +12,42 @@
           <el-input v-model="options.python" :disabled="busy" :placeholder="t('launcher.installerPythonHint')" @change="persist" />
         </el-form-item>
         <el-form-item :label="t('launcher.installerPipIndex')">
-          <el-input v-model="options.pip_index" :disabled="busy" :placeholder="t('launcher.installerPipIndexHint')" @change="persist" />
+          <el-select
+            v-model="options.pip_index"
+            :disabled="busy"
+            filterable
+            allow-create
+            default-first-option
+            style="width: 100%"
+            :placeholder="t('launcher.installerPipIndexHint')"
+            @change="persist"
+          >
+            <el-option
+              v-for="item in pipIndexPresets"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item :label="t('launcher.installerProxyPrefix')">
-          <el-input v-model="options.proxy_prefix" :disabled="busy" :placeholder="t('launcher.installerProxyPrefixHint')" @change="persist" />
+          <el-select
+            v-model="options.proxy_prefix"
+            :disabled="busy"
+            filterable
+            allow-create
+            default-first-option
+            style="width: 100%"
+            :placeholder="t('launcher.installerProxyPrefixHint')"
+            @change="persist"
+          >
+            <el-option
+              v-for="item in proxyPrefixPresets"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
         </el-form-item>
       </div>
       <el-checkbox v-model="options.ignore_pre_start" :disabled="busy" @change="persist">
@@ -81,8 +113,30 @@ const props = defineProps<{ profileId: string; embedded?: boolean }>()
 const emit = defineEmits<{ (e: 'applied', profile: Profile): void }>()
 
 const STORAGE_PREFIX = 'chemssh-launcher:installer:'
+const DEFAULT_PIP_INDEX = 'https://pypi.tuna.tsinghua.edu.cn/simple'
+const DEFAULT_PROXY_PREFIX = 'https://gh-proxy.com'
+
+const pipIndexPresets = computed(() => [
+  { label: t('launcher.pipPresetTuna'), value: 'https://pypi.tuna.tsinghua.edu.cn/simple' },
+  { label: t('launcher.pipPresetAliyun'), value: 'https://mirrors.aliyun.com/pypi/simple' },
+  { label: t('launcher.pipPresetUstc'), value: 'https://pypi.mirrors.ustc.edu.cn/simple' },
+  { label: t('launcher.pipPresetTencent'), value: 'https://mirrors.cloud.tencent.com/pypi/simple' },
+  { label: t('launcher.pipPresetOfficial'), value: '' }
+])
+
+const proxyPrefixPresets = computed(() => [
+  { label: t('launcher.proxyPresetGhProxyCom'), value: 'https://gh-proxy.com' },
+  { label: t('launcher.proxyPresetGhProxyNet'), value: 'https://ghproxy.net' },
+  { label: t('launcher.proxyPresetAkams'), value: 'https://github.akams.cn' },
+  { label: t('launcher.proxyPresetDirect'), value: '' }
+])
+
 const emptyOptions = (): InstallerOptions => ({
-  install_dir: '~/.chemssh', python: '', pip_index: '', proxy_prefix: '', ignore_pre_start: true
+  install_dir: '~/.chemssh',
+  python: '',
+  pip_index: DEFAULT_PIP_INDEX,
+  proxy_prefix: DEFAULT_PROXY_PREFIX,
+  ignore_pre_start: true
 })
 
 const options = reactive<InstallerOptions>(emptyOptions())
