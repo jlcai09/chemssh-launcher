@@ -2397,6 +2397,13 @@ body {
   color: #1d1d1f;
 }
 
+.lumen-window .terminal-sftp-entry.is-move-drop-target,
+.lumen-window .terminal-sftp-entry.is-move-drop-target:hover {
+  background: rgba(31, 111, 224, 0.16);
+  outline: 1.5px solid var(--lumen-blue);
+  outline-offset: -1.5px;
+}
+
 .lumen-window .terminal-sftp-entry-icon {
   color: #8e8e93;
   font-size: calc(14px * var(--lumen-ui-scale));
@@ -2430,6 +2437,24 @@ body {
   color: #8e8e93;
   font-family: var(--lumen-mono);
   font-size: calc(11px * var(--lumen-ui-scale));
+}
+
+.lumen-window .terminal-sftp-activity {
+  background: rgba(31, 111, 224, 0.1);
+  color: var(--lumen-blue);
+  font-size: calc(11px * var(--lumen-ui-scale));
+}
+
+.lumen-window .terminal-sftp-activity .sftp-activity-spinner,
+.lumen-window .sftp-activity-badge .sftp-activity-spinner {
+  border-color: rgba(31, 111, 224, 0.24);
+  border-top-color: currentColor;
+}
+
+.lumen-window .sftp-activity-badge {
+  background: rgba(31, 111, 224, 0.1);
+  color: var(--lumen-blue);
+  font-size: calc(10.5px * var(--lumen-ui-scale));
 }
 
 .lumen-window .terminal-sftp-footer {

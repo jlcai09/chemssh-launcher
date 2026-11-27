@@ -399,7 +399,20 @@
               @pointerdown.stop="startScrollbarThumbDrag(paneName, 'horizontal', $event)"
             />
           </div>
-          <div class="sftp-file-status" role="status">{{ paneStatusText(paneName) }}</div>
+          <div class="sftp-file-status" role="status">
+            <span class="sftp-file-status-text">{{ paneStatusText(paneName) }}</span>
+            <span
+              v-if="paneArchiveTasks[paneName].length"
+              class="sftp-activity-badge"
+              :title="paneArchiveTasks[paneName][0].label"
+            >
+              <span class="sftp-activity-spinner" aria-hidden="true" />
+              <span class="sftp-activity-text">{{ paneArchiveTasks[paneName][0].label }}</span>
+              <span v-if="paneArchiveTasks[paneName].length > 1" class="sftp-activity-count">
+                +{{ paneArchiveTasks[paneName].length - 1 }}
+              </span>
+            </span>
+          </div>
           </div>
 
         <div
@@ -813,6 +826,8 @@ interface TransferItem {
   total: number
   startedAt: number
   endedAt: number | null
+  speedEndedAt?: number | null
+  pausedMs?: number
   status: TransferStatus
   error: string
   paused?: boolean
@@ -1001,8 +1016,10 @@ function syncNativeDragTransfers(jobs: NativeDragJob[]) {
         targetPath: t('sftp.dragDropTarget'),
         loaded: root.loaded,
         total: root.total,
-        startedAt: job.createdAt,
+        startedAt: projection.startedAt,
         endedAt: projection.endedAt,
+        speedEndedAt: projection.speedEndedAt,
+        pausedMs: projection.pausedMs,
         status: root.status,
         error: root.error || job.error || '',
         paused: Boolean(job.paused),
@@ -1027,8 +1044,10 @@ function syncNativeDragTransfers(jobs: NativeDragJob[]) {
           targetPath: common.targetPath,
           loaded: child.loaded,
           total: child.total,
-          startedAt: job.createdAt,
-          endedAt: child.status === 'running' ? null : (job.endedAt || Date.now()),
+          startedAt: projection.startedAt,
+          endedAt: child.status === 'running' ? null : (projection.speedEndedAt || job.endedAt || Date.now()),
+          speedEndedAt: child.status === 'running' ? null : (projection.speedEndedAt || job.endedAt || Date.now()),
+          pausedMs: projection.pausedMs,
           status: child.status,
           error: child.error,
           paused: Boolean(job.paused) && child.status === 'running',
@@ -1567,17 +1586,26 @@ function transferRetryLabel(item: TransferItem) {
   return t('sftp.statusRetrying', { attempt: item.attempt || 1, max: item.maxAttempts || 0 })
 }
 
+function transferActiveElapsed(item: TransferItem, forSpeed = false) {
+  const end = forSpeed
+    ? (item.speedEndedAt ?? item.endedAt ?? Date.now())
+    : (item.endedAt ?? Date.now())
+  const pausedMs = Math.max(0, item.pausedMs || 0)
+  return Math.max(0.001, (end - item.startedAt - pausedMs) / 1000)
+}
+
 function transferSpeed(item: TransferItem) {
   if (item.nativeDragState === 'delivering') return '—'
   if (item.paused) return t('sftp.statusPaused')
   if (item.retrying) return t('sftp.waitingData')
-  const elapsed = Math.max(0.001, ((item.endedAt || Date.now()) - item.startedAt) / 1000)
   if (item.loaded <= 0) return t('sftp.waitingData')
-  return `${formatBytes(item.loaded / elapsed)}/s`
+  const elapsed = transferActiveElapsed(item, true)
+  const formatted = formatBytes(item.loaded / elapsed)
+  return formatted ? `${formatted}/s` : t('sftp.waitingData')
 }
 
 function transferElapsed(item: TransferItem) {
-  return formatDuration(((item.endedAt || Date.now()) - item.startedAt) / 1000)
+  return formatDuration(transferActiveElapsed(item, false))
 }
 
 function transferEta(item: TransferItem) {
@@ -1586,8 +1614,8 @@ function transferEta(item: TransferItem) {
   if (item.retrying) return t('sftp.waitingEstimate')
   if (item.status !== 'running') return t('sftp.seconds', { seconds: 0 })
   if (!item.total || item.loaded <= 0) return t('sftp.waitingEstimate')
-  const elapsed = (Date.now() - item.startedAt) / 1000
-  const speed = item.loaded / Math.max(0.001, elapsed)
+  const elapsed = transferActiveElapsed(item, true)
+  const speed = item.loaded / elapsed
   if (speed <= 0) return t('sftp.waitingEstimate')
   return formatDuration((item.total - item.loaded) / speed)
 }
@@ -3085,11 +3113,28 @@ const canExtractContextEntry = computed(() => {
   return Boolean(entry && !entry.is_dir && canExtractName(entry.name, menuArchiveTools.value))
 })
 
+const paneArchiveTasks = reactive<Record<PaneName, { id: number; label: string }[]>>({
+  left: [],
+  right: []
+})
+let nextArchiveTaskID = 0
+
+function beginPaneArchiveTask(paneName: PaneName, label: string) {
+  const id = ++nextArchiveTaskID
+  paneArchiveTasks[paneName].push({ id, label })
+  return () => {
+    const list = paneArchiveTasks[paneName]
+    const idx = list.findIndex(item => item.id === id)
+    if (idx >= 0) list.splice(idx, 1)
+  }
+}
+
 async function compressSelection(paneName: PaneName, format: ArchiveFormat) {
   const tab = activeTab(paneName)
   if (!tab) return
   const paths = selectedEntries(paneName).map(entry => entry.path)
   if (paths.length === 0) return
+  const endActivity = beginPaneArchiveTask(paneName, t('sftp.compressing', { format }))
   try {
     const response = tab.kind === 'local'
       ? await postJSON<{ archive: string }>('/api/local/compress', { target_directory: tab.path, paths, format })
@@ -3103,12 +3148,15 @@ async function compressSelection(paneName: PaneName, format: ArchiveFormat) {
     ElMessage.success(t('sftp.compressed', { name: response.archive || format }))
   } catch (error) {
     ElMessage.error(`${t('sftp.archiveFailed')}: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    endActivity()
   }
 }
 
 async function extractEntry(paneName: PaneName, entry: FileEntry) {
   const tab = activeTab(paneName)
   if (!tab) return
+  const endActivity = beginPaneArchiveTask(paneName, t('sftp.extracting', { name: entry.name }))
   try {
     if (tab.kind === 'local') {
       await postJSON('/api/local/extract', { path: entry.path, target_directory: tab.path })
@@ -3119,6 +3167,8 @@ async function extractEntry(paneName: PaneName, entry: FileEntry) {
     ElMessage.success(t('sftp.extracted'))
   } catch (error) {
     ElMessage.error(`${t('sftp.archiveFailed')}: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    endActivity()
   }
 }
 

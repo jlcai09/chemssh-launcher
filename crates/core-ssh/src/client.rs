@@ -223,10 +223,36 @@ pub struct OpenedPtyShell {
     pub x11_warning: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct CachedRawSftp {
+    pub session: Arc<RawSftpSession>,
+    pub has_posix_rename: bool,
+    verified_parents: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl CachedRawSftp {
+    pub fn is_parent_verified(&self, parent: &str) -> bool {
+        self.verified_parents
+            .lock()
+            .ok()
+            .is_some_and(|set| set.contains(parent))
+    }
+
+    pub fn mark_parent_verified(&self, parent: &str) {
+        if let Ok(mut set) = self.verified_parents.lock() {
+            if set.len() >= 128 {
+                set.clear();
+            }
+            set.insert(parent.to_owned());
+        }
+    }
+}
+
 pub struct SshConnection {
     handle: Arc<Handle<SshClientHandler>>,
     reverse_proxy_target: Arc<Mutex<Option<String>>>,
     x11_forwarder: Arc<Mutex<Option<X11ForwarderState>>>,
+    raw_sftp: Arc<tokio::sync::Mutex<Option<CachedRawSftp>>>,
 }
 
 impl SshConnection {
@@ -371,6 +397,7 @@ impl SshConnection {
             handle: Arc::new(handle),
             reverse_proxy_target,
             x11_forwarder,
+            raw_sftp: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -380,6 +407,7 @@ impl SshConnection {
             handle: Arc::new(handle),
             reverse_proxy_target: Arc::new(Mutex::new(None)),
             x11_forwarder: Arc::new(Mutex::new(None)),
+            raw_sftp: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -757,6 +785,46 @@ impl SshConnection {
         Ok(RawSftpSession::new(channel.into_stream()))
     }
 
+    /// Lazily opens and caches a single persistent raw SFTP channel on this SSH
+    /// connection so repeated file uploads/overwrites reuse the same remote
+    /// `sftp-server` subsystem instead of spawning a new subprocess per file.
+    pub async fn shared_raw_sftp(&self, timeout: Duration) -> Option<CachedRawSftp> {
+        let mut guard = self.raw_sftp.lock().await;
+        if let Some(cached) = guard.as_ref() {
+            return Some(cached.clone());
+        }
+        let opened = tokio::time::timeout(timeout, async {
+            let raw = self.open_raw_sftp().await.ok()?;
+            let version = raw.init().await.ok()?;
+            let has_posix_rename = version
+                .extensions
+                .get("posix-rename@openssh.com")
+                .is_some_and(|v| v == "1");
+            Some(CachedRawSftp {
+                session: Arc::new(raw),
+                has_posix_rename,
+                verified_parents: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            })
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(ref cached) = opened {
+            *guard = Some(cached.clone());
+        }
+        opened
+    }
+
+    /// Drops the cached raw SFTP channel if it matches `stale` (e.g. after a channel error).
+    pub async fn invalidate_raw_sftp(&self, stale: &CachedRawSftp) {
+        let mut guard = self.raw_sftp.lock().await;
+        if let Some(current) = guard.as_ref() {
+            if Arc::ptr_eq(&current.session, &stale.session) {
+                *guard = None;
+            }
+        }
+    }
+
     pub async fn start_local_tunnel(
         &self,
         local_host: &str,
@@ -924,6 +992,7 @@ impl SshConnection {
     }
 
     pub async fn disconnect(&self) {
+        *self.raw_sftp.lock().await = None;
         let _ = self
             .handle
             .disconnect(russh::Disconnect::ByApplication, "closed", "en")

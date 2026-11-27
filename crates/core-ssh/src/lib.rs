@@ -11,8 +11,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub use client::{
-    fetch_local_identity, ChemSshIdentity, CheckPortResult, ExecOutput, RemoteProcessHandle,
-    SshConnection, SshCredentials,
+    fetch_local_identity, CachedRawSftp, ChemSshIdentity, CheckPortResult, ExecOutput,
+    RemoteProcessHandle, SshConnection, SshCredentials,
 };
 pub use hostkey::{
     fingerprint_sha256, normalize_host_address, HostKeyPolicy, HostKeyVerificationError,

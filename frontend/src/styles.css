@@ -1155,6 +1155,8 @@ p,
   height: 22px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 0 12px;
   border-top: 1px solid rgba(148, 163, 184, 0.22);
   background: rgba(248, 250, 252, 0.76);
@@ -1163,7 +1165,55 @@ p,
   line-height: 1;
   white-space: nowrap;
   overflow: hidden;
+}
+
+.sftp-file-status-text {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.sftp-activity-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(14, 116, 144, 0.1);
+  color: #0e7490;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.sftp-activity-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sftp-activity-count {
+  flex: 0 0 auto;
+  opacity: 0.78;
+}
+
+.sftp-activity-spinner {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(14, 116, 144, 0.25);
+  border-top-color: currentColor;
+  animation: sftp-activity-spin 0.75s linear infinite;
+}
+
+@keyframes sftp-activity-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .file-list-virtual-spacer {
@@ -3339,6 +3389,17 @@ body,
   color: var(--text);
 }
 
+.terminal-sftp-entry.is-dragging-out {
+  opacity: 0.62;
+}
+
+.terminal-sftp-entry.is-move-drop-target,
+.terminal-sftp-entry.is-move-drop-target:hover {
+  background: rgba(14, 116, 144, 0.14);
+  outline: 1.5px solid #0e7490;
+  outline-offset: -1.5px;
+}
+
 .terminal-sftp-entry-icon {
   display: inline-flex;
   align-items: center;
@@ -3371,6 +3432,27 @@ body,
 
 .hidden-file-input {
   display: none !important;
+}
+
+.terminal-sftp-activity {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: rgba(14, 116, 144, 0.09);
+  color: #0e7490;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.terminal-sftp-activity-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .terminal-sftp-footer {

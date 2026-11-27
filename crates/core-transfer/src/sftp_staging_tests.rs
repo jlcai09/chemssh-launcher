@@ -313,7 +313,7 @@ async fn overwrite_preserves_permissions_and_leaves_original_until_commit() {
         let raw = RawSftpSession::new(client);
         raw.init().await.unwrap();
         staged.marker = Some(marker);
-        staged.posix_session = Some(raw);
+        staged.posix_session = Some(Arc::new(raw));
         payload(&mut staged).await;
         assert_eq!(entries.lock().unwrap()[path].bytes, b"old contents");
         staged.commit().await.unwrap();

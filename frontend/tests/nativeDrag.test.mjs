@@ -71,6 +71,20 @@ test('native job projection preserves byte progress, paused state and terminal t
   const cancelled = nativeDragTransfer({ ...job, state: 'cancelled' })
   assert.equal(cancelled.status, 'error')
   assert.equal(cancelled.cancelled, true)
+
+  const timed = nativeDragTransfer({
+    ...job,
+    state: 'done',
+    createdAt: 1000,
+    transferStartedAt: 3500,
+    transferEndedAt: 4000,
+    pausedMs: 100,
+    endedAt: 4300,
+  })
+  assert.equal(timed.startedAt, 3500)
+  assert.equal(timed.speedEndedAt, 4000)
+  assert.equal(timed.endedAt, 4300)
+  assert.equal(timed.pausedMs, 100)
 })
 
 test('background jobs survive gesture completion and merge late snapshots by revision', async () => {

@@ -23,6 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 const ERROR_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 pub const MAX_SYNC_FILE_BYTES: u64 = 100 * 1024 * 1024;
+const REMOTE_HASH_SHELL_THRESHOLD_BYTES: u64 = 256 * 1024;
 const MAX_SYNC_EVENTS: usize = 500;
 const CHUNK_SIZE: usize = 256 * 1024;
 
@@ -268,7 +269,7 @@ impl SftpOpenSyncManager {
 
         let managed = sftp_manager.get_session(&session_id).await?;
         let (transport, _) = managed.ensure_live().await?;
-        let canonical_path = canonical_regular_path(&transport.sftp, &remote_path)
+        let (canonical_path, before_meta) = canonical_regular_path(&transport.sftp, &remote_path)
             .await
             .map_err(|e| e.to_string())?;
         if let Some(root) = workspace_root {
@@ -304,10 +305,10 @@ impl SftpOpenSyncManager {
             .open(&path)
             .await
             .map_err(|e| e.to_string())?;
-        let baseline = download_baseline(&transport, &canonical_path, &mut local)
+        let baseline = download_baseline(&transport, &canonical_path, &before_meta, &mut local)
             .await
             .map_err(|e| e.to_string())?;
-        local.sync_all().await.map_err(|e| e.to_string())?;
+        local.flush().await.map_err(|e| e.to_string())?;
         drop(local);
         let synced_stamp = LocalStamp::read(&path).await.map_err(|e| e.to_string())?;
         let mut watches = self.watches.lock().await;
@@ -571,7 +572,10 @@ fn path_in_remote_workspace(path: &str, root: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-async fn canonical_regular_path(sftp: &SftpSession, path: &str) -> Result<String, TransferError> {
+async fn canonical_regular_path(
+    sftp: &SftpSession,
+    path: &str,
+) -> Result<(String, FileAttributes), TransferError> {
     let canonical = sftp
         .canonicalize(path)
         .await
@@ -590,7 +594,7 @@ async fn canonical_regular_path(sftp: &SftpSession, path: &str) -> Result<String
             "remote edit file exceeds the 100 MiB limit".into(),
         ));
     }
-    Ok(canonical)
+    Ok((canonical, meta))
 }
 
 async fn digest_copy<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
@@ -616,16 +620,13 @@ async fn digest_copy<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok((hash.finalize().into(), len))
 }
 
-async fn remote_fingerprint<W: AsyncWrite + Unpin>(
+async fn remote_fingerprint_with_before<W: AsyncWrite + Unpin>(
     sftp: &SftpSession,
     path: &str,
+    before: &FileAttributes,
     writer: &mut W,
 ) -> Result<(Fingerprint, u32), TransferError> {
-    let before = sftp
-        .symlink_metadata(path)
-        .await
-        .map_err(|e| sftp_err("stat remote edit file", e))?;
-    if !is_regular_file(&before) || before.size.is_some_and(|len| len > MAX_SYNC_FILE_BYTES) {
+    if !is_regular_file(before) || before.size.is_some_and(|len| len > MAX_SYNC_FILE_BYTES) {
         return Err(TransferError::InvalidInput(
             "remote edit file is not a regular file within the 100 MiB limit".into(),
         ));
@@ -641,7 +642,7 @@ async fn remote_fingerprint<W: AsyncWrite + Unpin>(
         .symlink_metadata(path)
         .await
         .map_err(|e| sftp_err("stat remote edit file", e))?;
-    Ok((hash, checked_remote_mode(&before, &after, Some(len))?))
+    Ok((hash, checked_remote_mode(before, &after, Some(len))?))
 }
 
 fn checked_remote_mode(
@@ -670,21 +671,21 @@ fn checked_remote_mode(
 async fn verify_remote_fingerprint(
     transport: &SftpTransport,
     path: &str,
+    before: &FileAttributes,
 ) -> Result<(Fingerprint, u32), TransferError> {
     let sftp = &transport.sftp;
-    if let Some(tool) = remote_hash_tool(transport, path).await {
-        let before = sftp
-            .symlink_metadata(path)
-            .await
-            .map_err(|e| sftp_err("stat remote edit file", e))?;
-        // Require a reported, bounded size for the fast path; the streamed
-        // verifier enforces the byte limit even when the server omits size.
-        if !is_regular_file(&before) || before.size.is_some_and(|size| size > MAX_SYNC_FILE_BYTES) {
-            return Err(TransferError::InvalidInput(
-                "remote edit file is not a regular file within the 100 MiB limit".into(),
-            ));
-        }
-        if before.size.is_some() {
+    if !is_regular_file(before) || before.size.is_some_and(|size| size > MAX_SYNC_FILE_BYTES) {
+        return Err(TransferError::InvalidInput(
+            "remote edit file is not a regular file within the 100 MiB limit".into(),
+        ));
+    }
+    // For small files (<= 256 KiB), reading directly over the already-open SFTP
+    // channel takes ~1 RTT and avoids spawning remote shell exec channels.
+    if before
+        .size
+        .is_some_and(|size| size > REMOTE_HASH_SHELL_THRESHOLD_BYTES)
+    {
+        if let Some(tool) = remote_hash_tool(transport, path).await {
             let command = format!(
                 "p={}; [ -f \"$p\" ] && [ ! -L \"$p\" ] && {} < \"$p\"",
                 shell_quote(path),
@@ -702,25 +703,21 @@ async fn verify_remote_fingerprint(
                     .symlink_metadata(path)
                     .await
                     .map_err(|e| sftp_err("stat remote edit file", e))?;
-                return Ok((hash, checked_remote_mode(&before, &after, None)?));
+                return Ok((hash, checked_remote_mode(before, &after, None)?));
             }
         }
     }
-    remote_fingerprint(sftp, path, &mut tokio::io::sink()).await
+    remote_fingerprint_with_before(sftp, path, before, &mut tokio::io::sink()).await
 }
 
 async fn download_baseline(
     transport: &SftpTransport,
     path: &str,
+    before: &FileAttributes,
     local: &mut tokio::fs::File,
 ) -> Result<Fingerprint, TransferError> {
-    let baseline = remote_fingerprint(&transport.sftp, path, local).await?;
-    if verify_remote_fingerprint(transport, path).await? != baseline {
-        return Err(TransferError::InvalidInput(
-            "remote edit file changed during initial download".into(),
-        ));
-    }
-    Ok(baseline.0)
+    let (hash, _) = remote_fingerprint_with_before(&transport.sftp, path, before, local).await?;
+    Ok(hash)
 }
 
 #[derive(Debug)]
@@ -781,7 +778,7 @@ async fn require_remote_baseline(
     copy: &EditCopy,
     baseline: Fingerprint,
 ) -> Result<u32, SyncFailure> {
-    let canonical = canonical_regular_path(&transport.sftp, &copy.remote_path)
+    let (canonical, before) = canonical_regular_path(&transport.sftp, &copy.remote_path)
         .await
         .map_err(|e| remote_baseline_failure(e))?;
     if canonical != copy.canonical_path {
@@ -789,7 +786,7 @@ async fn require_remote_baseline(
             "remote path now resolves to a different file".into(),
         ));
     }
-    let (hash, mode) = verify_remote_fingerprint(transport, &canonical)
+    let (hash, mode) = verify_remote_fingerprint(transport, &canonical, &before)
         .await
         .map_err(remote_baseline_failure)?;
     compare_remote_baseline(hash, mode, baseline)

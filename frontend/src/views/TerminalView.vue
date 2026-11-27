@@ -239,9 +239,14 @@
                 v-if="sftpParentPath"
                 type="button"
                 class="terminal-sftp-entry is-dir is-parent"
+                :class="{ 'is-move-drop-target': isSftpFolderDropTarget(sftpParentPath) }"
                 :title="t('terminal.sftpUp')"
                 @click="clearSftpSelection"
                 @dblclick="openSftpParent"
+                @dragenter="handleSftpTargetDragOver(sftpParentPath, $event)"
+                @dragover="handleSftpTargetDragOver(sftpParentPath, $event)"
+                @dragleave="handleSftpTargetDragLeave(sftpParentPath, $event)"
+                @drop="handleSftpTargetDrop(sftpParentPath, '..', $event)"
               >
                 <span class="terminal-sftp-entry-icon"><el-icon><FolderOpened /></el-icon></span>
                 <span class="terminal-sftp-entry-name">..</span>
@@ -253,13 +258,24 @@
                 :key="entry.path || entry.name"
                 type="button"
                 class="terminal-sftp-entry"
-                :class="{ 'is-dir': entry.is_dir, 'is-selected': isSftpEntrySelected(entry) }"
-                draggable="true"
+                :class="{
+                  'is-dir': entry.is_dir,
+                  'is-selected': isSftpEntrySelected(entry),
+                  'is-dragging-out': isSftpEntryDraggingOut(entry),
+                  'is-move-drop-target': entry.is_dir && isSftpFolderDropTarget(sftpEntryPath(activeTab!, entry))
+                }"
+                :draggable="!nativeSidebarDragSupported"
                 :title="entry.is_dir ? t('terminal.sftpEntryDirTitle', { name: entry.path }) : t('terminal.sftpEntryFileTitle', { name: entry.path })"
+                @mousedown.left="beginSftpEntryPress(entry, $event)"
                 @click="handleSftpEntryClick(entry, index, $event)"
                 @dblclick="openSftpEntry(entry)"
                 @contextmenu.prevent.stop="openSftpContextMenu(entry, $event)"
                 @dragstart="startSftpEntryDrag(entry, $event)"
+                @dragend="finishSftpSidebarDrag"
+                @dragenter="entry.is_dir && handleSftpTargetDragOver(sftpEntryPath(activeTab!, entry), $event)"
+                @dragover="entry.is_dir && handleSftpTargetDragOver(sftpEntryPath(activeTab!, entry), $event)"
+                @dragleave="entry.is_dir && handleSftpTargetDragLeave(sftpEntryPath(activeTab!, entry), $event)"
+                @drop="entry.is_dir && handleSftpTargetDrop(sftpEntryPath(activeTab!, entry), entry.name, $event)"
               >
                 <span class="terminal-sftp-entry-icon">
                   <el-icon><FolderOpened v-if="entry.is_dir" /><Document v-else /></el-icon>
@@ -268,6 +284,10 @@
                 <span class="terminal-sftp-entry-size">{{ entry.is_dir ? '' : formatBytes(entry.size) }}</span>
                 <span class="terminal-sftp-entry-time" :title="entry.mod_time || ''">{{ formatSftpTime(entry.mod_time) }}</span>
               </button>
+            </div>
+            <div v-if="sftpSidebarActivityText" class="terminal-sftp-activity" role="status" :title="sftpSidebarActivityText">
+              <span class="sftp-activity-spinner" aria-hidden="true" />
+              <span class="terminal-sftp-activity-text">{{ sftpSidebarActivityText }}</span>
             </div>
             <div class="terminal-sftp-footer" :title="sftpStatsText">{{ sftpStatsText }}</div>
             <input ref="sftpFileInput" type="file" multiple hidden class="hidden-file-input" @change="handleSftpUploadInput('files', $event)" />
@@ -514,9 +534,7 @@
         <button v-if="sftpHasDownloadableSelection" type="button" role="menuitem" @click="runSftpMenuAction('download')">
           {{ t('sftp.download') }}
         </button>
-        <button type="button" role="menuitem" @click="runSftpMenuAction('uploadFiles')">{{ t('sftp.uploadFile') }}</button>
-        <button type="button" role="menuitem" @click="runSftpMenuAction('uploadFolder')">{{ t('sftp.uploadFolder') }}</button>
-        <span class="sftp-context-separator" />
+        <span v-if="sftpSelectedEntries.length === 1 || sftpHasDownloadableSelection" class="sftp-context-separator" />
         <button type="button" role="menuitem" @click="runSftpMenuAction('newFile')">{{ t('sftp.newFile') }}</button>
         <button type="button" role="menuitem" @click="runSftpMenuAction('newFolder')">{{ t('sftp.newFolder') }}</button>
         <template v-if="sftpSelectedEntries.length === 1">
@@ -544,17 +562,17 @@
         <button v-if="sftpCanExtractSelection" type="button" role="menuitem" @click="runSftpMenuAction('extract')">
           {{ t('sftp.extract') }}
         </button>
-        <span class="sftp-context-separator" />
-        <button type="button" role="menuitem" @click="runSftpMenuAction('refresh')">{{ t('terminal.sftpRefresh') }}</button>
-        <button
-          v-if="sftpSelectedEntries.length > 0"
-          type="button"
-          role="menuitem"
-          class="is-danger"
-          @click="runSftpMenuAction('delete')"
-        >
-          {{ sftpSelectedEntries.length > 1 ? t('terminal.sftpDeleteCount', { count: sftpSelectedEntries.length }) : t('sftp.delete') }}
-        </button>
+        <template v-if="sftpSelectedEntries.length > 0">
+          <span class="sftp-context-separator" />
+          <button
+            type="button"
+            role="menuitem"
+            class="is-danger"
+            @click="runSftpMenuAction('delete')"
+          >
+            {{ sftpSelectedEntries.length > 1 ? t('terminal.sftpDeleteCount', { count: sftpSelectedEntries.length }) : t('sftp.delete') }}
+          </button>
+        </template>
       </div>
     </Teleport>
   </section>
@@ -607,6 +625,7 @@ import { t } from '../i18n'
 import { onProfilesChanged } from '../profileEvents'
 import { isTerminalDirectory, terminalUploadDirectory } from '../terminalDirectory'
 import NativeDownloadList from '../NativeDownloadList.vue'
+import { dragOutFiles, nativeDragHost, subscribeNativeDragJobs, type NativeDragJob } from '../nativeDrag'
 import { downloadActive, nativeDownloads } from '../nativeDownloads'
 import { notifyDownloadBatch } from '../downloadNotifications'
 import {
@@ -1257,6 +1276,24 @@ function closeSftpContextMenu() {
   sftpMenu.visible = false
 }
 
+function handleSftpMenuDismiss(event: Event) {
+  if (!sftpMenu.visible) return
+  const target = event.target
+  if (target instanceof HTMLElement && target.closest('.terminal-sftp-context-menu')) return
+  closeSftpContextMenu()
+}
+
+function handleSftpMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeSftpContextMenu()
+}
+
+function handleSftpMenuScroll(event: Event) {
+  if (!sftpMenu.visible) return
+  const target = event.target
+  if (target instanceof HTMLElement && target.closest('.terminal-sftp-context-menu')) return
+  closeSftpContextMenu()
+}
+
 function triggerSftpUpload(kind: 'files' | 'folder') {
   closeSftpContextMenu()
   if (kind === 'folder') sftpFolderInput.value?.click()
@@ -1428,6 +1465,298 @@ async function deleteSftpSelection() {
   }
 }
 
+interface SidebarMovePayload {
+  tabID: string
+  session: string
+  paths: string[]
+}
+
+const SIDEBAR_MOVE_MARKER = 'chemssh-terminal-sftp-move'
+const SIDEBAR_MOVE_MIME = 'application/x-chemssh-terminal-sftp-move'
+
+const sftpArchiveTasks = ref<{ id: number; tabID: string; label: string }[]>([])
+let nextSftpArchiveTaskID = 0
+const sftpNativeDragJobs = ref<NativeDragJob[]>([])
+let unsubscribeSftpNativeDragJobs: (() => void) | undefined
+const nativeSidebarDragSupported = ref(nativeDragHost() !== null)
+const sidebarNativeDragActive = ref(false)
+const sidebarNativeDragPaths = ref<Set<string>>(new Set())
+const sidebarDragPayload = ref<SidebarMovePayload | null>(null)
+const sftpFolderDropTarget = ref('')
+let sidebarNativeDragSettled = false
+let sidebarPressTimer: number | null = null
+let sidebarPressCleanup: (() => void) | null = null
+
+const SIDEBAR_DRAG_THRESHOLD = 4
+const SIDEBAR_LONG_PRESS_MS = 430
+
+function normalizeRemoteComparablePath(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '')
+  return normalized || '/'
+}
+
+function isRemotePathInside(path: string, parent: string): boolean {
+  const p = normalizeRemoteComparablePath(path)
+  const dir = normalizeRemoteComparablePath(parent)
+  return p === dir || p.startsWith(dir === '/' ? '/' : `${dir}/`)
+}
+
+function isSftpFolderDropTarget(targetPath: string): boolean {
+  if (!sftpFolderDropTarget.value || !targetPath) return false
+  return normalizeRemoteComparablePath(sftpFolderDropTarget.value) === normalizeRemoteComparablePath(targetPath)
+}
+
+function isValidSidebarMoveTarget(tab: TerminalTab, payload: SidebarMovePayload | null, targetDir: string): boolean {
+  if (!payload || payload.tabID !== tab.id || payload.paths.length === 0 || !targetDir) return false
+  const targetNorm = normalizeRemoteComparablePath(targetDir)
+  const byPath = new Map(tab.sftp.entries.map(item => [normalizeRemoteComparablePath(sftpEntryPath(tab, item)), item]))
+  return payload.paths.every(src => {
+    const srcNorm = normalizeRemoteComparablePath(src)
+    if (srcNorm === targetNorm) return false
+    const entry = byPath.get(srcNorm)
+    if (entry?.is_dir && isRemotePathInside(targetNorm, srcNorm)) return false
+    return true
+  })
+}
+
+function parseSidebarMovePayload(event: DragEvent): SidebarMovePayload | null {
+  const raw = event.dataTransfer?.getData(SIDEBAR_MOVE_MIME) || event.dataTransfer?.getData('text/plain') || ''
+  if (raw && raw.includes(SIDEBAR_MOVE_MARKER)) {
+    try {
+      const parsed = JSON.parse(raw) as { chemssh?: string; tabID?: string; session?: string; paths?: string[] }
+      if (parsed.chemssh === SIDEBAR_MOVE_MARKER && parsed.tabID && Array.isArray(parsed.paths) && parsed.paths.length > 0) {
+        return { tabID: parsed.tabID, session: parsed.session || '', paths: parsed.paths }
+      }
+    } catch {
+      // fall through to in-memory payload
+    }
+  }
+  return sidebarDragPayload.value
+}
+
+function finishSftpSidebarDrag() {
+  if (!sidebarNativeDragActive.value) {
+    sidebarDragPayload.value = null
+  }
+  sftpFolderDropTarget.value = ''
+}
+
+function handleSftpTargetDragOver(targetDir: string, event: DragEvent) {
+  const tab = activeTab.value
+  const payload = sidebarDragPayload.value
+  if (!tab || !payload) return
+  if (!isValidSidebarMoveTarget(tab, payload, targetDir)) {
+    if (isSftpFolderDropTarget(targetDir)) sftpFolderDropTarget.value = ''
+    return
+  }
+  event.preventDefault()
+  event.stopPropagation()
+  tab.sftp.dropActive = false
+  sftpFolderDropTarget.value = targetDir
+  if (event.dataTransfer) {
+    const allowed = (event.dataTransfer.effectAllowed || '').toLowerCase()
+    event.dataTransfer.dropEffect =
+      sidebarNativeDragActive.value || (allowed && !allowed.includes('move') && allowed !== 'all' && allowed !== 'uninitialized')
+        ? 'copy'
+        : 'move'
+  }
+}
+
+function handleSftpTargetDragLeave(targetDir: string, event: DragEvent) {
+  if (!isSftpFolderDropTarget(targetDir)) return
+  const row = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  const related = event.relatedTarget instanceof Node ? event.relatedTarget : null
+  if (row && related && row.contains(related)) return
+  sftpFolderDropTarget.value = ''
+}
+
+async function handleSftpTargetDrop(targetDir: string, targetLabel: string, event: DragEvent) {
+  const tab = activeTab.value
+  const payload = parseSidebarMovePayload(event)
+  if (!tab || !payload) return
+  if (!isValidSidebarMoveTarget(tab, payload, targetDir)) return
+  event.preventDefault()
+  event.stopPropagation()
+  sftpFolderDropTarget.value = ''
+  tab.sftp.dropActive = false
+  if (sidebarNativeDragActive.value) {
+    sidebarNativeDragSettled = true
+  } else {
+    sidebarDragPayload.value = null
+  }
+  await moveSftpSidebarEntries(tab, payload.paths, targetDir, targetLabel)
+}
+
+async function moveSftpSidebarEntries(tab: TerminalTab, sourcePaths: string[], targetDir: string, targetLabel: string) {
+  const targetNorm = normalizeRemoteComparablePath(targetDir)
+  const byPath = new Map(tab.sftp.entries.map(item => [normalizeRemoteComparablePath(sftpEntryPath(tab, item)), item]))
+  const entries = sourcePaths
+    .map(path => byPath.get(normalizeRemoteComparablePath(path)))
+    .filter((entry): entry is FileEntry => Boolean(entry))
+    .filter(entry => {
+      const srcNorm = normalizeRemoteComparablePath(sftpEntryPath(tab, entry))
+      if (srcNorm === targetNorm) return false
+      return !(entry.is_dir && isRemotePathInside(targetNorm, srcNorm))
+    })
+  if (entries.length === 0) return
+
+  try {
+    const sessionID = await connectSftp(tab)
+    const listing = await api<{ entries?: FileEntry[] }>(
+      `/api/sftp/list?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(targetDir)}`
+    )
+    const existingNames = new Set((listing.entries || []).map(item => item.name))
+    const conflicts: string[] = []
+    const movable: FileEntry[] = []
+    for (const entry of entries) {
+      if (existingNames.has(entry.name)) {
+        conflicts.push(entry.name)
+      } else {
+        movable.push(entry)
+      }
+    }
+    if (conflicts.length > 0) {
+      const names = conflicts.slice(0, 5).join(', ') + (conflicts.length > 5 ? ' …' : '')
+      ElMessage.warning(t('terminal.sftpMoveConflict', { target: targetLabel, names }))
+    }
+    let moved = 0
+    for (const entry of movable) {
+      const oldPath = sftpEntryPath(tab, entry)
+      const newPath = joinPath(targetDir, entry.name, 'remote')
+      await postJSON('/api/sftp/rename', { session: sessionID, path: oldPath, new_path: newPath })
+      moved += 1
+    }
+    if (moved > 0) {
+      clearSftpSelection()
+      ElMessage.success(t('terminal.sftpMoved', { count: moved, target: targetLabel }))
+      await loadSftpPanel(tab, tab.sftp.loadedPath || tab.sftp.path || '.')
+    }
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+function beginSftpArchiveTask(tabID: string, label: string) {
+  const id = ++nextSftpArchiveTaskID
+  sftpArchiveTasks.value = [...sftpArchiveTasks.value, { id, tabID, label }]
+  return () => {
+    sftpArchiveTasks.value = sftpArchiveTasks.value.filter(item => item.id !== id)
+  }
+}
+
+const sftpSidebarActivityText = computed(() => {
+  const tab = activeTab.value
+  if (!tab) return ''
+  const archiveTasks = sftpArchiveTasks.value.filter(item => item.tabID === tab.id)
+  if (archiveTasks.length > 0) {
+    const head = archiveTasks[0].label
+    return archiveTasks.length > 1 ? `${head} (+${archiveTasks.length - 1})` : head
+  }
+  const sessionID = runtimeFor(tab)?.sftpSessionID || ''
+  if (!sessionID) return ''
+  const dragJob = sftpNativeDragJobs.value.find(
+    job => job.session === sessionID && (job.state === 'accepted' || job.state === 'caching' || job.state === 'delivering')
+  )
+  if (!dragJob) return ''
+  if (dragJob.state === 'delivering') return t('terminal.sftpDragDelivering')
+  const total = dragJob.total || 0
+  const loaded = dragJob.loaded || 0
+  const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+  return t('terminal.sftpDragCaching', { percent })
+})
+
+function isSftpEntryDraggingOut(entry: FileEntry): boolean {
+  const tab = activeTab.value
+  if (!tab || !sidebarNativeDragActive.value) return false
+  return sidebarNativeDragPaths.value.has(sftpEntryPath(tab, entry))
+}
+
+function clearSidebarPressTracking() {
+  if (sidebarPressTimer !== null) {
+    window.clearTimeout(sidebarPressTimer)
+    sidebarPressTimer = null
+  }
+  sidebarPressCleanup?.()
+  sidebarPressCleanup = null
+}
+
+function beginSftpEntryPress(entry: FileEntry, event: MouseEvent) {
+  clearSidebarPressTracking()
+  if (!nativeSidebarDragSupported.value || sidebarNativeDragActive.value) return
+  if (event.ctrlKey || event.metaKey || event.shiftKey) return
+  const tab = activeTab.value
+  if (!tab?.sftp.open) return
+  const sessionID = runtimeFor(tab)?.sftpSessionID || ''
+  if (!sessionID) return
+
+  const startX = event.clientX
+  const startY = event.clientY
+  const launch = () => {
+    clearSidebarPressTracking()
+    startNativeSidebarDrag(tab, sessionID, entry)
+  }
+  const onMove = (move: MouseEvent) => {
+    if ((move.buttons & 1) === 0) {
+      clearSidebarPressTracking()
+      return
+    }
+    const dx = move.clientX - startX
+    const dy = move.clientY - startY
+    if (dx * dx + dy * dy >= SIDEBAR_DRAG_THRESHOLD * SIDEBAR_DRAG_THRESHOLD) {
+      launch()
+    }
+  }
+  const onCancel = () => clearSidebarPressTracking()
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onCancel)
+  window.addEventListener('blur', onCancel)
+  sidebarPressCleanup = () => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onCancel)
+    window.removeEventListener('blur', onCancel)
+  }
+  sidebarPressTimer = window.setTimeout(launch, SIDEBAR_LONG_PRESS_MS)
+}
+
+function startNativeSidebarDrag(tab: TerminalTab, sessionID: string, entry: FileEntry) {
+  if (sidebarNativeDragActive.value || !nativeDragHost()) return
+  const entryPath = sftpEntryPath(tab, entry)
+  const paths =
+    tab.sftp.selectedPaths.includes(entryPath) && sftpSelectedEntries.value.length > 0
+      ? sftpSelectedEntries.value.map(item => sftpEntryPath(tab, item))
+      : [entryPath]
+  if (paths.length === 0) return
+  if (!tab.sftp.selectedPaths.includes(entryPath)) {
+    tab.sftp.selectedPaths = [entryPath]
+    tab.sftp.anchorPath = entryPath
+  }
+  sidebarNativeDragActive.value = true
+  sidebarNativeDragSettled = false
+  sidebarNativeDragPaths.value = new Set(paths)
+  sidebarDragPayload.value = { tabID: tab.id, session: sessionID, paths }
+  const marker = JSON.stringify({ chemssh: SIDEBAR_MOVE_MARKER, tabID: tab.id, session: sessionID, paths })
+  void dragOutFiles({ session: sessionID, paths, marker }, window)
+    .then(result => {
+      const settled = sidebarNativeDragSettled
+      sidebarNativeDragActive.value = false
+      sidebarNativeDragSettled = false
+      sidebarNativeDragPaths.value = new Set()
+      sidebarDragPayload.value = null
+      sftpFolderDropTarget.value = ''
+      if (!result.ok && !settled) {
+        ElMessage.warning(t('sftp.dragOutRejected'))
+      }
+    })
+    .catch((error: unknown) => {
+      sidebarNativeDragActive.value = false
+      sidebarNativeDragSettled = false
+      sidebarNativeDragPaths.value = new Set()
+      sidebarDragPayload.value = null
+      sftpFolderDropTarget.value = ''
+      ElMessage.error(error instanceof Error ? error.message : t('sftp.dragOutFailed'))
+    })
+}
+
 async function runSftpCompress(format: string) {
   closeSftpContextMenu()
   const tab = activeTab.value
@@ -1435,6 +1764,7 @@ async function runSftpCompress(format: string) {
   if (!tab?.sftp.open || selected.length === 0) return
   const cwd = tab.sftp.loadedPath || tab.sftp.path || '.'
   const fallbackName = `${selected.length === 1 ? selected[0].name : 'archive'}.${format}`
+  const endActivity = beginSftpArchiveTask(tab.id, t('sftp.compressing', { format }))
   try {
     const sessionID = await connectSftp(tab)
     const response = await postJSON<{ archive?: string }>('/api/sftp/compress', {
@@ -1449,6 +1779,8 @@ async function runSftpCompress(format: string) {
     await loadSftpPanel(tab, cwd)
   } catch (error) {
     ElMessage.error(errorMessage(error))
+  } finally {
+    endActivity()
   }
 }
 
@@ -1458,6 +1790,7 @@ async function extractSftpSelection() {
   const entry = sftpSelectedEntries.value[0]
   if (!tab?.sftp.open || !entry || entry.is_dir) return
   const cwd = tab.sftp.loadedPath || tab.sftp.path || '.'
+  const endActivity = beginSftpArchiveTask(tab.id, t('sftp.extracting', { name: entry.name }))
   try {
     const sessionID = await connectSftp(tab)
     await postJSON('/api/sftp/extract', {
@@ -1470,11 +1803,13 @@ async function extractSftpSelection() {
     await loadSftpPanel(tab, cwd)
   } catch (error) {
     ElMessage.error(errorMessage(error))
+  } finally {
+    endActivity()
   }
 }
 
 function runSftpMenuAction(
-  action: 'open' | 'download' | 'uploadFiles' | 'uploadFolder' | 'newFile' | 'newFolder' | 'rename' | 'copyPath' | 'extract' | 'refresh' | 'delete'
+  action: 'open' | 'download' | 'newFile' | 'newFolder' | 'rename' | 'copyPath' | 'extract' | 'delete'
 ) {
   closeSftpContextMenu()
   switch (action) {
@@ -1483,12 +1818,6 @@ function runSftpMenuAction(
       break
     case 'download':
       void downloadSftpSelection()
-      break
-    case 'uploadFiles':
-      triggerSftpUpload('files')
-      break
-    case 'uploadFolder':
-      triggerSftpUpload('folder')
       break
     case 'newFile':
       void createSftpFile()
@@ -1504,9 +1833,6 @@ function runSftpMenuAction(
       break
     case 'extract':
       void extractSftpSelection()
-      break
-    case 'refresh':
-      refreshSftpPanel()
       break
     case 'delete':
       void deleteSftpSelection()
@@ -1673,11 +1999,24 @@ async function openSftpFile(tab: TerminalTab, entry: FileEntry, path: string) {
 function startSftpEntryDrag(entry: FileEntry, event: DragEvent) {
   const tab = activeTab.value
   if (!tab || !event.dataTransfer) return
-  const path = entry.path || joinPath(tab.sftp.loadedPath || '.', entry.name, 'remote')
-  event.dataTransfer.effectAllowed = 'copy'
-  event.dataTransfer.setData('text/plain', path)
+  if (sidebarNativeDragActive.value) {
+    event.preventDefault()
+    return
+  }
+  const path = sftpEntryPath(tab, entry)
+  const paths =
+    tab.sftp.selectedPaths.includes(path) && sftpSelectedEntries.value.length > 0
+      ? sftpSelectedEntries.value.map(item => sftpEntryPath(tab, item))
+      : [path]
   const sessionID = runtimeFor(tab)?.sftpSessionID || ''
-  if (isTauriRuntime() || !sessionID || entry.is_dir) return
+  sidebarDragPayload.value = { tabID: tab.id, session: sessionID, paths }
+  event.dataTransfer.effectAllowed = 'copyMove'
+  event.dataTransfer.setData(
+    SIDEBAR_MOVE_MIME,
+    JSON.stringify({ chemssh: SIDEBAR_MOVE_MARKER, tabID: tab.id, session: sessionID, paths })
+  )
+  event.dataTransfer.setData('text/plain', paths.join('\n'))
+  if (isTauriRuntime() || !sessionID || paths.length !== 1 || entry.is_dir) return
   const url = `${window.location.origin}/api/sftp/download?session=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(path)}`
   event.dataTransfer.setData(
     'DownloadURL',
@@ -1691,14 +2030,14 @@ function sanitizeSftpDownloadName(name: string) {
 }
 
 function handleSftpDragEnter(event: DragEvent) {
-  if (!hasFileDrag(event)) return
+  if (sidebarNativeDragActive.value || sidebarDragPayload.value || !hasFileDrag(event)) return
   event.preventDefault()
   const tab = activeTab.value
   if (tab?.sftp.open) tab.sftp.dropActive = true
 }
 
 function handleSftpDragOver(event: DragEvent) {
-  if (!hasFileDrag(event)) return
+  if (sidebarNativeDragActive.value || sidebarDragPayload.value || !hasFileDrag(event)) return
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
   const tab = activeTab.value
@@ -1716,7 +2055,7 @@ function handleSftpDragLeave(event: DragEvent) {
 
 // Files dropped on the browser upload into the directory it is showing.
 async function handleSftpDrop(event: DragEvent) {
-  if (!hasFileDrag(event)) return
+  if (sidebarNativeDragActive.value || sidebarDragPayload.value || !hasFileDrag(event)) return
   event.preventDefault()
   const tab = activeTab.value
   if (!tab?.sftp.open) return
@@ -3238,13 +3577,13 @@ async function interceptNativeZmodem(tab: TerminalTab, signature: string) {
 }
 
 function handleFileDragEnter(event: DragEvent) {
-  if (!hasFileDrag(event)) return
+  if (sidebarNativeDragActive.value || sidebarDragPayload.value || !hasFileDrag(event)) return
   event.preventDefault()
   dropActive.value = true
 }
 
 function handleFileDragOver(event: DragEvent) {
-  if (!hasFileDrag(event)) return
+  if (sidebarNativeDragActive.value || sidebarDragPayload.value || !hasFileDrag(event)) return
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
   dropActive.value = true
@@ -3259,7 +3598,7 @@ function handleFileDragLeave(event: DragEvent) {
 }
 
 async function handleFileDrop(event: DragEvent) {
-  if (!hasFileDrag(event)) return
+  if (sidebarNativeDragActive.value || sidebarDragPayload.value || !hasFileDrag(event)) return
   event.preventDefault()
   dropActive.value = false
   const tab = activeTab.value
@@ -3593,10 +3932,18 @@ onMounted(async () => {
   document.addEventListener('click', handleProfileMenuDismiss)
   window.addEventListener('keydown', handleProfileMenuKeydown)
   window.addEventListener('scroll', handleProfileMenuDismiss, true)
+  document.addEventListener('pointerdown', handleSftpMenuDismiss, true)
+  window.addEventListener('keydown', handleSftpMenuKeydown)
+  window.addEventListener('scroll', handleSftpMenuScroll, true)
+  window.addEventListener('blur', closeSftpContextMenu)
   window.addEventListener('keydown', handleTerminalShortcut, true)
   window.addEventListener('message', handleHostMessage)
   unsubscribeProfileEvents = onProfilesChanged(() => {
     void syncProfilesFromLauncher()
+  })
+  nativeSidebarDragSupported.value = nativeDragHost() !== null
+  unsubscribeSftpNativeDragJobs = subscribeNativeDragJobs(jobs => {
+    sftpNativeDragJobs.value = jobs
   })
   openSyncPollTimer = window.setInterval(() => {
     void pollOpenSyncEvents()
@@ -3641,10 +3988,17 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', handleProfileMenuDismiss)
   window.removeEventListener('keydown', handleProfileMenuKeydown)
   window.removeEventListener('scroll', handleProfileMenuDismiss, true)
+  document.removeEventListener('pointerdown', handleSftpMenuDismiss, true)
+  window.removeEventListener('keydown', handleSftpMenuKeydown)
+  window.removeEventListener('scroll', handleSftpMenuScroll, true)
+  window.removeEventListener('blur', closeSftpContextMenu)
   window.removeEventListener('keydown', handleTerminalShortcut, true)
   window.removeEventListener('message', handleHostMessage)
   unsubscribeProfileEvents?.()
   unsubscribeProfileEvents = null
+  clearSidebarPressTracking()
+  unsubscribeSftpNativeDragJobs?.()
+  unsubscribeSftpNativeDragJobs = undefined
   for (const tab of [...tabs.value]) {
     void shutdownTab(tab)
   }

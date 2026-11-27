@@ -40,6 +40,9 @@ export interface NativeDragJob {
   error?: string
   revision: number
   createdAt: number
+  transferStartedAt?: number
+  transferEndedAt?: number
+  pausedMs?: number
   loaded?: number
   total?: number
   paused?: boolean
@@ -207,13 +210,18 @@ export function retainTransferHistory<T extends { id: string; status: string; pa
 
 export function nativeDragTransfer(job: NativeDragJob) {
   const terminal = ['done', 'error', 'cancelled'].includes(job.state)
+  const startedAt = job.transferStartedAt || job.createdAt
+  const endedAt = terminal ? (job.endedAt || startedAt) : null
+  const speedEndedAt = job.transferEndedAt ?? endedAt
   return {
     nativeDragID: job.id,
     nativeDragState: job.state,
     loaded: Math.max(0, job.loaded || 0),
     total: Math.max(0, job.total || 0, job.loaded || 0),
-    startedAt: job.createdAt,
-    endedAt: terminal ? (job.endedAt || job.createdAt) : null,
+    startedAt,
+    endedAt,
+    speedEndedAt,
+    pausedMs: Math.max(0, job.pausedMs || 0),
     status: (job.state === 'done' ? 'done' : terminal ? 'error' : 'running') as 'running' | 'done' | 'error',
     paused: !terminal && Boolean(job.paused),
     cancelled: job.state === 'cancelled',

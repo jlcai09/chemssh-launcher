@@ -1,8 +1,9 @@
 use std::borrow::Borrow;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use core_ssh::{shell_quote, SshConnection};
+use core_ssh::{shell_quote, CachedRawSftp, SshConnection};
 use russh_sftp::client::{error::Error as SftpError, fs::File, RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -252,7 +253,10 @@ pub struct RemoteStagedFile<S> {
     directory: String,
     staging: String,
     marker: Option<NamespaceMarker>,
-    posix_session: Option<RawSftpSession>,
+    posix_session: Option<Arc<RawSftpSession>>,
+    cached_raw: Option<CachedRawSftp>,
+    namespace_verified: bool,
+    verified_staging: Option<FileAttributes>,
     file: Option<File>,
     sealed: bool,
     published: bool,
@@ -336,7 +340,7 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
             &format!(".chemssh-transfer-{}", uuid::Uuid::new_v4()),
         );
         let staging = canonical_child(&directory, "payload.part");
-        let (marker, posix_session) =
+        let (marker, posix_session, cached_raw, namespace_verified) =
             create_private_directory(session, connection, &directory, &parent, target.is_some())
                 .await?;
         // For new files the server applies its creation policy (including umask
@@ -367,6 +371,9 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
             staging,
             marker,
             posix_session,
+            cached_raw,
+            namespace_verified,
+            verified_staging: None,
             file: Some(file),
             sealed: false,
             published: false,
@@ -400,12 +407,13 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
         let staged = self
             .sftp
             .borrow()
-            .metadata(&self.staging)
+            .symlink_metadata(&self.staging)
             .await
             .map_err(|err| sftp_err("stat remote staging file", err))?;
         if let Some(actual) = staged.size {
             verify_length(Some(expected), actual)?;
         }
+        self.verified_staging = Some(staged);
         Ok(())
     }
 
@@ -447,10 +455,13 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
         }
         self.seal().await?;
         let sftp = self.sftp.borrow();
-        let staged = sftp
-            .symlink_metadata(&self.staging)
-            .await
-            .map_err(|err| sftp_err("stat remote staging file before publication", err))?;
+        let staged = match self.verified_staging.take() {
+            Some(attrs) => attrs,
+            None => sftp
+                .symlink_metadata(&self.staging)
+                .await
+                .map_err(|err| sftp_err("stat remote staging file before publication", err))?,
+        };
         if !staged.permissions.is_some_and(|mode| {
             mode & TYPE_MASK == REGULAR_TYPE && mode & 0o7777 & !self.create_mode == 0
         }) {
@@ -459,19 +470,21 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
             ));
         }
         if let Some(target) = &self.target {
-            sftp.set_metadata(&self.staging, attrs_with_mode(target.mode))
-                .await
-                .map_err(|err| sftp_err("preserve remote target permissions", err))?;
-            let staged = sftp
-                .symlink_metadata(&self.staging)
-                .await
-                .map_err(|err| sftp_err("verify remote staging permissions", err))?;
-            if staged.permissions.map(|mode| mode & (TYPE_MASK | 0o7777))
-                != Some(REGULAR_TYPE | target.mode)
-            {
-                return Err(TransferError::InvalidInput(
-                    "remote server did not preserve target permissions".into(),
-                ));
+            if staged.permissions.map(|mode| mode & 0o7777) != Some(target.mode) {
+                sftp.set_metadata(&self.staging, attrs_with_mode(target.mode))
+                    .await
+                    .map_err(|err| sftp_err("preserve remote target permissions", err))?;
+                let staged = sftp
+                    .symlink_metadata(&self.staging)
+                    .await
+                    .map_err(|err| sftp_err("verify remote staging permissions", err))?;
+                if staged.permissions.map(|mode| mode & (TYPE_MASK | 0o7777))
+                    != Some(REGULAR_TYPE | target.mode)
+                {
+                    return Err(TransferError::InvalidInput(
+                        "remote server did not preserve target permissions".into(),
+                    ));
+                }
             }
         }
         self.recheck_target().await?;
@@ -479,14 +492,17 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
         // Standard v3 RENAME is for new destinations. Overwrite only with
         // negotiated exact-path replacement or the verified shell fallback.
         let mut renamed = false;
-        if let (Some(raw), Some(marker)) = (self.posix_session.take(), &self.marker) {
-            // The channel already proved its namespace at setup. If it can no
-            // longer read the marker, fall back before any rename is sent.
-            if tokio::time::timeout(SSH_PROBE_TIMEOUT, raw_sees_marker(&raw, marker))
-                .await
-                .unwrap_or(false)
-            {
-                self.recheck_target().await?;
+        if let Some(raw) = self.posix_session.take() {
+            let can_rename = if self.namespace_verified {
+                true
+            } else if let Some(marker) = &self.marker {
+                tokio::time::timeout(SSH_PROBE_TIMEOUT, raw_sees_marker(&raw, marker))
+                    .await
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if can_rename {
                 self.publication_uncertain = true;
                 match posix_rename(&raw, &self.staging, &self.destination).await {
                     PosixRenameResult::Replaced => renamed = true,
@@ -496,14 +512,16 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
                         return Err(TransferError::Sftp(message));
                     }
                     PosixRenameResult::Unknown(message) => {
-                        return Err(publication_unknown(message))
+                        if let (Some(conn), Some(cached)) = (connection, self.cached_raw.as_ref()) {
+                            conn.invalidate_raw_sftp(cached).await;
+                        }
+                        return Err(publication_unknown(message));
                     }
                 }
                 self.publication_uncertain = false;
             }
         }
         if self.target.is_none() {
-            self.recheck_target().await?;
             self.publication_uncertain = true;
             match sftp.rename(&self.staging, &self.destination).await {
                 Ok(()) => renamed = true,
@@ -516,8 +534,19 @@ impl<S: Borrow<SftpSession>> RemoteStagedFile<S> {
             self.publication_uncertain = false;
         }
         if !renamed {
-            let (Some(connection), Some(marker)) = (connection, &self.marker) else {
+            let Some(connection) = connection else {
                 return Err(no_safe_replacement());
+            };
+            let marker = match &self.marker {
+                Some(existing) => existing,
+                None => {
+                    let fresh = NamespaceMarker {
+                        path: canonical_child(&self.directory, "namespace"),
+                        nonce: uuid::Uuid::new_v4().simple().to_string(),
+                    };
+                    write_marker(sftp, &fresh).await?;
+                    self.marker.insert(fresh)
+                }
             };
             if !crate::sftp_shell_sees_marker(connection, &marker.path, &marker.nonce).await
                 || !shell_has_exact_mv(connection, &self.directory).await
@@ -568,28 +597,55 @@ async fn create_private_directory(
     directory: &str,
     parent: &str,
     replacing: bool,
-) -> Result<(Option<NamespaceMarker>, Option<RawSftpSession>), TransferError> {
-    // The pinned high-level API has no MKDIR-with-attributes. Prefer the raw
-    // channel on the same authenticated SSH connection, but verify a freshly
-    // generated nonce through the high-level session before sending file data.
-    let raw = if let Some(connection) = connection {
-        tokio::time::timeout(SSH_PROBE_TIMEOUT, async {
-            let raw = connection.open_raw_sftp().await.ok()?;
-            let version = raw.init().await.ok()?;
-            let has_posix_rename = version
-                .extensions
-                .get(POSIX_RENAME)
-                .is_some_and(|v| v == "1");
-            Some((raw, has_posix_rename))
-        })
-        .await
-        .ok()
-        .flatten()
+) -> Result<
+    (
+        Option<NamespaceMarker>,
+        Option<Arc<RawSftpSession>>,
+        Option<CachedRawSftp>,
+        bool,
+    ),
+    TransferError,
+> {
+    // The pinned high-level API has no MKDIR-with-attributes. Reuse one cached
+    // raw SFTP channel per SSH connection so repeated uploads do not spawn a
+    // fresh remote `sftp-server` subprocess per file.
+    let cached = if let Some(connection) = connection {
+        connection.shared_raw_sftp(SSH_PROBE_TIMEOUT).await
     } else {
         None
     };
-    if let Some((raw, has_posix_rename)) = raw {
-        if raw.realpath(parent).await.is_ok_and(|name| {
+
+    if let Some(cached) = cached {
+        let raw = &cached.session;
+        // Fast path: parent namespace was already verified on this cached raw
+        // SFTP channel. `raw.mkdir(directory, 0o700)` followed by
+        // `enforce_private_directory(sftp, directory)` proves both channels see
+        // the newly created random UUID directory in 2 RTTs total.
+        if cached.is_parent_verified(parent) {
+            match raw.mkdir(directory, attrs_with_mode(STAGING_DIR_MODE)).await {
+                Ok(_) => {
+                    let check = enforce_private_directory(sftp, directory).await;
+                    if check.is_ok() {
+                        return Ok((
+                            None,
+                            (replacing && cached.has_posix_rename).then(|| Arc::clone(raw)),
+                            Some(cached),
+                            true,
+                        ));
+                    }
+                    let _ = tokio::time::timeout(Duration::from_secs(2), raw.rmdir(directory)).await;
+                    check?;
+                }
+                Err(err) if crate::is_sftp_transport_error(&err) => {
+                    if let Some(conn) = connection {
+                        conn.invalidate_raw_sftp(&cached).await;
+                    }
+                }
+                Err(err) => {
+                    return Err(sftp_err("create private remote staging directory", err));
+                }
+            }
+        } else if raw.realpath(parent).await.is_ok_and(|name| {
             name.files
                 .first()
                 .is_some_and(|file| file.filename == parent)
@@ -604,19 +660,6 @@ async fn create_private_directory(
                     .await
                     .map_err(|err| sftp_err("create private remote staging directory", err))?;
                 let outcome = async {
-                    let mode = raw
-                        .lstat(directory)
-                        .await
-                        .map_err(|err| sftp_err("stat raw remote staging directory", err))?
-                        .attrs
-                        .permissions;
-                    if !mode
-                        .is_some_and(|mode| mode & TYPE_MASK == DIRECTORY_TYPE && mode & 0o077 == 0)
-                    {
-                        return Err(TransferError::InvalidInput(
-                            "raw remote staging directory is not private".into(),
-                        ));
-                    }
                     let handle = raw
                         .open(
                             &marker.path,
@@ -654,14 +697,20 @@ async fn create_private_directory(
             }
             .await;
             setup?;
-            if replacing {
-                return Ok((Some(marker), has_posix_rename.then_some(raw)));
+            cached.mark_parent_verified(parent);
+            if replacing && !cached.has_posix_rename {
+                return Ok((Some(marker), None, Some(cached), true));
             }
             if let Err(err) = sftp.remove_file(&marker.path).await {
                 cleanup_stage(sftp, directory, None, Some(&marker)).await;
                 return Err(sftp_err("remove remote namespace marker", err));
             }
-            return Ok((None, None));
+            return Ok((
+                None,
+                (replacing && cached.has_posix_rename).then(|| Arc::clone(raw)),
+                Some(cached),
+                true,
+            ));
         }
     }
 
@@ -689,7 +738,7 @@ async fn create_private_directory(
     } else {
         None
     };
-    Ok((marker, None))
+    Ok((marker, None, None, false))
 }
 
 async fn enforce_private_directory(
@@ -1085,7 +1134,6 @@ pub async fn download_file_attempt(
     }
     verify_length(before.size, count)?;
     local_file.flush().await?;
-    local_file.sync_all().await?;
     verify_length(Some(count), local_file.metadata().await?.len())?;
     drop(local_file);
     download_remote_wait(store, transfer_id, verify_remote_source(&source, &before)).await?;

@@ -24,6 +24,10 @@ pub struct FileProgress {
     pub error: String,
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DragJob {
@@ -35,6 +39,12 @@ pub struct DragJob {
     pub error: String,
     pub revision: u64,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_ended_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub paused_ms: u64,
     pub loaded: u64,
     pub total: u64,
     pub paused: bool,
@@ -48,6 +58,23 @@ struct DragJobEntry {
     job: DragJob,
     notify: Arc<Notify>,
     file_index: HashMap<String, usize>,
+    pause_started_at: Option<i64>,
+}
+
+impl DragJobEntry {
+    fn accumulate_pause(&mut self, now: i64) {
+        if let Some(pause_start) = self.pause_started_at.take() {
+            if let Some(transfer_start) = self.job.transfer_started_at {
+                let effective_start = pause_start.max(transfer_start);
+                if now > effective_start {
+                    self.job.paused_ms = self
+                        .job
+                        .paused_ms
+                        .saturating_add((now - effective_start) as u64);
+                }
+            }
+        }
+    }
 }
 
 pub fn is_terminal_state(state: &str) -> bool {
@@ -105,6 +132,9 @@ impl DragJobRegistry {
             error: String::new(),
             revision: guard.revision,
             created_at: now_millis(),
+            transfer_started_at: None,
+            transfer_ended_at: None,
+            paused_ms: 0,
             loaded: 0,
             total: 0,
             paused: false,
@@ -117,6 +147,7 @@ impl DragJobRegistry {
                 job: job.clone(),
                 notify: Arc::new(Notify::new()),
                 file_index: HashMap::new(),
+                pause_started_at: None,
             },
         );
         trim_history_locked(&mut guard);
@@ -148,14 +179,28 @@ impl DragJobRegistry {
             return None;
         }
 
+        let now = now_millis();
         entry.job.state = next_state.to_string();
         entry.job.revision = next_rev;
         if let Some(msg) = err_msg {
             entry.job.error = msg.to_string();
         }
+        if next_state == "caching" && entry.job.transfer_started_at.is_none() {
+            entry.job.transfer_started_at = Some(now);
+        }
+        if next_state == "delivering" {
+            entry.accumulate_pause(now);
+            if entry.job.transfer_started_at.is_some() && entry.job.transfer_ended_at.is_none() {
+                entry.job.transfer_ended_at = Some(now);
+            }
+        }
         if is_terminal_state(next_state) {
+            entry.accumulate_pause(now);
             entry.job.paused = false;
-            entry.job.ended_at = Some(now_millis());
+            entry.job.ended_at = Some(now);
+            if entry.job.transfer_started_at.is_some() && entry.job.transfer_ended_at.is_none() {
+                entry.job.transfer_ended_at = Some(now);
+            }
         }
         entry.notify.notify_waiters();
         let snapshot = entry.job.clone();
@@ -167,6 +212,9 @@ impl DragJobRegistry {
         let mut guard = self.inner.lock().ok()?;
         let next_rev = guard.revision + 1;
         let entry = guard.jobs.get_mut(id)?;
+        if delta_loaded > 0 && entry.job.transfer_started_at.is_none() {
+            entry.job.transfer_started_at = Some(now_millis());
+        }
         entry.job.total = entry.job.total.saturating_add(delta_total);
         entry.job.loaded = entry.job.loaded.saturating_add(delta_loaded);
         if entry.job.total > 0 && entry.job.loaded > entry.job.total {
@@ -206,6 +254,9 @@ impl DragJobRegistry {
             .get_mut(id)
             .ok_or_else(|| WinNativeError::JobNotFound(id.to_string()))?;
         if !is_terminal_state(&entry.job.state) {
+            if !entry.job.paused {
+                entry.pause_started_at = Some(now_millis());
+            }
             entry.job.paused = true;
             entry.job.revision = next_rev;
             entry.notify.notify_waiters();
@@ -230,6 +281,7 @@ impl DragJobRegistry {
             return Err(WinNativeError::Cancelled);
         }
         if !is_terminal_state(&entry.job.state) {
+            entry.accumulate_pause(now_millis());
             entry.job.paused = false;
             entry.job.revision = next_rev;
             entry.notify.notify_waiters();
@@ -251,10 +303,15 @@ impl DragJobRegistry {
             .get_mut(id)
             .ok_or_else(|| WinNativeError::JobNotFound(id.to_string()))?;
         if !is_terminal_state(&entry.job.state) {
+            let now = now_millis();
+            entry.accumulate_pause(now);
             entry.job.state = "cancelled".into();
             entry.job.paused = false;
             entry.job.error = "drag cancelled".into();
-            entry.job.ended_at = Some(now_millis());
+            entry.job.ended_at = Some(now);
+            if entry.job.transfer_started_at.is_some() && entry.job.transfer_ended_at.is_none() {
+                entry.job.transfer_ended_at = Some(now);
+            }
             entry.job.revision = next_rev;
             entry.notify.notify_waiters();
             let snapshot = entry.job.clone();
@@ -357,10 +414,14 @@ impl DragJobRegistry {
         for entry in guard.jobs.values_mut() {
             if !is_terminal_state(&entry.job.state) {
                 next_rev += 1;
+                entry.accumulate_pause(now);
                 entry.job.state = "cancelled".into();
                 entry.job.paused = false;
                 entry.job.error = msg.to_string();
                 entry.job.ended_at = Some(now);
+                if entry.job.transfer_started_at.is_some() && entry.job.transfer_ended_at.is_none() {
+                    entry.job.transfer_ended_at = Some(now);
+                }
                 entry.job.revision = next_rev;
                 entry.notify.notify_waiters();
                 count += 1;
@@ -406,5 +467,37 @@ mod tests {
         assert_eq!(j1.error, "application closing");
         let j2 = reg.get("j2").unwrap();
         assert_eq!(j2.state, "done");
+    }
+
+    #[test]
+    fn transfer_timing_tracks_caching_bounds_and_excludes_pause_duration() {
+        let reg = DragJobRegistry::new();
+        let queued = reg.add("j-time", "s1", vec!["/a".into()]).unwrap();
+        assert_eq!(queued.transfer_started_at, None);
+        assert_eq!(queued.transfer_ended_at, None);
+        assert_eq!(queued.paused_ms, 0);
+
+        let accepted = reg.update_state("j-time", "accepted", None).unwrap();
+        assert_eq!(accepted.transfer_started_at, None);
+
+        std::thread::sleep(Duration::from_millis(15));
+        let caching = reg.update_state("j-time", "caching", None).unwrap();
+        let started = caching.transfer_started_at.expect("caching sets transfer_started_at");
+        assert!(started >= queued.created_at);
+        assert_eq!(caching.transfer_ended_at, None);
+
+        reg.pause("j-time").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let resumed = reg.resume("j-time").unwrap();
+        assert!(resumed.paused_ms >= 10, "expected paused_ms >= 10, got {}", resumed.paused_ms);
+
+        let delivering = reg.update_state("j-time", "delivering", None).unwrap();
+        let transfer_end = delivering.transfer_ended_at.expect("delivering freezes transfer_ended_at");
+        assert!(transfer_end >= started);
+
+        std::thread::sleep(Duration::from_millis(15));
+        let done = reg.update_state("j-time", "done", None).unwrap();
+        assert_eq!(done.transfer_ended_at, Some(transfer_end));
+        assert!(done.ended_at.unwrap() >= transfer_end);
     }
 }

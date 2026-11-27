@@ -147,8 +147,8 @@ export function putJSON<T>(path: string, body: unknown) {
 }
 
 export function formatBytes(value: number) {
-  if (!value) return ''
-  if (value < 1024) return `${value} B`
+  if (!Number.isFinite(value) || value <= 0) return ''
+  if (value < 1024) return `${Math.round(value)} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
   return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`
