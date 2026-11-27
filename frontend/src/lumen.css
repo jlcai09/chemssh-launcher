@@ -2406,6 +2406,11 @@ body {
   color: var(--lumen-blue);
 }
 
+.lumen-window .terminal-sftp-body {
+  --terminal-sftp-size-col: calc(60px * var(--lumen-ui-scale));
+  --terminal-sftp-time-col: calc(90px * var(--lumen-ui-scale));
+}
+
 .lumen-window .terminal-sftp-columns {
   border-bottom: 0.5px solid rgba(0, 0, 0, 0.08);
 }

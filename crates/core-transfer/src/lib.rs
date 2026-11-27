@@ -7,9 +7,9 @@ pub mod sftp_ops;
 use thiserror::Error;
 
 pub use archive::{
-    build_compress_step, build_extract_step, detect_local_tools, detect_remote_tools,
-    run_local_step, run_remote_step, ArchiveStep, ArchiveTools, FORMAT_SEVEN_ZIP, FORMAT_TAR,
-    FORMAT_TAR_GZ, FORMAT_TAR_XZ, FORMAT_TAR_ZST, FORMAT_ZIP,
+    archive_stem, build_compress_step, build_extract_step, detect_local_tools, detect_remote_tools,
+    next_archive_name, run_local_step, run_remote_step, ArchiveStep, ArchiveTools, ARCHIVE_PREFIX,
+    FORMAT_SEVEN_ZIP, FORMAT_TAR, FORMAT_TAR_GZ, FORMAT_TAR_XZ, FORMAT_TAR_ZST, FORMAT_ZIP,
 };
 pub use local_fs::{
     list_local_dir, local_copy, local_create_file, local_delete, local_home, local_mkdir,
@@ -179,6 +179,60 @@ mod tests {
             ext.pipe_to.as_deref(),
             Some(&["tar", "-xf", "-", "-C", "dest"].map(String::from)[..])
         );
+    }
+
+    #[test]
+    fn next_archive_name_avoids_overwriting_existing_archives() {
+        let single = vec!["notes.txt".to_string()];
+        let multi = vec!["a.txt".to_string(), "b.txt".to_string()];
+
+        assert_eq!(archive_stem(&single), "notes.txt");
+        assert_eq!(archive_stem(&multi), "archive");
+        assert_eq!(archive_stem(&["folder/".to_string()]), "folder");
+
+        // Multi-select uses archive.<format> and appends _new on every collision.
+        let mut taken = std::collections::HashSet::new();
+        let first =
+            next_archive_name(FORMAT_TAR_ZST, &multi, None, |name| taken.contains(name)).unwrap();
+        assert_eq!(first, "archive.tar.zst");
+        taken.insert(first);
+
+        let second =
+            next_archive_name(FORMAT_TAR_ZST, &multi, None, |name| taken.contains(name)).unwrap();
+        assert_eq!(second, "archive_new.tar.zst");
+        taken.insert(second);
+
+        let third =
+            next_archive_name(FORMAT_TAR_ZST, &multi, None, |name| taken.contains(name)).unwrap();
+        assert_eq!(third, "archive_new_new.tar.zst");
+
+        // Explicit archive_name also appends _new before .<format> when taken.
+        let explicit = next_archive_name(
+            FORMAT_TAR_ZST,
+            &multi,
+            Some("archive.tar.zst"),
+            |name| taken.contains(name),
+        )
+        .unwrap();
+        assert_eq!(explicit, "archive_new_new.tar.zst");
+
+        // Single-entry keeps original name and appends _new before .<format> when taken.
+        let mut single_taken = std::collections::HashSet::from(["notes.txt.tar.zst".to_string()]);
+        let single_next = next_archive_name(FORMAT_TAR_ZST, &single, None, |name| {
+            single_taken.contains(name)
+        })
+        .unwrap();
+        assert_eq!(single_next, "notes.txt_new.tar.zst");
+        single_taken.insert(single_next);
+        assert_eq!(
+            next_archive_name(FORMAT_TAR_ZST, &single, None, |name| {
+                single_taken.contains(name)
+            })
+            .unwrap(),
+            "notes.txt_new_new.tar.zst"
+        );
+
+        assert!(next_archive_name("rar", &multi, None, |_| false).is_err());
     }
 
     #[test]

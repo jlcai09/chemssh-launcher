@@ -9,7 +9,7 @@ pub mod ole_windows;
 pub mod platform_stub;
 pub mod trash_windows;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use file_icon::{FileIconData, FileIconService};
@@ -17,15 +17,35 @@ pub use jobs::{is_terminal_state, DragJob, DragJobRegistry, FileProgress};
 pub use trash_windows::move_to_trash;
 
 #[cfg(target_os = "windows")]
-pub use ole_windows::{start_shell_file_drag, start_shell_file_drag_delayed};
+pub use ole_windows::{
+    start_shell_file_drag, start_shell_file_drag_async, start_shell_file_drag_delayed,
+};
 #[cfg(not(target_os = "windows"))]
-pub use platform_stub::{start_shell_file_drag, start_shell_file_drag_delayed};
+pub use platform_stub::{
+    start_shell_file_drag, start_shell_file_drag_async, start_shell_file_drag_delayed,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DragDropOutcome {
     Dropped,
     Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsyncDragEvent {
+    Started,
+    Done { effect: u32 },
+    Cancelled { reason: Option<String> },
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeDragGestureResult {
+    pub outcome: DragDropOutcome,
+    pub pending: bool,
+    pub ok: bool,
+    pub status: String,
 }
 
 #[derive(Debug, Error)]
@@ -80,8 +100,10 @@ mod tests {
             "j1",
             FileProgress {
                 path: "/home/user/a.txt".into(),
+                kind: "file".into(),
                 loaded: 512,
                 total: 1024,
+                state: "caching".into(),
                 done: false,
                 error: String::new(),
             },

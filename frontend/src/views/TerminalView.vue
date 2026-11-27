@@ -626,9 +626,9 @@ const SERVER_HEIGHT_KEY = 'chemssh-launcher.terminal-server-height'
 const SERVER_COLLAPSED_KEY = 'chemssh-launcher.terminal-server-collapsed'
 const SFTP_SYNC_KEY = 'chemssh-launcher.terminal-sftp-sync'
 const SFTP_SORT_KEY = 'chemssh-launcher.terminal-sftp-sort'
-const SIDEBAR_WIDTH_DEFAULT = 224
+const SIDEBAR_WIDTH_DEFAULT = 280
 const SIDEBAR_WIDTH_MIN = 172
-const SIDEBAR_WIDTH_MAX = 560
+const SIDEBAR_WIDTH_MAX = 640
 const SERVER_HEIGHT_DEFAULT = 180
 const SERVER_HEIGHT_MIN = 84
 const SFTP_HEIGHT_MIN = 148
@@ -1434,18 +1434,18 @@ async function runSftpCompress(format: string) {
   const selected = [...sftpSelectedEntries.value]
   if (!tab?.sftp.open || selected.length === 0) return
   const cwd = tab.sftp.loadedPath || tab.sftp.path || '.'
-  const stem = selected.length === 1 ? selected[0].name : 'archive'
-  const archiveName = `${stem}.${format}`
+  const fallbackName = `${selected.length === 1 ? selected[0].name : 'archive'}.${format}`
   try {
     const sessionID = await connectSftp(tab)
-    await postJSON('/api/sftp/compress', {
+    const response = await postJSON<{ archive?: string }>('/api/sftp/compress', {
       session: sessionID,
+      target_directory: cwd,
       cwd,
       format,
-      archive_name: archiveName,
+      paths: selected.map(item => item.path || joinPath(cwd, item.name, 'remote')),
       entries: selected.map(item => item.name)
     })
-    ElMessage.success(t('terminal.sftpCompressed', { name: archiveName }))
+    ElMessage.success(t('terminal.sftpCompressed', { name: response?.archive || fallbackName }))
     await loadSftpPanel(tab, cwd)
   } catch (error) {
     ElMessage.error(errorMessage(error))

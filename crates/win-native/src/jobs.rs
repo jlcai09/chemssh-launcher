@@ -13,8 +13,12 @@ const MAX_HISTORY_JOBS: usize = 50;
 #[serde(rename_all = "camelCase")]
 pub struct FileProgress {
     pub path: String,
+    #[serde(default)]
+    pub kind: String,
     pub loaded: u64,
     pub total: u64,
+    #[serde(default)]
+    pub state: String,
     pub done: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
@@ -258,6 +262,38 @@ impl DragJobRegistry {
             return Ok(snapshot);
         }
         Ok(entry.job.clone())
+    }
+
+    pub fn is_cancelled(&self, id: &str) -> bool {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.jobs.get(id).map(|e| e.job.state == "cancelled"))
+            .unwrap_or(false)
+    }
+
+    pub async fn wait_for_cancel(&self, id: &str) {
+        loop {
+            let notify = {
+                let Ok(guard) = self.inner.lock() else {
+                    return;
+                };
+                let Some(entry) = guard.jobs.get(id) else {
+                    return;
+                };
+                if entry.job.state == "cancelled" {
+                    return;
+                }
+                Arc::clone(&entry.notify)
+            };
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled(id) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     pub async fn wait_if_paused(&self, id: &str) -> Result<(), WinNativeError> {

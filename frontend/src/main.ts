@@ -59,14 +59,19 @@ for (const component of components) {
 
 async function bootstrap() {
   await initLocale()
+  const isTopTauri = isTauri() && window.top === window
+  if (isTopTauri) {
+    // Install native drag bindings & event listeners before mounting views so
+    // SftpView's onMounted subscription immediately sees nativeDragHost().
+    await installTauriNativeDragBridge()
+  }
   app.mount('#app')
   try {
     ;(window as Window & { __chemsshAppReady?: () => void }).__chemsshAppReady?.()
   } catch {
     // The bridge is absent when the UI runs in an ordinary browser.
   }
-  if (isTauri()) {
-    installTauriNativeDragBridge()
+  if (isTopTauri) {
     void invoke('window_ready', { maximize: true }).catch(() => {
       // Rust fallback timer guarantees the window becomes visible.
     })

@@ -122,11 +122,6 @@ function joinTargetPath(dir: string, rel: string, kind: 'local' | 'remote'): str
   return `${dir}${sep}${normalizedRel}`
 }
 
-function defaultArchiveName(entries: string[], format: string): string {
-  const stem = entries.length === 1 && entries[0] ? fileBaseName(entries[0]) : 'archive'
-  return `${stem}.${format}`
-}
-
 function computeArchiveFormats(tools: Record<string, any> | null | undefined): string[] {
   if (!tools) return []
   if (Array.isArray(tools.formats)) return tools.formats
@@ -878,8 +873,7 @@ export function resolveTauriCommand(
     const format = body.format ?? 'tar.gz'
     const entries: string[] =
       body.entries ?? (Array.isArray(body.paths) ? body.paths.map(fileBaseName) : [])
-    const archiveName =
-      body.archive_name ?? body.name ?? defaultArchiveName(entries, format)
+    const archiveName = body.archive_name ?? body.name ?? null
     return {
       command: 'local_compress',
       args: { cwd, format, archiveName, entries },
@@ -1051,8 +1045,7 @@ export function resolveTauriCommand(
     const format = body.format ?? 'tar.gz'
     const entries: string[] =
       body.entries ?? (Array.isArray(body.paths) ? body.paths.map(fileBaseName) : [])
-    const archiveName =
-      body.archive_name ?? body.name ?? defaultArchiveName(entries, format)
+    const archiveName = body.archive_name ?? body.name ?? null
     return {
       command: 'sftp_compress',
       args: {
@@ -1267,7 +1260,9 @@ export async function invokeApi<T>(path: string, options: RequestInit = {}): Pro
     } as unknown as T
   }
   if (mapped.command === 'local_compress' || mapped.command === 'sftp_compress') {
-    return { archive: mapped.args?.archiveName ?? '' } as unknown as T
+    const archive =
+      typeof rawResult === 'string' && rawResult ? rawResult : (mapped.args?.archiveName ?? '')
+    return { ok: true, archive } as unknown as T
   }
   if (mapped.command === 'get_session_logs') {
     return (Array.isArray(rawResult) ? { lines: rawResult } : rawResult) as T
@@ -1428,8 +1423,15 @@ export function forceCloseApp(): Promise<void> {
  * Installs window-level native drag bindings backed by Tauri v2 commands so
  * `nativeDrag.ts` and existing Vue views work without changing their call sites.
  */
-export function installTauriNativeDragBridge(): void {
+export async function installTauriNativeDragBridge(): Promise<void> {
   if (!isTauriRuntime()) return
+  // Sub-iframes delegate to window.top via nativeDragHost(window); only install
+  // the global bindings and event listener once on the owning top window.
+  try {
+    if (window.top && window.top !== window) return
+  } catch {
+    return
+  }
   // Opens the WebView2 download list, or the Downloads folder where it is unavailable.
   window.chemsshOpenDownloads = async () => {
     await invoke('open_downloads_panel')
@@ -1450,47 +1452,64 @@ export function installTauriNativeDragBridge(): void {
     window.chemsshControlNativeDragJob!(id, 'cancel')
   // Only expose native OLE drag-out on Windows where start_shell_file_drag is supported.
   // On Linux/macOS leave it unset so SFTP uses the built-in HTML5 drag-and-drop flow.
-  void invoke<boolean>('is_native_drag_supported')
-    .then(supported => {
-      if (!supported) return
-      window.chemsshDragOutFiles = async (payloadJson: string) => {
-        const parsed = JSON.parse(payloadJson) as {
-          id: string
-          session: string
-          paths: string[]
-          marker?: string
-          staged_local_paths?: string[]
-        }
-        const channel = new Channel<NativeDragJob>()
-        channel.onmessage = job => {
-          window.dispatchEvent(new CustomEvent('chemssh-native-drag-job', { detail: job }))
-        }
-        try {
-          const outcome = await invoke<string>('start_native_drag_out', {
-            request: {
-              id: parsed.id,
-              session: parsed.session,
-              paths: parsed.paths,
-              marker: parsed.marker ?? '',
-              staged_local_paths: parsed.staged_local_paths ?? [],
-            },
-            onEvent: channel,
-          })
-          window.dispatchEvent(
-            new CustomEvent('chemssh-native-drag-finished', {
-              detail: { id: parsed.id, status: outcome, ok: outcome === 'dropped' },
-            }),
-          )
-        } catch (err) {
-          window.dispatchEvent(
-            new CustomEvent('chemssh-native-drag-finished', {
-              detail: { id: parsed.id, status: String(err), ok: false },
-            }),
-          )
-        }
+  try {
+    const supported = await invoke<boolean>('is_native_drag_supported')
+    if (!supported) return
+    // Persistent job progress channel: Explorer's async background extraction
+    // outlives the start_native_drag_out command, so forward emitted job events.
+    await listen<NativeDragJob>('app://native-drag-job', event => {
+      if (event.payload) {
+        window.dispatchEvent(new CustomEvent('chemssh-native-drag-job', { detail: event.payload }))
       }
-    })
-    .catch(() => undefined)
+    }).catch(() => undefined)
+    window.chemsshDragOutFiles = async (payloadJson: string) => {
+      const parsed = JSON.parse(payloadJson) as {
+        id: string
+        session: string
+        paths: string[]
+        marker?: string
+        staged_local_paths?: string[]
+      }
+      const channel = new Channel<NativeDragJob>()
+      channel.onmessage = job => {
+        window.dispatchEvent(new CustomEvent('chemssh-native-drag-job', { detail: job }))
+      }
+      try {
+        const res = await invoke<{
+          outcome: string
+          pending: boolean
+          ok: boolean
+          status: string
+        }>('start_native_drag_out', {
+          request: {
+            id: parsed.id,
+            session: parsed.session,
+            paths: parsed.paths,
+            marker: parsed.marker ?? '',
+            staged_local_paths: parsed.staged_local_paths ?? [],
+          },
+          onEvent: channel,
+        })
+        window.dispatchEvent(
+          new CustomEvent('chemssh-native-drag-finished', {
+            detail: {
+              id: parsed.id,
+              status: res?.status || res?.outcome || 'done',
+              ok: Boolean(res?.ok),
+            },
+          }),
+        )
+      } catch (err) {
+        window.dispatchEvent(
+          new CustomEvent('chemssh-native-drag-finished', {
+            detail: { id: parsed.id, status: String(err), ok: false },
+          }),
+        )
+      }
+    }
+  } catch {
+    // Native drag unavailable on this host.
+  }
 }
 
 export function tauriFileIconURL(name: string, isDir: boolean, size = 16): string {

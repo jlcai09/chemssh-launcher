@@ -13,8 +13,8 @@ use core_ssh::{shell_quote, HostKeyPolicy, KnownHostsVerifier, SshConnection};
 use core_transfer::{
     build_compress_step, build_extract_step, copy_remote_file_once, delete_remote_path,
     detect_remote_tools, download_file_attempt, is_sftp_transport_error, list_remote_dir,
-    remote_io_err, run_remote_step, sftp_err, upload_file_once, ArchiveTools, FsEntry,
-    RemoteStagedFile, TransferError, TransferProgressStore,
+    next_archive_name, remote_io_err, run_remote_step, sftp_err, upload_file_once, ArchiveTools,
+    FsEntry, RemoteStagedFile, TransferError, TransferProgressStore,
 };
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
@@ -1696,16 +1696,32 @@ pub async fn sftp_compress(
     profile_id: String,
     cwd: String,
     format: String,
-    archive_name: String,
+    archive_name: Option<String>,
     entries: Vec<String>,
-) -> Result<(), String> {
-    let step = build_compress_step(&format, &archive_name, &entries).map_err(|e| e.to_string())?;
+) -> Result<String, String> {
     state
         .sftp
         .run_with_reconnect(&profile_id, TransferError::is_transport_error, |t| {
             let cwd = cwd.clone();
-            let step = step.clone();
-            async move { run_remote_step(&t.connection, &cwd, &step).await }
+            let format = format.clone();
+            let archive_name = archive_name.clone();
+            let entries = entries.clone();
+            async move {
+                let dir_entries = t
+                    .sftp
+                    .read_dir(&cwd)
+                    .await
+                    .map_err(|e| sftp_err(format!("list {cwd}"), e))?;
+                let taken: std::collections::HashSet<String> =
+                    dir_entries.into_iter().map(|e| e.file_name()).collect();
+                let final_name =
+                    next_archive_name(&format, &entries, archive_name.as_deref(), |candidate| {
+                        taken.contains(candidate)
+                    })?;
+                let step = build_compress_step(&format, &final_name, &entries)?;
+                run_remote_step(&t.connection, &cwd, &step).await?;
+                Ok(final_name)
+            }
         })
         .await
         .map_err(SftpOpError::into_command_string)

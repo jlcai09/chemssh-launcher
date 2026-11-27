@@ -13,6 +13,66 @@ pub const FORMAT_TAR: &str = "tar";
 pub const FORMAT_ZIP: &str = "zip";
 pub const FORMAT_SEVEN_ZIP: &str = "7z";
 
+pub const ARCHIVE_PREFIX: &str = "archive";
+const ARCHIVE_NEW_SUFFIX: &str = "_new";
+
+/// Returns the default base name for a generated archive: a single entry keeps
+/// its own name so the result is recognizable, while multiple entries fall back
+/// to `archive`.
+pub fn archive_stem(entries: &[String]) -> &str {
+    if entries.len() == 1 {
+        let trimmed = entries[0].trim_end_matches(['/', '\\']);
+        let base = trimmed
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|s| !s.is_empty());
+        if let Some(name) = base {
+            return name;
+        }
+    }
+    ARCHIVE_PREFIX
+}
+
+/// Computes a non-colliding archive filename `<stem>.<format>`, appending `_new`
+/// before `.<format>` while `is_taken` returns true so existing archives are
+/// never overwritten.
+pub fn next_archive_name<F>(
+    format: &str,
+    entries: &[String],
+    requested_name: Option<&str>,
+    mut is_taken: F,
+) -> Result<String, TransferError>
+where
+    F: FnMut(&str) -> bool,
+{
+    match format {
+        FORMAT_TAR_ZST | FORMAT_TAR_GZ | FORMAT_TAR_XZ | FORMAT_TAR | FORMAT_ZIP
+        | FORMAT_SEVEN_ZIP => {}
+        other => {
+            return Err(TransferError::InvalidInput(format!(
+                "unsupported archive format: {other}"
+            )));
+        }
+    }
+
+    let suffix = format!(".{format}");
+    let mut stem = match requested_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(explicit) => explicit
+            .strip_suffix(&suffix)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(explicit)
+            .to_string(),
+        None => archive_stem(entries).to_string(),
+    };
+
+    let mut candidate = format!("{stem}{suffix}");
+    while is_taken(&candidate) {
+        stem.push_str(ARCHIVE_NEW_SUFFIX);
+        candidate = format!("{stem}{suffix}");
+    }
+    Ok(candidate)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveTools {
     pub tar: bool,

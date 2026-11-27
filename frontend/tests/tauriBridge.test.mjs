@@ -544,3 +544,76 @@ test('maps installer routes to Tauri commands', () => {
     args: { profileId: 'p1', options: {} },
   })
 })
+
+test('maps compress routes without pre-locking colliding names and forwards backend archive name', async () => {
+  assert.deepEqual(
+    resolveTauriCommand('/api/sftp/compress', 'POST', {
+      session: 's1',
+      target_directory: '/home/user/project',
+      paths: ['/home/user/project/a.txt', '/home/user/project/b.txt'],
+      format: 'tar.zst',
+    }),
+    {
+      command: 'sftp_compress',
+      args: {
+        profileId: 's1',
+        cwd: '/home/user/project',
+        format: 'tar.zst',
+        archiveName: null,
+        entries: ['a.txt', 'b.txt'],
+      },
+    },
+  )
+  assert.deepEqual(
+    resolveTauriCommand('/api/local/compress', 'POST', {
+      target_directory: '/home/user/project',
+      paths: ['/home/user/project/a.txt', '/home/user/project/b.txt'],
+      format: 'tar.zst',
+    }),
+    {
+      command: 'local_compress',
+      args: {
+        cwd: '/home/user/project',
+        format: 'tar.zst',
+        archiveName: null,
+        entries: ['a.txt', 'b.txt'],
+      },
+    },
+  )
+
+  const previousWindow = globalThis.window
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke: async command => {
+        if (command === 'sftp_compress') return 'archive_new.tar.zst'
+        if (command === 'local_compress') return 'archive_new_new.tar.zst'
+        return null
+      },
+    },
+  }
+  try {
+    const remoteRes = await invokeApi('/api/sftp/compress', {
+      method: 'POST',
+      body: JSON.stringify({
+        session: 's1',
+        target_directory: '/home/user/project',
+        paths: ['/home/user/project/a.txt', '/home/user/project/b.txt'],
+        format: 'tar.zst',
+      }),
+    })
+    assert.deepEqual(remoteRes, { ok: true, archive: 'archive_new.tar.zst' })
+
+    const localRes = await invokeApi('/api/local/compress', {
+      method: 'POST',
+      body: JSON.stringify({
+        target_directory: '/home/user/project',
+        paths: ['/home/user/project/a.txt', '/home/user/project/b.txt'],
+        format: 'tar.zst',
+      }),
+    })
+    assert.deepEqual(localRes, { ok: true, archive: 'archive_new_new.tar.zst' })
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
